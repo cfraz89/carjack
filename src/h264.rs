@@ -5,19 +5,14 @@ use tokio::time::{Duration, sleep};
 pub async fn encode_h264(node_id: u32) -> Result<()> {
     gst::init().unwrap();
 
-    // Create a pipeline string
-    // pipewiresrc: captures the node
-    // videoconvert: ensures the format matches what the GPU wants
-    // nvh264enc: NVIDIA hardware encoder (change to vaapih264enc for Intel/AMD)
+    // video/x-raw(memory:DMABuf) ! \
     let pipeline_str = format!(
         "pipewiresrc path={} ! \
-        video/x-raw(memory:DMABuf) ! \
         nvh264enc ! \
         h264parse ! \
         mp4mux ! \
         filesink location=output.mp4",
         // "pipewiresrc path={} ! \
-        // video/x-raw(memory:DMABuf) ! \
         //      vaapipostproc ! \
         //      vaapih264enc ! \
         //      h264parse ! \
