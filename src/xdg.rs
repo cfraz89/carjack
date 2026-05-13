@@ -1,14 +1,18 @@
 use ashpd::desktop::{
     PersistMode,
     remote_desktop::{DeviceType, RemoteDesktop, SelectDevicesOptions},
-    screencast::{self, CursorMode, Screencast, SelectSourcesOptions, SourceType},
+    screencast::{self, CursorMode, Screencast, SelectSourcesOptions, SourceType, Stream},
 };
-use eyre::Result;
+use eyre::{Result, eyre};
 use tracing::{debug, info};
 
-pub async fn start_remote_desktop() -> Result<()> {
+pub struct RemoteDesktopStream {
+    pub remote_desktop: RemoteDesktop,
+    pub stream: Stream,
+}
+
+pub async fn start_remote_desktop() -> Result<RemoteDesktopStream> {
     let remote_desktop = RemoteDesktop::new().await?;
-    let screencast = Screencast::new().await?;
     let session = remote_desktop.create_session(Default::default()).await?;
 
     remote_desktop
@@ -20,7 +24,8 @@ pub async fn start_remote_desktop() -> Result<()> {
         )
         .await?;
 
-    screencast
+    Screencast::new()
+        .await?
         .select_sources(
             &session,
             SelectSourcesOptions::default()
@@ -35,5 +40,14 @@ pub async fn start_remote_desktop() -> Result<()> {
 
     debug!(response = ?response, "Response");
 
-    remote_desktop.Ok(())
+    let stream = response
+        .streams()
+        .first()
+        .ok_or(eyre!("No stream in remote desktop response!"))?
+        .clone();
+
+    Ok(RemoteDesktopStream {
+        remote_desktop,
+        stream,
+    })
 }
