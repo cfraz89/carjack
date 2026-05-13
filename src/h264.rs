@@ -12,8 +12,6 @@ pub async fn encode_h264(node_id: u32) -> Result<()> {
     let pipeline_str = format!(
         "pipewiresrc path={} ! \
         video/x-raw(memory:DMABuf) ! \
-        cudaupload ! \
-        cudaconvert ! \
         nvh264enc ! \
         h264parse ! \
         mp4mux ! \
