@@ -23,8 +23,7 @@ pub async fn start_remote_desktop() -> Result<()> {
         .select_sources(
             &session,
             SelectSourcesOptions::default()
-                .set_sources(SourceType::Monitor | SourceType::Virtual | SourceType::Window)
-                .set_persist_mode(PersistMode::Application),
+                .set_sources(SourceType::Monitor | SourceType::Virtual | SourceType::Window),
         )
         .await?;
 
