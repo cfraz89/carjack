@@ -10,7 +10,7 @@ pub async fn encode_h264(node_id: u32) -> Result<()> {
     // videoconvert: ensures the format matches what the GPU wants
     // nvh264enc: NVIDIA hardware encoder (change to vaapih264enc for Intel/AMD)
     let pipeline_str = format!(
-        "pipewiresrc path={} ! nvvideoconvert ! nvh264enc ! h264parse ! mp4mux ! filesink location=output.mp4",
+        "pipewiresrc path={} ! nvh264enc ! h264parse ! mp4mux ! filesink location=output.mp4",
         // "pipewiresrc path={} ! vaapipostproc ! vaapih264enc ! h264parse ! mp4mux ! filesink location=output.mp4",
         node_id
     );
