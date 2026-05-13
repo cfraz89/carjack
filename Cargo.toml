@@ -1,0 +1,12 @@
+[workspace]
+
+[workspace.package]
+edition = "2024"
+
+[package]
+name = "carjack"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+libcarjack = { path = "libcarjack" }
