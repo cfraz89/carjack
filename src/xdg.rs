@@ -1,6 +1,6 @@
 use ashpd::desktop::{
     PersistMode,
-    remote_desktop::{DeviceType, RemoteDesktop, SelectDevicesOptions},
+    remote_desktop::{DeviceType, RemoteDesktop, SelectDevicesOptions, StartOptions},
     screencast::{self, CursorMode, Screencast, SelectSourcesOptions, SourceType, Stream},
 };
 use eyre::{Result, eyre};
