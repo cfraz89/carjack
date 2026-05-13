@@ -15,7 +15,8 @@ pub async fn start_remote_desktop() -> Result<()> {
         .select_devices(
             &session,
             SelectDevicesOptions::default()
-                .set_devices(DeviceType::Keyboard | DeviceType::Pointer | DeviceType::Touchscreen),
+                .set_devices(DeviceType::Keyboard | DeviceType::Touchscreen)
+                .set_persist_mode(PersistMode::Application),
         )
         .await?;
 
@@ -34,5 +35,5 @@ pub async fn start_remote_desktop() -> Result<()> {
 
     debug!(response = ?response, "Response");
 
-    Ok(())
+    remote_desktop.Ok(())
 }
