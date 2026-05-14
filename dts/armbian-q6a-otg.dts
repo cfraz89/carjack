@@ -1,0 +1,28 @@
+/dts-v1/;
+/plugin/;
+
+/* 1. Tell the controller it's a dual-role device */
+&usb_1 {
+    dr_mode = "otg";
+    usb-role-switch;
+};
+
+/* 2. Re-point the connector to allow switching */
+&usb3_con {
+    /* Force usb-c compatibility to enable soft role switching
+    compatible = "usb-c-connector";
+    /* Make sure we don't accidentally feed power to our head unit *
+    /delete-property/ vbus-supply;
+};
+
+/* 3. The Core Logic (DWC3) */
+&usb_1_dwc3 {
+    dr_mode = "otg";
+    usb-role-switch;
+    role-switch-default-mode = "host";
+    /* Disable usb power saving for connection stability */
+    snps,dis_u2_susphy_quirk;
+    snps,dis_u3_susphy_quirk;
+    /* Maybe need if we cut the 5V power */
+    /* snps,gadget-keep-connect; */
+};
