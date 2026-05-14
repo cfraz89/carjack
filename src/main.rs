@@ -1,12 +1,10 @@
 use eyre::Result;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 
-use crate::h264::encode_h264;
-
 // use libcarjack::cast;
 //
-mod h264;
-mod xdg;
+mod encode;
+mod portal;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -18,7 +16,7 @@ async fn main() -> Result<()> {
                 .from_env_lossy(),
         )
         .init();
-    let remote = xdg::start_remote_desktop().await?;
-    encode_h264(remote.stream.pipe_wire_node_id()).await?;
+    let remote = portal::start_remote_desktop().await?;
+    encode::encode_h264(remote.stream.pipe_wire_node_id()).await?;
     Ok(())
 }
