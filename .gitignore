@@ -1,2 +1,4 @@
 /target
-/dts/**/build
+/armbian/build
+/armbian/cache
+/armbian/output

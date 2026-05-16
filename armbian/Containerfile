@@ -1,0 +1,11 @@
+FROM ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-resolute-latest
+RUN rm -rf /armbian
+RUN git clone https://github.com/armbian/build /armbian
+WORKDIR /armbian
+COPY userpatches userpatches
+
+ENV BRANCH=current
+ENV KERNEL_GIT=full
+ENV ALLOW_ROOT=yes
+ENV USE_TMPFS=no
+ENV OFFLINE_WORK=yes
