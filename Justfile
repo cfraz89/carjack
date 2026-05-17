@@ -3,17 +3,8 @@ run $GST_DEBUG="GST_CAPS:5,pipewiresrc:5":
 
 armbian-build-kernel board: (armbian-build board "build")
 
-# Useful for generating a patched kernel config
 [working-directory('armbian')]
-armbian-kernel-config board: (armbian-build board "kernel-config")
-    mv output/config/*.config userpatches/
-
-# Useful for generating a kernel or dts patch
-[working-directory('armbian')]
-armbian-kernel-patch board: (armbian-build board "kernel-patch")
-
-[working-directory('armbian')]
-armbian-build board command: chown-armbian-build-volumes build-armbian-container
+armbian-build board command: _setup-armbian-build-dirs chown-armbian-build-volumes build-armbian-container
     #!/usr/bin/env sh
     uid=`id -u`
     gid=`id -g`
@@ -34,6 +25,12 @@ clean-armbian-build:
     sudo rm -rf cache/*
     sudo rm -rf tmp/*
 
+[working-directory('armbian')]
+_setup-armbian-build-dirs:
+    mkdir -p output
+    mkdir -p cache
+    mkdir -p tmp
+
 # [working-directory('armbian')]
 # armbian-build board command:
 #     if [ ! -d "./build" ]; then echo "Cloning armbian build system"; git clone https://github.com/armbian/build; fi
@@ -45,3 +42,6 @@ clean-armbian-build:
 [working-directory('armbian')]
 build-armbian-container:
     podman build -t armbian-build-carjack .
+
+copy-kernel-to-fishball:
+    scp armbian/output/debs/* fishball:/home/fishball/
