@@ -5,6 +5,7 @@ WORKDIR /armbian
 COPY userpatches userpatches
 
 ENV BRANCH=current
+#The dragon dts isn't in the shallow checkout
 ENV KERNEL_GIT=full
 ENV ALLOW_ROOT=yes
 ENV USE_TMPFS=no
