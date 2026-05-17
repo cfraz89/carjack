@@ -13,8 +13,26 @@ armbian-kernel-config board: (armbian-build board "kernel-config")
 armbian-kernel-patch board: (armbian-build board "kernel-patch")
 
 [working-directory('armbian')]
-armbian-build board command: build-armbian-container
-    podman run --rm -it -v ./output:/armbian/output:z -v ./cache:/armbian/cache:z armbian-build-carjack ./compile.sh BOARD={{ board }} {{ command }}
+armbian-build board command: chown-armbian-build-volumes build-armbian-container
+    #!/usr/bin/env sh
+    uid=`id -u`
+    gid=`id -g`
+    tmpdir="$PWD"/tmp
+    sudo mount -t tmpfs -o size=12G,mode=0777,uid="$uid",gid="$gid" tmpfs "$tmpdir"
+    podman run --rm -it -v ./output:/armbian/output:z -v ./cache:/armbian/cache:z -v ./tmp/:/armbian/.tmp:z armbian-build-carjack ./compile.sh BOARD={{ board }} {{ command }}
+    sudo umount $tmpdir
+
+[working-directory('armbian')]
+chown-armbian-build-volumes:
+    sudo --preserve-env chown -R $USER:$USER output
+    sudo --preserve-env chown -R $USER:$USER cache
+    sudo --preserve-env chown -R $USER:$USER tmp
+
+[working-directory('armbian')]
+clean-armbian-build:
+    sudo rm -rf output/*
+    sudo rm -rf cache/*
+    sudo rm -rf tmp/*
 
 # [working-directory('armbian')]
 # armbian-build board command:
