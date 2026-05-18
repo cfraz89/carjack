@@ -37,6 +37,7 @@ _setup-armbian-build-dirs:
     mkdir -p cache
     mkdir -p tmp
 
+[working-directory('armbian')]
 _build-armbian-container:
     podman build -t armbian-build-carjack .
 
@@ -45,5 +46,6 @@ fetch-armbian-build:
     echo "Cloning armbian build system"
     git clone https://github.com/armbian/build
 
+[working-directory('armbian')]
 copy-kernel-to-fishball:
-    scp armbian/output/debs/* fishball:/home/fishball/
+    scp output/debs/* fishball:/home/fishball/
