@@ -1,17 +1,23 @@
 run $GST_DEBUG="GST_CAPS:5,pipewiresrc:5":
     cargo run
 
-armbian-build-kernel board: (armbian-build board "build")
+[arg('board', pattern='radxa-dragon-q6a')]
+[arg('command', pattern='kernel|kernel-config|kernel-patch|dts-check|kernel-dtb')]
+[working-directory('armbian')]
+armbian-build board command: chown-armbian-build-volumes _mount_armbian_tmpfs _build-armbian-container
+    podman run --rm -it -v ./output:/armbian/output:z -v ./cache:/armbian/cache:z -v ./tmp/:/armbian/.tmp:z armbian-build-carjack ./compile.sh BOARD={{ board }} BRANCH=edge KERNEL_GIT=full {{ command }}
 
 [working-directory('armbian')]
-armbian-build board command: _setup-armbian-build-dirs chown-armbian-build-volumes build-armbian-container
-    #!/usr/bin/env sh
+armbian-shell: chown-armbian-build-volumes _mount_armbian_tmpfs _build-armbian-container
+    podman run --rm -it -v ./output:/armbian/output:z -v ./cache:/armbian/cache:z -v ./tmp/:/armbian/.tmp:z armbian-build-carjack /bin/bash
+
+[script]
+[working-directory('armbian')]
+_mount_armbian_tmpfs:
     uid=`id -u`
     gid=`id -g`
     tmpdir="$PWD"/tmp
     sudo mount -t tmpfs -o size=12G,mode=0777,uid="$uid",gid="$gid" tmpfs "$tmpdir"
-    podman run --rm -it -v ./output:/armbian/output:z -v ./cache:/armbian/cache:z -v ./tmp/:/armbian/.tmp:z armbian-build-carjack ./compile.sh BOARD={{ board }} {{ command }}
-    sudo umount $tmpdir
 
 [working-directory('armbian')]
 chown-armbian-build-volumes:
@@ -31,17 +37,13 @@ _setup-armbian-build-dirs:
     mkdir -p cache
     mkdir -p tmp
 
-# [working-directory('armbian')]
-# armbian-build board command:
-#     if [ ! -d "./build" ]; then echo "Cloning armbian build system"; git clone https://github.com/armbian/build; fi
-#     ln -sf  userpatches build/userpatches
-#     # won't work in podman, so do beforehand
-#     sudo losetup -f
-#     build/compile.sh BOARD={{ board }} {{ command }}
+_build-armbian-container:
+    podman build -t armbian-build-carjack .
 
 [working-directory('armbian')]
-build-armbian-container:
-    podman build -t armbian-build-carjack .
+fetch-armbian-build:
+    echo "Cloning armbian build system"
+    git clone https://github.com/armbian/build
 
 copy-kernel-to-fishball:
     scp armbian/output/debs/* fishball:/home/fishball/
