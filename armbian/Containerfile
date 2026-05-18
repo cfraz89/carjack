@@ -1,4 +1,5 @@
 FROM ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-resolute-latest
+RUN apt-get install -y python3-setuptools
 RUN rm -rf /armbian
 RUN git clone https://github.com/cfraz89/armbian-build /armbian
 WORKDIR /armbian
