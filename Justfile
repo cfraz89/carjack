@@ -41,13 +41,19 @@ _setup-armbian-build-dirs:
     mkdir -p tmp
 
 [working-directory('armbian')]
-_build-armbian-container:
+_build-armbian-container: _fetch-armbian-build
     podman build -t armbian-build-carjack .
 
+[script]
 [working-directory('armbian')]
-fetch-armbian-build:
-    echo "Cloning armbian build system"
-    git clone https://github.com/armbian/build
+_fetch-armbian-build:
+    if [ -d "./build" ]; then
+        echo "Updating armbian build system"
+        cd build && git pull
+    else
+        echo "Cloning armbian build system"
+        git clone https://github.com/cfraz9/build
+    fi
 
 [working-directory('armbian')]
 install-kernel-on-fishball:
