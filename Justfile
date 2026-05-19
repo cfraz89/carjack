@@ -52,7 +52,7 @@ _fetch-armbian-build:
         cd build && git pull
     else
         echo "Cloning armbian build system"
-        git clone git@github.com:cfraz89/armbian-build.git
+        git clone git@github.com:cfraz89/armbian-build.git build
     fi
 
 [working-directory('armbian')]
