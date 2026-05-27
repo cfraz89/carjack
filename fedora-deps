@@ -1,0 +1,1 @@
+sudo dnf install gstreamer1-devel pipewire-gstreamer
