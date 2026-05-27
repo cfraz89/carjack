@@ -1,10 +1,12 @@
 use eyre::Result;
+use tracing::debug;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 
-// use libcarjack::cast;
-//
+use crate::usb::register_gadget;
+
 mod encode;
 mod portal;
+mod usb;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -16,6 +18,10 @@ async fn main() -> Result<()> {
                 .from_env_lossy(),
         )
         .init();
+
+    let gadget = register_gadget()?;
+    debug!(?gadget);
+
     let remote = portal::start_remote_desktop().await?;
     encode::encode_h264(remote.stream.pipe_wire_node_id()).await?;
     Ok(())
