@@ -1,41 +1,47 @@
 podman_run_armbian := "podman run --rm -it -v ~/.gitconfig:/armbian/.gitconfig:z -v ./output:/armbian/output:z -v ./cache:/armbian/cache:z -v ./tmp/:/armbian/.tmp:z armbian-build-carjack"
 
+# Run armbian's compile command
 [arg('board', pattern='radxa-dragon-q6a')]
 [arg('command', pattern='kernel|kernel-config|kernel-patch|dts-check|kernel-dtb')]
-armbian-build board command: chown-armbian-build-volumes _mount_armbian_tmpfs _build-armbian-container
+compile board command: chown-build-volumes mount-tmpfs build-container
     rm -rf output/*
     {{ podman_run_armbian }} ./compile.sh BOARD={{ board }} BRANCH=edge KERNEL_GIT=full {{ command }}
 
-armbian-shell: chown-armbian-build-volumes _mount_armbian_tmpfs _build-armbian-container
+shell: chown-build-volumes mount-tmpfs build-container
     {{ podman_run_armbian }} /bin/bash
 
+[private]
 [script]
-_mount_armbian_tmpfs:
+mount-tmpfs:
     uid=`id -u`
     gid=`id -g`
     tmpdir="$PWD"/tmp
     sudo mount -t tmpfs -o size=12G,mode=0777,uid="$uid",gid="$gid" tmpfs "$tmpdir"
 
-chown-armbian-build-volumes:
+[private]
+chown-build-volumes:
     sudo --preserve-env chown -R $USER:$USER output
     sudo --preserve-env chown -R $USER:$USER cache
     sudo --preserve-env chown -R $USER:$USER tmp
 
-clean-armbian-build: chown-armbian-build-volumes
+clean: chown-build-volumes
     rm -rf output/*
     rm -rf cache/*
     rm -rf tmp/*
 
-_setup-armbian-build-dirs:
+[private]
+setup-build-dirs:
     mkdir -p output
     mkdir -p cache
     mkdir -p tmp
 
-_build-armbian-container: _fetch-armbian-build
+[private]
+build-container: fetch-build
     podman build -t armbian-build-carjack .
 
+[private]
 [script]
-_fetch-armbian-build:
+fetch-build:
     if [ -d "./build" ]; then
         echo "Updating armbian build system"
         cd build && git pull
