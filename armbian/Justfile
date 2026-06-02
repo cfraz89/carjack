@@ -7,7 +7,8 @@ compile board command: chown-build-volumes mount-tmpfs build-container
     rm -rf output/*
     {{ podman_run_armbian }} ./compile.sh BOARD={{ board }} BRANCH=edge KERNEL_GIT=full {{ command }}
 
-shell: chown-build-volumes mount-tmpfs build-container
+# Launch a shell in the armbian build container
+build-container-shell: chown-build-volumes mount-tmpfs build-container
     {{ podman_run_armbian }} /bin/bash
 
 [private]
@@ -24,6 +25,7 @@ chown-build-volumes:
     sudo --preserve-env chown -R $USER:$USER cache
     sudo --preserve-env chown -R $USER:$USER tmp
 
+# Remove build directories
 clean: chown-build-volumes
     rm -rf output/*
     rm -rf cache/*
@@ -50,6 +52,7 @@ fetch-build:
         git clone git@github.com:cfraz89/armbian-build.git build
     fi
 
+# Rsync built kernel to fishball and install
 install-kernel-on-fishball:
     rsync -ravzP --delete output/debs fishball:~
     ssh root@fishball "dpkg -i /home/fishball/debs/*.deb"
