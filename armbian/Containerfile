@@ -1,11 +1,10 @@
 FROM ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-resolute-latest
-RUN apt-get install -y python3-setuptools
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y python3-setuptools
 RUN rm -rf /armbian
 COPY build /armbian
 WORKDIR /armbian
 COPY userpatches userpatches
 
-#The dragon dts isn't in the shallow checkout
 ENV ALLOW_ROOT=yes
 ENV USE_TMPFS=no
 ENV PREFER_DOCKER=no

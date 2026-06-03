@@ -1,23 +1,49 @@
-podman_run_armbian := "podman run --rm -it -v ~/.gitconfig:/armbian/.gitconfig:z -v ./output:/armbian/output:z -v ./cache:/armbian/cache:z -v ./tmp/:/armbian/.tmp:z armbian-build-carjack"
+board := "radxa-dragon-q6a"
+branch := "edge"
+kernel_git := "full"
+build_minimal := "yes"
+release := "trixie"
+ufs := "false"
+sector_size := if ufs == "true" { "4096" } else { "512" }
+kernel_configure := "no"
+platform := "linux/amd64"
 
 # Run armbian's compile command
-[arg('board', pattern='radxa-dragon-q6a')]
-[arg('command', pattern='kernel|kernel-config|kernel-patch|dts-check|kernel-dtb')]
-compile board command: chown-build-volumes mount-tmpfs build-container
-    rm -rf output/*
-    {{ podman_run_armbian }} ./compile.sh BOARD={{ board }} BRANCH=edge KERNEL_GIT=full {{ command }}
-
-# Launch a shell in the armbian build container
-build-container-shell: chown-build-volumes mount-tmpfs build-container
-    {{ podman_run_armbian }} /bin/bash
+[arg('command', pattern='|kernel|kernel-config|kernel-patch|dts-check|kernel-dtb')]
+compile command="": chown-build-volumes mount-build-fs build-container clean-output (run-armbian-build "./compile.sh" \
+    "BOARD=" + board\
+    "BRANCH=" + branch\
+    "KERNEL_GIT=" + kernel_git\
+    "BUILD_MINIMAL=" + build_minimal\
+    "RELEASE=" + release\
+    "SECTOR_SIZE=" + sector_size\
+    "KERNEL_CONFIGURE=" + kernel_configure\
+    command )
 
 [private]
+run-armbian-build *args:
+    podman run --platform {{platform}} --rm -it \
+        -v ~/.gitconfig:/armbian/.gitconfig:z \
+        -v ./output:/armbian/output:z \
+        -v ./cache:/armbian/cache:z \
+        -v ./tmp/:/armbian/.tmp:z \
+        -v /proc/sys/fs/binfmt_misc:/proc/sys/fs/binfmt_misc:ro \
+        localhost/armbian-build-carjack {{args}}
+
+[private]
+clean-output:
+    rm -rf output/*
+
+# Launch a shell in the armbian build container
+build-container-shell: chown-build-volumes mount-build-fs build-container (run-armbian-build "/bin/bash")
+[private]
 [script]
-mount-tmpfs:
+mount-build-fs:
     uid=`id -u`
     gid=`id -g`
     tmpdir="$PWD"/tmp
     sudo mount -t tmpfs -o size=12G,mode=0777,uid="$uid",gid="$gid" tmpfs "$tmpdir"
+    sudo mount binfmt_misc -t binfmt_misc /proc/sys/fs/binfmt_misc
 
 [private]
 chown-build-volumes:
@@ -26,8 +52,7 @@ chown-build-volumes:
     sudo --preserve-env chown -R $USER:$USER tmp
 
 # Remove build directories
-clean: chown-build-volumes
-    rm -rf output/*
+clean: chown-build-volumes clean-output
     rm -rf cache/*
     rm -rf tmp/*
 
@@ -39,7 +64,7 @@ setup-build-dirs:
 
 [private]
 build-container: fetch-build
-    podman build -t armbian-build-carjack .
+    podman build -t armbian-build-carjack --platform {{platform}} .
 
 [private]
 [script]
