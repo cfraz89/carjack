@@ -7,6 +7,6 @@ WORKDIR /armbian
 COPY userpatches userpatches
 
 ENV ALLOW_ROOT=yes
-# ENV FORCE_USE_RAMDISK=no
-ENV USE_TMPFS=no
 ENV PREFER_DOCKER=no
+# ENV FORCE_USE_RAMDISK=no
+# ENV USE_TMPFS=no
