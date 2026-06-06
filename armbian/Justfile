@@ -3,56 +3,54 @@ branch := "edge"
 kernel_git := "full"
 build_minimal := "yes"
 release := "trixie"
-ufs := "false"
+ufs := "true"
 sector_size := if ufs == "true" { "4096" } else { "512" }
 kernel_configure := "no"
 platform := "linux/amd64"
 
 # Run armbian's compile command
 [arg('command', pattern='|kernel|kernel-config|kernel-patch|dts-check|kernel-dtb')]
-compile command="": chown-build-volumes mount-build-fs build-container clean-output (run-armbian-build "./compile.sh" \
+compile command="": clean-output (run-armbian-build "./compile.sh" \
     "BOARD=" + board\
     "BRANCH=" + branch\
     "KERNEL_GIT=" + kernel_git\
     "BUILD_MINIMAL=" + build_minimal\
     "RELEASE=" + release\
-    "SECTOR_SIZE=" + sector_size\
     "KERNEL_CONFIGURE=" + kernel_configure\
+    "SECTOR_SIZE=" + sector_size\
     command )
 
 [private]
-run-armbian-build *args:
-    podman run --platform {{platform}} --rm -it \
+run-armbian-build *args: build-container mount-binfmt-misc
+    sudo podman run \
+        --platform {{platform}} --rm -it \
+        --privileged \
         -v ~/.gitconfig:/armbian/.gitconfig:z \
         -v ./output:/armbian/output:z \
         -v ./cache:/armbian/cache:z \
-        -v ./tmp/:/armbian/.tmp:z \
         -v /proc/sys/fs/binfmt_misc:/proc/sys/fs/binfmt_misc:ro \
+        -v /dev:/dev \
+        --device /dev/loop-control \
+        --device-cgroup-rule='b 7:* rmw' \
         localhost/armbian-build-carjack {{args}}
 
 [private]
 clean-output:
-    rm -rf output/*
+    sudo rm -rf output/*
 
 # Launch a shell in the armbian build container
-build-container-shell: chown-build-volumes mount-build-fs build-container (run-armbian-build "/bin/bash")
-[private]
-[script]
-mount-build-fs:
-    uid=`id -u`
-    gid=`id -g`
-    tmpdir="$PWD"/tmp
-    sudo mount -t tmpfs -o size=12G,mode=0777,uid="$uid",gid="$gid" tmpfs "$tmpdir"
-    sudo mount binfmt_misc -t binfmt_misc /proc/sys/fs/binfmt_misc
-
-[private]
-chown-build-volumes:
-    sudo --preserve-env chown -R $USER:$USER output
-    sudo --preserve-env chown -R $USER:$USER cache
+build-container-shell: (run-armbian-build "/bin/bash")
     sudo --preserve-env chown -R $USER:$USER tmp
 
+[script, private]
+mount-binfmt-misc:
+    if ! mountpoint -q /proc/sys/fs/binfmt_misc; then
+        echo "Mounting binfmt_misc filesystem"
+        sudo mount binfmt_misc -t binfmt_misc /proc/sys/fs/binfmt_misc
+    fi
+
 # Remove build directories
-clean: chown-build-volumes clean-output
+clean: clean-output
     rm -rf cache/*
     rm -rf tmp/*
 
@@ -60,14 +58,12 @@ clean: chown-build-volumes clean-output
 setup-build-dirs:
     mkdir -p output
     mkdir -p cache
-    mkdir -p tmp
 
 [private]
 build-container: fetch-build
-    podman build -t armbian-build-carjack --platform {{platform}} .
+    sudo podman build -t armbian-build-carjack --platform {{platform}} .
 
-[private]
-[script]
+[private, script]
 fetch-build:
     if [ -d "./build" ]; then
         echo "Updating armbian build system"
