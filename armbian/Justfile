@@ -1,21 +1,13 @@
-board := "radxa-dragon-q6a"
-branch := "edge"
-kernel_git := "full"
-build_minimal := "yes"
-release := "trixie"
-ufs := "true"
-sector_size := if ufs == "true" { "4096" } else { "512" }
-kernel_configure := "no"
-platform := "linux/amd64"
+config := "q6a-carjack"
 
 # Run armbian's compile command
 [arg('command', pattern='|kernel|kernel-config|kernel-patch|dts-check|kernel-dtb')]
-compile command="": (run-armbian-build "./compile.sh" "BOARD=" + board "BRANCH=" + branch "KERNEL_GIT=" + kernel_git "BUILD_MINIMAL=" + build_minimal "RELEASE=" + release "KERNEL_CONFIGURE=" + kernel_configure "SECTOR_SIZE=" + sector_size command)
+compile command="": (run-armbian-build "./compile.sh" + " " + config + " " + command)
 
 [private]
 run-armbian-build *args: build-container mount-binfmt-misc
     sudo podman run \
-        --platform {{ platform }} --rm -it \
+        --rm -it \
         --privileged \
         -v ~/.gitconfig:/armbian/.gitconfig:z \
         -v ./output:/armbian/output:z \
@@ -52,7 +44,7 @@ setup-build-dirs:
 
 [private]
 build-container: fetch-build
-    sudo podman build -t armbian-build-carjack --platform {{ platform }} .
+    sudo podman build -t armbian-build-carjack .
 
 [private]
 [script]
@@ -62,7 +54,7 @@ fetch-build:
         cd build && git pull
     else
         echo "Cloning armbian build system"
-        git clone git@github.com:cfraz89/armbian-build.git build
+        git clone git@github.com:armbian/build.git build
     fi
 
 # Rsync built kernel to fishball and install
