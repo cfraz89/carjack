@@ -1,8 +1,11 @@
-config := "q6a-carjack"
+board := "radxa-dragon-q6a"
+config := "carjack"
+ufs := "yes"
+ufs_sector_size_switch := if ufs == "yes" { "SECTOR_SIZE=4096" } else { "" }
 
 # Run armbian's compile command
 [arg('command', pattern='|kernel|kernel-config|kernel-patch|dts-check|kernel-dtb')]
-compile command="": (run-armbian-build "./compile.sh" + " " + config + " " + command)
+compile command="": (run-armbian-build "./compile.sh " + "BOARD=" + board + " " + ufs_sector_size_switch + " " + config + " " + command)
 
 [private]
 run-armbian-build *args: build-container mount-binfmt-misc
