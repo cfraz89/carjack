@@ -598,6 +598,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libcarjack"
 version = "0.1.0"
+dependencies = [
+ "usb",
+]
 
 [[package]]
 name = "linux-raw-sys"
@@ -1300,6 +1303,12 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "usb"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1351842cf47c13bf2169636357eea4ebf831dc29485fbe64963583b8e74b59a9"
 
 [[package]]
 name = "usb-gadget"

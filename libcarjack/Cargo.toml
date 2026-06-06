@@ -6,3 +6,6 @@ edition.workspace = true
 [lib]
 name = "libcarjack"
 path = "src/lib.rs"
+
+[dependencies]
+usb = "0.3.0"
