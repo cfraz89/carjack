@@ -10,20 +10,12 @@ platform := "linux/amd64"
 
 # Run armbian's compile command
 [arg('command', pattern='|kernel|kernel-config|kernel-patch|dts-check|kernel-dtb')]
-compile command="": clean-output (run-armbian-build "./compile.sh" \
-    "BOARD=" + board\
-    "BRANCH=" + branch\
-    "KERNEL_GIT=" + kernel_git\
-    "BUILD_MINIMAL=" + build_minimal\
-    "RELEASE=" + release\
-    "KERNEL_CONFIGURE=" + kernel_configure\
-    "SECTOR_SIZE=" + sector_size\
-    command )
+compile command="": (run-armbian-build "./compile.sh" "BOARD=" + board "BRANCH=" + branch "KERNEL_GIT=" + kernel_git "BUILD_MINIMAL=" + build_minimal "RELEASE=" + release "KERNEL_CONFIGURE=" + kernel_configure "SECTOR_SIZE=" + sector_size command)
 
 [private]
 run-armbian-build *args: build-container mount-binfmt-misc
     sudo podman run \
-        --platform {{platform}} --rm -it \
+        --platform {{ platform }} --rm -it \
         --privileged \
         -v ~/.gitconfig:/armbian/.gitconfig:z \
         -v ./output:/armbian/output:z \
@@ -32,7 +24,7 @@ run-armbian-build *args: build-container mount-binfmt-misc
         -v /dev:/dev \
         --device /dev/loop-control \
         --device-cgroup-rule='b 7:* rmw' \
-        localhost/armbian-build-carjack {{args}}
+        localhost/armbian-build-carjack {{ args }}
 
 [private]
 clean-output:
@@ -40,9 +32,9 @@ clean-output:
 
 # Launch a shell in the armbian build container
 build-container-shell: (run-armbian-build "/bin/bash")
-    sudo --preserve-env chown -R $USER:$USER tmp
 
-[script, private]
+[private]
+[script]
 mount-binfmt-misc:
     if ! mountpoint -q /proc/sys/fs/binfmt_misc; then
         echo "Mounting binfmt_misc filesystem"
@@ -51,8 +43,7 @@ mount-binfmt-misc:
 
 # Remove build directories
 clean: clean-output
-    rm -rf cache/*
-    rm -rf tmp/*
+    sudo rm -rf cache/*
 
 [private]
 setup-build-dirs:
@@ -61,9 +52,10 @@ setup-build-dirs:
 
 [private]
 build-container: fetch-build
-    sudo podman build -t armbian-build-carjack --platform {{platform}} .
+    sudo podman build -t armbian-build-carjack --platform {{ platform }} .
 
-[private, script]
+[private]
+[script]
 fetch-build:
     if [ -d "./build" ]; then
         echo "Updating armbian build system"
