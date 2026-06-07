@@ -1,5 +1,9 @@
 use color_eyre::Result;
 use eyre::eyre;
+use libcarjack::{
+    carplay_peripheral::CARJACK_PERIPHERAL,
+    usb_schema::{self, AudioStreamingEndpoints, DeviceClass},
+};
 use tracing::debug;
 use usb_gadget::{
     Class, Config, Gadget, Id, RegGadget, Strings,
@@ -9,10 +13,42 @@ use usb_gadget::{
             Custom, Endpoint, EndpointDirection, EndpointReceiver, EndpointSender, Interface,
             TransferType,
         },
+        hid::Hid,
         net::{Net, NetClass},
     },
     udcs,
 };
+
+fn into_gadget_class(device_class: DeviceClass) -> Class {
+    Class::new(
+        device_class.class,
+        device_class.sub_class,
+        device_class.protocol,
+    )
+}
+
+fn into_gadget_interface<E>(interface: usb_schema::Interface<E>) -> Interface {
+    Interface::new(
+        schema_to_gadget_class(interface.class),
+        interface.description,
+    )
+}
+
+fn into_gadget_id(id: usb_schema::Id) -> Id {
+    Id::new(id.vendor_id, id.product_id)
+}
+
+fn into_gadget_strings(strings: usb_schema::Strings) -> Strings {
+    Strings::new(strings.manufacturer, strings.product, strings.serial_number)
+}
+
+fn into_gadget_configuration<E>(configuration: usb_schema::Configuration<E>) -> Config {
+    let mut config = Config::new(configuration.description);
+    config.max_power = configuration.max_power;
+    config.self_powered = configuration.attributes.self_powered;
+    config.remote_wakeup = configuration.attributes.remote_wakeup;
+    config
+}
 
 /// USB class of PTP:
 /// bInterfaceClass         6 Imaging
@@ -23,22 +59,40 @@ const PTP_PIMA_15470: Class = Class::new(0x06, 0x01, 0x01);
 /// Register this system as a carplay-compatible usb device
 pub fn register_gadget() -> Result<RegGadget> {
     let ptp_fn = PtpFunction::new();
-    let ncm_fn = Net::new(NetClass::Ncm);
 
     let gadget = Gadget::new(
-        Class::INTERFACE_SPECIFIC,
-        Id::new(0x05ac, 0x12a8),
-        Strings::new("Apple Inc.", "iPhone", "989cad3f25b0"),
+        into_gadget_class(CARJACK_PERIPHERAL.device_class),
+        into_gadget_id(CARJACK_PERIPHERAL.id),
+        into_gadget_strings(CARJACK_PERIPHERAL.strings),
     )
-    .with_config(Config::new("PTP + Apple Mobile Device").with_function(ptp_fn.handle.clone()))
     .with_config(
-        Config::new("PTP + Apple Mobile Device + Apple USB Ethernet")
-            .with_function(ptp_fn.handle)
-            .with_function(ncm_fn.1),
+        into_gadget_configuration(CARJACK_PERIPHERAL.configurations.ptp)
+            .with_function(ptp_fn.handle.clone()),
+    )
+    .with_config(
+        into_gadget_configuration(CARJACK_PERIPHERAL.configurations.ipod_usb)
+            .with_function(AudioControlFunction::new().handle)
+            .with_function(AudioStreamingFunction::new().handle)
+            .with_function(HidFunction::new().handle),
+    )
+    .with_config(
+        into_gadget_configuration(
+            CARJACK_PERIPHERAL
+                .configurations
+                .ptp_and_apple_mobile_device,
+        )
+        .with_function(ptp_fn.handle.clone()),
+    )
+    .with_config(
+        into_gadget_configuration(
+            CARJACK_PERIPHERAL
+                .configurations
+                .ptp_and_apple_mobile_device_and_apple_usb_ethernet,
+        )
+        .with_function(ptp_fn.handle.clone()),
     );
 
     let udcs = udcs()?;
-    debug!(?udcs);
 
     let reg_gadget = gadget.bind(udcs.first().ok_or(eyre!("No udcs on system"))?)?;
 
@@ -74,5 +128,66 @@ impl PtpFunction {
             function,
             handle,
         }
+    }
+}
+
+struct AudioControlFunction {
+    pub function: Custom,
+    pub handle: Handle,
+}
+
+impl AudioControlFunction {
+    fn new() -> Self {
+        let (function, handle) = Custom::builder()
+            .with_interface(into_gadget_interface(
+                CARJACK_PERIPHERAL
+                    .configurations
+                    .ipod_usb
+                    .interfaces
+                    .audio_control,
+            ))
+            .build();
+        AudioControlFunction { function, handle }
+    }
+}
+
+struct AudioStreamingFunction {
+    pub function: Custom,
+    pub handle: Handle,
+}
+
+impl AudioStreamingFunction {
+    fn new() -> Self {
+        let (function, handle) = Custom::builder()
+            .with_interface(into_gadget_interface(
+                CARJACK_PERIPHERAL
+                    .configurations
+                    .ipod_usb
+                    .interfaces
+                    .audio_streaming,
+            ))
+            .build();
+        AudioStreamingFunction { function, handle }
+    }
+}
+
+struct HidFunction {
+    pub function: Hid,
+    pub handle: Handle,
+}
+
+impl HidFunction {
+    fn new() -> Self {
+        let hid_class = CARJACK_PERIPHERAL
+            .configurations
+            .ipod_usb
+            .interfaces
+            .hid
+            .class;
+        let mut builder = Hid::builder();
+        builder.sub_class = hid_class.sub_class;
+        builder.protocol = hid_class.protocol;
+        let (function, handle) = builder.build();
+        HidFunction { function, handle }
     }
 }

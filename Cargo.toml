@@ -10,6 +10,7 @@ edition.workspace = true
 
 [dependencies]
 ashpd = {version = "0.13.10", features = ["remote_desktop", "screencast"]  }
+bluer = { version = "0.17.4", features = ["rfcomm"] }
 color-eyre = "0.6.5"
 eyre = "0.6.12"
 gst = { package = "gstreamer", version = "0.25.2" }
