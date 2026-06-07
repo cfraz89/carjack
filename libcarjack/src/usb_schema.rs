@@ -1,7 +1,17 @@
-pub struct DeviceClass {
+pub struct Class {
     pub class: u8,
     pub sub_class: u8,
     pub protocol: u8,
+}
+
+impl Class {
+    pub const fn new(class: u8, sub_class: u8, protocol: u8) -> Self {
+        Class {
+            class,
+            sub_class,
+            protocol,
+        }
+    }
 }
 
 pub struct Id {
@@ -17,14 +27,27 @@ pub struct Strings {
 
 pub struct Configuration<I> {
     pub description: &'static str,
-    pub attributes: u8,
+    pub attributes: ConfigurationAttributes,
+    pub max_power: u16, // in mA
     pub interfaces: I,
 }
 
+pub struct ConfigurationAttributes {
+    pub self_powered: bool,
+    pub remote_wakeup: bool,
+}
+
+impl ConfigurationAttributes {
+    pub const fn new(self_powered: bool, remote_wakeup: bool) -> Self {
+        ConfigurationAttributes {
+            self_powered,
+            remote_wakeup,
+        }
+    }
+}
+
 pub struct Interface<E> {
-    pub class: u8,
-    pub sub_class: u8,
-    pub protocol: u8,
+    pub class: Class,
     pub description: Option<&'static str>,
     pub endpoints: E,
     //Maybe todo, specific interface descriptors, eg AudioControl, AudioStreaming, etc
@@ -122,7 +145,7 @@ pub struct CarplayConfigurations {
     pub ptp_and_apple_mobile_device_and_apple_usb_ethernet: Configuration<PtpInterfaces>,
 }
 pub struct CarplayPeripheral {
-    pub device_class: DeviceClass,
+    pub device_class: Class,
     pub id: Id,
     pub strings: Strings,
     pub configurations: CarplayConfigurations,
