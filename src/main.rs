@@ -7,6 +7,7 @@ use crate::usb::register_gadget;
 mod encode;
 mod portal;
 mod usb;
+mod wireless;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,7 +21,7 @@ async fn main() -> Result<()> {
         .init();
 
     let gadget = register_gadget()?;
-    debug!(?gadget);
+    debug!(?gadget.);
 
     let remote = portal::start_remote_desktop().await?;
     encode::encode_h264(remote.stream.pipe_wire_node_id()).await?;
