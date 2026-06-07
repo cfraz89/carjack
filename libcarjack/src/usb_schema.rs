@@ -15,25 +15,47 @@ pub struct Strings {
     pub serial_number: &'static str,
 }
 
-pub struct Configuration {
+pub struct Configuration<I> {
     pub description: &'static str,
     pub attributes: u8,
-    pub interfaces: Vec<Interface>,
+    pub interfaces: I,
 }
 
-pub struct Interface {
+pub struct Interface<E> {
     pub class: u8,
     pub sub_class: u8,
     pub protocol: u8,
-    pub endpoints: Vec<Endpoint>,
+    pub description: Option<&'static str>,
+    pub endpoints: E,
+    //Maybe todo, specific interface descriptors, eg AudioControl, AudioStreaming, etc
 }
 
 pub struct Endpoint {
-    pub number: u8,
-    pub direction: EndpointDirection,
-    pub attributes: EndpointType,
+    pub address: EndpointAddress,
+    pub endpoint_type: EndpointType,
     pub max_packet_size: u16,
     pub interval: u8,
+}
+
+pub struct EndpointAddress {
+    pub number: u8,
+    pub direction: EndpointDirection,
+}
+
+impl EndpointAddress {
+    pub const fn new(number: u8, direction: EndpointDirection) -> Self {
+        EndpointAddress { number, direction }
+    }
+}
+
+impl Into<u8> for EndpointAddress {
+    fn into(self) -> u8 {
+        let direction_bit = match self.direction {
+            EndpointDirection::Out => 0,
+            EndpointDirection::In => 0x80,
+        };
+        direction_bit | (self.number & 0x0F)
+    }
 }
 
 pub enum EndpointType {
@@ -69,11 +91,35 @@ pub enum TransferType {
     Interrupt,
 }
 
+pub struct PtpInterfaces {
+    pub ptp: Interface<PtpEndpoints>,
+}
+
+pub struct IpodUsbInterfaces {
+    pub audio_control: Interface<()>,
+    pub audio_streaming: Interface<AudioStreamingEndpoints>,
+    pub hid: Interface<HidEndpoints>,
+}
+
+pub struct PtpEndpoints {
+    pub bulk_out: Endpoint,
+    pub bulk_in: Endpoint,
+    pub int_in: Endpoint,
+}
+
+pub struct AudioStreamingEndpoints {
+    pub iso_in: Endpoint,
+}
+
+pub struct HidEndpoints {
+    pub int_in: Endpoint,
+}
+
 pub struct CarplayConfigurations {
-    pub ptp: Configuration,
-    pub ipod_usb: Configuration,
-    pub ptp_and_apple_mobile_device: Configuration,
-    pub ptp_and_apple_mobile_device_and_apple_usb_ethernet: Configuration,
+    pub ptp: Configuration<PtpInterfaces>,
+    pub ipod_usb: Configuration<IpodUsbInterfaces>,
+    pub ptp_and_apple_mobile_device: Configuration<PtpInterfaces>,
+    pub ptp_and_apple_mobile_device_and_apple_usb_ethernet: Configuration<PtpInterfaces>,
 }
 pub struct CarplayPeripheral {
     pub device_class: DeviceClass,
