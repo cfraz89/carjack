@@ -3,3 +3,4 @@
 /armbian/cache
 /armbian/output
 /armbian/tmp
+.env

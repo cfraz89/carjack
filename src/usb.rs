@@ -1,10 +1,6 @@
 use color_eyre::Result;
 use eyre::eyre;
-use libcarjack::{
-    carplay_peripheral::CARJACK_PERIPHERAL,
-    usb_schema::{self, AudioStreamingEndpoints, DeviceClass},
-};
-use tracing::debug;
+use libcarjack::{carplay_peripheral::CARJACK_PERIPHERAL, usb_schema};
 use usb_gadget::{
     Class, Config, Gadget, Id, RegGadget, Strings,
     function::{
@@ -19,7 +15,7 @@ use usb_gadget::{
     udcs,
 };
 
-fn into_gadget_class(device_class: DeviceClass) -> Class {
+fn into_gadget_class(device_class: usb_schema::Class) -> Class {
     Class::new(
         device_class.class,
         device_class.sub_class,
@@ -28,10 +24,7 @@ fn into_gadget_class(device_class: DeviceClass) -> Class {
 }
 
 fn into_gadget_interface<E>(interface: usb_schema::Interface<E>) -> Interface {
-    Interface::new(
-        schema_to_gadget_class(interface.class),
-        interface.description,
-    )
+    Interface::new(into_gadget_class(interface.class), interface.description)
 }
 
 fn into_gadget_id(id: usb_schema::Id) -> Id {
