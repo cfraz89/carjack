@@ -24,10 +24,9 @@ const IAP2_ACCESSORY_UUID: Uuid = Uuid::from_u128(0x00000000decafadedecadeafdeca
 pub async fn wireless_carplay() -> Result<()> {
     let session = Session::new().await?;
     let headless_agent = Agent::default();
-    let _ = session.register_agent(headless_agent).await?;
+    let _agent = session.register_agent(headless_agent).await?;
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
-    adapter.set_discoverable(true).await?;
     // let _ = setup_carplay_profile(&adapter).await?;
     let mut iap_client_handle =
         setup_iap_profile(&session, IAP2_DEVICE_UUID, CARPLAY_DEVICE_UUID, true).await?;
@@ -117,7 +116,9 @@ async fn carplay_connect(device: &Device) -> Result<()> {
         address = ?device.address(),
         "Attempting connection",
     );
+    device.set_trusted(true).await?;
     device.pair().await?;
+    tracing::info!("Device paired");
     device.connect_profile(&CARPLAY_ACCESSORY_UUID).await?;
     Ok(())
 }
