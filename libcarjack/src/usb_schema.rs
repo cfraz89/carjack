@@ -48,7 +48,7 @@ impl ConfigurationAttributes {
 
 pub struct Interface<E> {
     pub class: Class,
-    pub description: Option<&'static str>,
+    pub description: &'static str,
     pub endpoints: E,
     //Maybe todo, specific interface descriptors, eg AudioControl, AudioStreaming, etc
 }

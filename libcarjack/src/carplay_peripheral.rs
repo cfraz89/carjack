@@ -1,8 +1,8 @@
 use crate::usb_schema::{
     AudioStreamingEndpoints, CarplayConfigurations, CarplayPeripheral, Class, Configuration,
-    ConfigurationAttributes, DeviceClass, Endpoint, EndpointAddress, EndpointDirection,
-    EndpointType, HidEndpoints, Id, Interface, IpodUsbInterfaces, PtpEndpoints, PtpInterfaces,
-    Strings, SynchronizationType, UsageType,
+    ConfigurationAttributes, Endpoint, EndpointAddress, EndpointDirection, EndpointType,
+    HidEndpoints, Id, Interface, IpodUsbInterfaces, PtpEndpoints, PtpInterfaces, Strings,
+    SynchronizationType, UsageType,
 };
 
 pub const VENDOR_APPLE: u16 = 0x05ac;
@@ -10,7 +10,7 @@ pub const PRODUCT_IPHONE: u16 = 0x12a8;
 
 pub const CARJACK_PTP_INTERFACES: PtpInterfaces = PtpInterfaces {
     ptp: Interface {
-        description: Some("PTP"),
+        description: "PTP",
         class: Class::new(
             usb::class_code::STILL_IMAGING,
             0x01, /* Still Image Capture */
@@ -63,7 +63,7 @@ pub const CARJACK_PERIPHERAL: CarplayPeripheral = CarplayPeripheral {
             max_power: 500,
             interfaces: IpodUsbInterfaces {
                 audio_control: Interface {
-                    description: None,
+                    description: "",
                     class: Class::new(
                         usb::class_code::AUDIO,
                         0x01, /* Audio Control */
@@ -72,7 +72,7 @@ pub const CARJACK_PERIPHERAL: CarplayPeripheral = CarplayPeripheral {
                     endpoints: (),
                 },
                 audio_streaming: Interface {
-                    description: None,
+                    description: "",
                     class: Class::new(
                         usb::class_code::AUDIO,
                         0x02, /* Audio Streaming */
@@ -91,7 +91,7 @@ pub const CARJACK_PERIPHERAL: CarplayPeripheral = CarplayPeripheral {
                     },
                 },
                 hid: Interface {
-                    description: Some("HID Interface"),
+                    description: "HID Interface",
                     class: Class::new(usb::class_code::HID, 0x00, 0x00),
                     endpoints: HidEndpoints {
                         int_in: Endpoint {

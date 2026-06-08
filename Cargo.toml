@@ -13,9 +13,12 @@ ashpd = {version = "0.13.10", features = ["remote_desktop", "screencast"]  }
 bluer = { version = "0.17.4", features = ["full", "rfcomm"] }
 color-eyre = "0.6.5"
 eyre = "0.6.12"
+futures = "0.3.32"
 gst = { package = "gstreamer", version = "0.25.2" }
+iap2-rs = { git = "https://github.com/usenocturne/iap2-rs.git", version = "0.1.0" }
 libcarjack = { path = "libcarjack" }
 tokio = { version = "1.52.3", features = ["full"] }
+tokio-stream = "0.1.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 usb-gadget = "1.2.0"
