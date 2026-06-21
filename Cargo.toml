@@ -1,4 +1,5 @@
 [workspace]
+members = ["iap2-proto"]
 
 [workspace.package]
 edition = "2024"
@@ -15,7 +16,7 @@ color-eyre = "0.6.5"
 eyre = "0.6.12"
 futures = "0.3.32"
 gst = { package = "gstreamer", version = "0.25.2" }
-iap2-rs = { git = "https://github.com/usenocturne/iap2-rs.git", version = "0.1.0" }
+iap2-proto = { version = "0.1.0", path = "iap2-proto" }
 libcarjack = { path = "libcarjack" }
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = "0.1.18"

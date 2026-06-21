@@ -1,0 +1,11 @@
+[package]
+name = "iap2-proto"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "iap2_proto"
+path = "src/lib.rs"
+
+[dependencies]
+deku = "0.20.3"

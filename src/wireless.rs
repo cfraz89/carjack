@@ -1,27 +1,18 @@
-use std::{sync::Arc, time::Duration};
+use std::collections::{BTreeMap, BTreeSet};
 
+use crate::iap2::stream::Iap2;
 use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
-    Address, Device, Session, Uuid,
+    Device, Session, Uuid,
+    adv::{Advertisement, Type},
     agent::Agent,
-    gatt::local::Service,
-    id::ServiceClass,
-    rfcomm::{self, ConnectRequest, Role, SocketAddr},
+    rfcomm::{self, Role},
 };
 use eyre::{Result, eyre};
-use iap2_rs::{
-    ConnectionConfig, FileTransferConfig, HidConfig, Iap2Config, Iap2Connection, LinkConfig,
-    MockMfiProvider, NowPlayingConfig, PowerConfig, connect,
-};
-use tokio::time::sleep;
+use libcarjack::uuid::{CARPLAY_ACCESSORY_UUID, CARPLAY_DEVICE_UUID, IAP_DEVICE_UUID, IAP2_UUID};
 use tokio_stream::StreamExt;
 
-const CARPLAY_DEVICE_UUID: Uuid = Uuid::from_u128(0x2D8D2466E14D451C88BC7301ABEA291A);
-const CARPLAY_ACCESSORY_UUID: Uuid = Uuid::from_u128(0xEC884348CD4140A29727575D50BF1FD3);
-const IAP2_DEVICE_UUID: Uuid = Uuid::from_u128(0x00000000decafadedecadeafdecacafe);
-const IAP2_ACCESSORY_UUID: Uuid = Uuid::from_u128(0x00000000decafadedecadeafdecacaff);
-// const IAP2_ACCESSORY_UUID: Uuid = Uuid::from_u128(0xffcacadeafdecadedefacade00000000);
 pub async fn wireless_carplay() -> Result<()> {
     let session = Session::new().await?;
     let headless_agent = Agent::default();
@@ -29,61 +20,92 @@ pub async fn wireless_carplay() -> Result<()> {
     let adapter = session.default_adapter().await?;
     adapter.set_alias(String::from("carjack")).await?;
     adapter.set_powered(true).await?;
-    let mut iap_device_handle = setup_iap_profile(
+    let _advertisement_handle = publish_advertisement(&adapter).await?;
+
+    let mut iap2_handle = setup_iap_profile(
         &session,
-        String::from("Wireless iAP device"),
-        IAP2_DEVICE_UUID,
-        Role::Server,
-        false,
-    )
-    .await?;
-    let mut iap_accessory_handle = setup_iap_profile(
-        &session,
-        String::from("Wireless iAP accessory"),
-        IAP2_ACCESSORY_UUID,
-        Role::Client,
+        String::from("Wireless iAP v2"),
+        IAP2_UUID,
+        None,
         true,
     )
     .await?;
-    let device = discover_devices(&adapter).await?;
-    tracing::info!("Waiting for iap connection...");
-    tokio::spawn(async move {
-        loop {
-            let rq = tokio::select! {
-                Some(rq) = iap_device_handle.next() => rq,
-                Some(rq) = iap_accessory_handle.next() => rq
-            };
-            match async {
-                let stream = rq.accept()?;
-                connect_iap2(stream).await
-            }
-            .await
-            {
-                Ok(()) => tracing::info!("iAP2 connected"),
-                Err(e) => tracing::error!(?e),
-            }
-        }
-        // while let Some(rq) = iap_accessory_handle.next().await {
-        //tracing::debug!(?rq, "Got connect request");
-        //let stream = rq.accept()?;
-        //     tracing::info!(?rq);
-        //     let connection = connect_iap2(rq).await;
-        //     tracing::info!(?connection);
-        // }
-        // let socket = rfcomm::Socket::new()?;
-        // let stream = socket.connect(SocketAddr::new(device.address(), 1)).await?;
-        // connect_iap2(stream).await?;
-        // Result::<()>::Ok(())
-    })
+    let _iap_device_handle = setup_iap_profile(
+        &session,
+        String::from("Wireless iAP"),
+        IAP_DEVICE_UUID,
+        None,
+        false,
+    )
     .await?;
+    //Need this on just to add the carplay uuid to eir data
+    let _carplay_handle = setup_iap_profile(
+        &session,
+        String::from("Carplay"),
+        CARPLAY_DEVICE_UUID,
+        Some(Role::Server),
+        false,
+    )
+    .await?;
+    let device = pair_available_accessory(&adapter).await?;
+    if device.is_connected().await? {
+        tracing::info!("Already connected")
+    } else {
+        tracing::info!("Waiting for connection...");
+        device.connect().await?;
+    }
+
+    while let Some(rq) = iap2_handle.next().await {
+        tracing::debug!(?rq, "Got connection request");
+        let stream = rq.accept()?;
+        let iap2 = Iap2::new(stream);
+        // let (mut messages, _sender) = run_connection(iap2).await?;
+        // tracing::info!("iAP2 link established");
+        // while let Some(msg) = messages.recv().await {
+        //     tracing::info!(?msg);
+        // }
+    }
+
     Ok(())
+}
+
+const MANUFACTURER_APPLE: u16 = 0x004c;
+
+const CARPLAY_TYPE: u8 = 0x1c;
+const PAYLOAD_LENGTH: u8 = 0x06;
+const PROTOCOL_VERSION: u8 = 0x01;
+const STATE_FLAG: u8 = 0x01;
+const COMMUNICATION_FEATURES: u8 = 0x03;
+const IDENTITY: [u8; 3] = [0x00, 0x00, 0x00];
+
+const CARPLAY_ADV_PAYLOAD: [u8; 8] = [
+    CARPLAY_TYPE,
+    PAYLOAD_LENGTH,
+    PROTOCOL_VERSION,
+    STATE_FLAG,
+    COMMUNICATION_FEATURES,
+    IDENTITY[0],
+    IDENTITY[1],
+    IDENTITY[2],
+];
+
+async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::AdvertisementHandle> {
+    let handle = adapter
+        .advertise(Advertisement {
+            advertisement_type: Type::Peripheral,
+            service_uuids: BTreeSet::from([CARPLAY_DEVICE_UUID, IAP2_UUID]),
+            manufacturer_data: BTreeMap::from([(MANUFACTURER_APPLE, CARPLAY_ADV_PAYLOAD.to_vec())]),
+            ..Default::default()
+        })
+        .await?;
+    Ok(handle)
 }
 
 async fn setup_iap_profile(
     session: &Session,
     name: String,
     uuid: Uuid,
-    role: rfcomm::Role,
+    role: Option<rfcomm::Role>,
     auto_connect: bool,
 ) -> Result<rfcomm::ProfileHandle> {
     let profile_handle = session
@@ -91,9 +113,7 @@ async fn setup_iap_profile(
             uuid,
             name: Some(name),
             auto_connect: Some(auto_connect),
-            role: Some(role),
-            require_authentication: Some(true),
-            require_authorization: Some(true),
+            role,
             ..Default::default()
         })
         .await?;
@@ -101,7 +121,7 @@ async fn setup_iap_profile(
     Ok(profile_handle)
 }
 
-async fn discover_devices(adapter: &Adapter) -> Result<Device> {
+async fn pair_available_accessory(adapter: &Adapter) -> Result<Device> {
     let mut device_events = adapter.discover_devices().await?;
     // pin_mut!(device_events);
     while let Some(DeviceAdded(addr)) = device_events.next().await {
@@ -109,74 +129,64 @@ async fn discover_devices(adapter: &Adapter) -> Result<Device> {
         let alias = device.alias().await?;
         let rssi = device.rssi().await?;
         tracing::info!(alias, rssi, "Device added");
-        // let carplay_device_name = env::var("CARPLAY_DEVICE_NAME")?;
-        if rssi.is_some()
-            && device
-                .uuids()
-                .await?
-                .unwrap_or_default()
-                .contains(&CARPLAY_ACCESSORY_UUID)
-        {
-            carplay_connect(&device).await?;
+        if matches_carplay_device(&device).await.unwrap_or_default() {
+            tracing::info!(
+                name = device.alias().await?,
+                address = ?device.address(),
+                rssi = device.rssi().await?,
+                "Attempting connection",
+            );
+            if !device.is_paired().await? {
+                device.pair().await?;
+            }
+            device.set_trusted(true).await?;
             return Ok(device);
         }
     }
     Err(eyre!("No more device events"))
 }
 
-async fn carplay_connect(device: &Device) -> Result<()> {
-    tracing::info!(
-        name = device.alias().await?,
-        address = ?device.address(),
-        rssi = device.rssi().await?,
-        "Attempting connection",
-    );
-    if !device.is_paired().await? {
-        device.pair().await?;
+async fn matches_carplay_device(device: &Device) -> Result<bool> {
+    match std::env::var("CARPLAY_DEVICE_NAME") {
+        Ok(carplay_device_name) => {
+            let alias = device.alias().await?;
+            let matches_carplay_alias = alias.eq_ignore_ascii_case(&carplay_device_name);
+            Ok(matches_carplay_alias)
+        }
+        Err(_) => {
+            let matches_carplay_uuid = device
+                .uuids()
+                .await?
+                .unwrap_or_default()
+                .contains(&CARPLAY_ACCESSORY_UUID);
+            Ok(matches_carplay_uuid)
+        }
     }
-    device.set_trusted(false).await?;
-    tracing::info!("Device paired");
-    query_all_device_properties(device).await?;
-    if !device.is_connected().await? {
-        device.connect().await?;
-    }
-    tracing::info!(connected = device.is_connected().await?);
-    Ok(())
 }
 
-async fn query_all_device_properties(device: &Device) -> bluer::Result<()> {
-    let props = device.all_properties().await?;
-    for prop in props {
-        println!("    {:?}", &prop);
-    }
-    Ok(())
-}
-
-async fn connect_iap2(stream: rfcomm::Stream) -> Result<()> {
-    let config = Iap2Config {
-        identification: iap2_rs::DeviceIdentification {
-            name: String::from("Carjack"),
-            model_identifier: String::from("cj-dragonq-6a"),
-            manufacturer: String::from("Carjack"),
-            serial_number: String::new(),
-            firmware_version: String::from("0.01"),
-            hardware_version: String::from("0.01"),
-            ea_protocol_name: String::from("com.carjack.myproto"),
-            ..Default::default()
-        },
-        mfi_provider: Arc::new(MockMfiProvider::empty()),
-        enable_now_playing: true,
-        enable_hid: true,
-        link_config: LinkConfig::default(),
-        now_playing_config: NowPlayingConfig::default(),
-        hid_config: HidConfig::default(),
-        file_transfer_config: FileTransferConfig::default(),
-        connection_config: ConnectionConfig::default(),
-        power_config: PowerConfig::default(),
-    };
-    let mut conn = connect(stream, config).await?;
-    while let Some(event) = conn.events.recv().await {
-        tracing::info!(?event, "Received event!");
-    }
-    Ok(())
-}
+// pub async fn connect_iap2(stream: rfcomm::Stream) -> Result<Iap2Connection> {
+//     let config = Iap2Config {
+//         identification: iap2_rs::DeviceIdentification {
+//             name: String::from("Carjack"),
+//             model_identifier: String::from("cj-dragonq-6a"),
+//             manufacturer: String::from("Carjack"),
+//             serial_number: String::new(),
+//             firmware_version: String::from("0.01"),
+//             hardware_version: String::from("0.01"),
+//             ea_protocol_name: String::from("com.carjack.myproto"),
+//             ..Default::default()
+//         },
+//         mfi_provider: Arc::new(MockMfiProvider::empty()),
+//         enable_now_playing: true,
+//         enable_hid: true,
+//         link_config: LinkConfig::default(),
+//         now_playing_config: NowPlayingConfig::default(),
+//         hid_config: HidConfig::default(),
+//         file_transfer_config: FileTransferConfig::default(),
+//         connection_config: ConnectionConfig::default(),
+//         power_config: PowerConfig::default(),
+//     };
+//     let conn = connect(stream, config).await?;
+//     tracing::info!("iAP2 Connected!");
+//     Ok(conn)
+// }

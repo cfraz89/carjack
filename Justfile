@@ -1,7 +1,7 @@
 set dotenv-load
 mod armbian
 
-run $GST_DEBUG="GST_CAPS:5,pipewiresrc:5":
+run $GST_DEBUG="GST_CAPS:5,pipewiresrc:5": build
     cargo run
 
 [script]
