@@ -1,15 +1,15 @@
 use eyre::Result;
-use tracing::debug;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 
-use crate::{usb::register_gadget, wireless::wireless_carplay};
+use crate::{portal::start_remote_desktop, usb::register_gadget, wireless::wireless_carplay};
 
 mod encode;
+mod iap2;
 mod portal;
 mod usb;
 mod wireless;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main()]
 async fn main() -> Result<()> {
     color_eyre::install()?;
     tracing_subscriber::fmt()
@@ -20,10 +20,11 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // let gadget = register_gadget()?;
-    // debug!(?gadget);
     wireless_carplay().await?;
+    Ok(())
+}
 
+async fn stream_desktop() -> Result<()> {
     let remote = portal::start_remote_desktop().await?;
     encode::encode_h264(remote.stream.pipe_wire_node_id()).await?;
     Ok(())
