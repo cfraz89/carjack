@@ -10,7 +10,9 @@ use bluer::{
     rfcomm::{self, Role},
 };
 use eyre::{Result, eyre};
+use iap2_proto::IAP2_HANDSHAKE;
 use libcarjack::uuid::{CARPLAY_ACCESSORY_UUID, CARPLAY_DEVICE_UUID, IAP_DEVICE_UUID, IAP2_UUID};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::StreamExt;
 
 pub async fn wireless_carplay() -> Result<()> {
@@ -58,12 +60,15 @@ pub async fn wireless_carplay() -> Result<()> {
     while let Some(rq) = iap2_handle.next().await {
         tracing::debug!(?rq, "Got connection request");
         let stream = rq.accept()?;
-        let iap2 = Iap2::new(stream);
-        // let (mut messages, _sender) = run_connection(iap2).await?;
-        // tracing::info!("iAP2 link established");
-        // while let Some(msg) = messages.recv().await {
-        //     tracing::info!(?msg);
-        // }
+        let mut iap2 = Iap2::new(stream);
+        iap2.handshake().await?;
+        tracing::info!("iAP2 link established");
+        let handle = tokio::spawn(async move {
+            while let Some(packet) = iap2.next().await {
+                tracing::info!(?packet, "Received packet");
+            }
+        });
+        handle.await?;
     }
 
     Ok(())
