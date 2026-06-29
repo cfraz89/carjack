@@ -10,9 +10,10 @@ use bluer::{
     rfcomm::{self, Role},
 };
 use eyre::{Result, eyre};
-use iap2_proto::IAP2_HANDSHAKE;
-use libcarjack::uuid::{CARPLAY_ACCESSORY_UUID, CARPLAY_DEVICE_UUID, IAP_DEVICE_UUID, IAP2_UUID};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use libcarjack::{
+    bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
+    uuid::{CARPLAY_ACCESSORY_UUID, CARPLAY_DEVICE_UUID, IAP_DEVICE_UUID, IAP2_UUID},
+};
 use tokio_stream::StreamExt;
 
 pub async fn wireless_carplay() -> Result<()> {
@@ -73,26 +74,6 @@ pub async fn wireless_carplay() -> Result<()> {
 
     Ok(())
 }
-
-const MANUFACTURER_APPLE: u16 = 0x004c;
-
-const CARPLAY_TYPE: u8 = 0x1c;
-const PAYLOAD_LENGTH: u8 = 0x06;
-const PROTOCOL_VERSION: u8 = 0x01;
-const STATE_FLAG: u8 = 0x01;
-const COMMUNICATION_FEATURES: u8 = 0x03;
-const IDENTITY: [u8; 3] = [0x00, 0x00, 0x00];
-
-const CARPLAY_ADV_PAYLOAD: [u8; 8] = [
-    CARPLAY_TYPE,
-    PAYLOAD_LENGTH,
-    PROTOCOL_VERSION,
-    STATE_FLAG,
-    COMMUNICATION_FEATURES,
-    IDENTITY[0],
-    IDENTITY[1],
-    IDENTITY[2],
-];
 
 async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::AdvertisementHandle> {
     let handle = adapter
@@ -168,30 +149,3 @@ async fn matches_carplay_device(device: &Device) -> Result<bool> {
         }
     }
 }
-
-// pub async fn connect_iap2(stream: rfcomm::Stream) -> Result<Iap2Connection> {
-//     let config = Iap2Config {
-//         identification: iap2_rs::DeviceIdentification {
-//             name: String::from("Carjack"),
-//             model_identifier: String::from("cj-dragonq-6a"),
-//             manufacturer: String::from("Carjack"),
-//             serial_number: String::new(),
-//             firmware_version: String::from("0.01"),
-//             hardware_version: String::from("0.01"),
-//             ea_protocol_name: String::from("com.carjack.myproto"),
-//             ..Default::default()
-//         },
-//         mfi_provider: Arc::new(MockMfiProvider::empty()),
-//         enable_now_playing: true,
-//         enable_hid: true,
-//         link_config: LinkConfig::default(),
-//         now_playing_config: NowPlayingConfig::default(),
-//         hid_config: HidConfig::default(),
-//         file_transfer_config: FileTransferConfig::default(),
-//         connection_config: ConnectionConfig::default(),
-//         power_config: PowerConfig::default(),
-//     };
-//     let conn = connect(stream, config).await?;
-//     tracing::info!("iAP2 Connected!");
-//     Ok(conn)
-// }
