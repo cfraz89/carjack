@@ -7,7 +7,10 @@ use deku::prelude::*;
 #[deku(endian = "big")]
 pub struct Packet {
     pub header: Header,
-    #[deku(assert_eq = "header.checksum()", update = "self.header.checksum()")]
+    #[deku(
+        assert_eq = "header.calculate_checksum()",
+        update = "self.header.calculate_checksum()"
+    )]
     pub header_checksum: u8,
     #[deku(
         cond = "header.control.ack",
@@ -16,21 +19,16 @@ pub struct Packet {
     pub payload: Vec<u8>,
     #[deku(
         cond = "!payload.is_empty()",
-        assert_eq = "if !payload.is_empty() { Some(gen_payload_checksum(payload)) } else { None }"
+        assert_eq = "if !payload.is_empty() { Some(payload.calculate_checksum()) } else { None }"
     )]
     pub payload_checksum: Option<u8>,
 }
 
-impl Packet {
-    pub fn parse_from_bytes(input: &[u8]) -> Result<((&[u8], usize), Packet), DekuError> {
-        Packet::from_bytes((input, 0))
-    }
+trait Checksumable {
+    fn calculate_checksum(&self) -> u8;
 }
 
-fn gen_payload_checksum(payload: &Vec<u8>) -> u8 {
-    let sum = payload.iter().fold(0u8, |a, b| a.wrapping_add(*b));
-    sum.wrapping_neg()
-}
+pub const IAP2_HANDSHAKE: [u8; 6] = [0xFF, 0x55, 0x02, 0x00, 0xEE, 0x10];
 
 #[derive(DekuRead, DekuWrite, DekuSize, Debug, Clone, PartialEq)]
 #[deku(ctx = "endian: Endian", endian = "endian", magic = b"\xFF\x5A")]
@@ -38,16 +36,14 @@ pub struct Header {
     pub length: u16,
     pub control: ControlByte,
     pub seq: u8,
-    #[deku(cond = "control.ack")]
     pub ack: u8,
-    #[deku(cond = "control.ack")]
     pub session_id: u8,
 }
 
 const HEADER_SIZE: usize = Header::SIZE_BYTES.unwrap();
 
-impl Header {
-    fn checksum(self: &Self) -> u8 {
+impl Checksumable for Header {
+    fn calculate_checksum(&self) -> u8 {
         let mut buff = Cursor::new(vec![0; HEADER_SIZE]);
         self.to_writer(&mut Writer::new(&mut buff), Endian::Big)
             .expect("Unable to write control byte");
@@ -58,19 +54,28 @@ impl Header {
     }
 }
 
+#[derive(DekuRead, DekuWrite, Debug, Clone, PartialEq)]
+#[deku(ctx = "endian: Endian, ack: bool, count: usize", endian = "endian")]
+pub struct Payload(#[deku(cond = "ack", count = "count")] Vec<u8>);
+
 #[derive(DekuRead, DekuWrite, DekuSize, Debug, Clone, PartialEq)]
 #[deku(ctx = "endian: Endian", endian = "endian")]
 pub struct ControlByte {
     #[deku(bits = "1")]
-    pub syn: bool,
+    pub syn: bool, // Link Sync Payload
     #[deku(bits = "1")]
-    pub ack: bool,
+    pub ack: bool, // Acknowledgement Valid
     #[deku(bits = "1")]
-    pub eak: bool,
+    pub eak: bool, // Extended Ack Payload
     #[deku(bits = "1")]
-    pub rst: bool,
-    #[deku(bits = "1")]
-    pub sleep: bool,
-    #[deku(bits = "3")]
-    pub _unused: u8,
+    pub rst: bool, // Link Reset
+    #[deku(bits = "1", pad_bits_after = "3")]
+    pub sleep: bool, // Device Sleep
+}
+
+impl Checksumable for Vec<u8> {
+    fn calculate_checksum(&self) -> u8 {
+        let sum = self.iter().fold(0u8, |a, b| a.wrapping_add(*b));
+        sum.wrapping_neg()
+    }
 }
