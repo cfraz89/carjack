@@ -1,0 +1,19 @@
+pub const MANUFACTURER_APPLE: u16 = 0x004c;
+
+pub const CARPLAY_TYPE: u8 = 0x1c;
+pub const PAYLOAD_LENGTH: u8 = 0x06;
+pub const PROTOCOL_VERSION: u8 = 0x01;
+pub const STATE_FLAG: u8 = 0x01;
+pub const COMMUNICATION_FEATURES: u8 = 0x03;
+pub const IDENTITY: [u8; 3] = [0x00, 0x00, 0x00];
+
+pub const CARPLAY_ADV_PAYLOAD: [u8; 8] = [
+    CARPLAY_TYPE,
+    PAYLOAD_LENGTH,
+    PROTOCOL_VERSION,
+    STATE_FLAG,
+    COMMUNICATION_FEATURES,
+    IDENTITY[0],
+    IDENTITY[1],
+    IDENTITY[2],
+];
