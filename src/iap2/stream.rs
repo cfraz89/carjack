@@ -8,24 +8,34 @@ use bluer::rfcomm::Stream;
 use iap2_proto::{IAP2_HANDSHAKE, Packet};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
-/// Parses raw iAP2 bytes from an RFCOMM stream into `Packet` values.
-/// Also provides `send_packet` for writing typed packets back.
+use crate::iap2::config::LinkConfig;
+
+/// Models iAP2 protocol, abstracting RFCOMM stream into `Packet` stream and sink.
 #[derive(Debug)]
 pub struct Iap2 {
     stream: Stream,
     buffer: Vec<u8>,
     write_buffer: Option<Vec<u8>>,
     write_pos: usize,
+    seq: u8,
+    ack: u8,
+    pub config: LinkConfig,
 }
 
 impl Iap2 {
-    pub fn new(stream: Stream) -> Self {
-        Iap2 {
+    //Create an iap2 link, starting with an iap2 compatibility hanshake with the receiving end
+    pub async fn start(stream: Stream, config: LinkConfig) -> Result<Self, Error> {
+        let mut link = Iap2 {
             stream,
             buffer: Vec::new(),
             write_buffer: None,
             write_pos: 0,
-        }
+            seq: config.initial_seq,
+            ack: 0x00,
+            config: config,
+        };
+        link.handshake().await?;
+        Ok(link)
     }
 
     fn poll_write_buffer(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
