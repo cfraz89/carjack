@@ -1,19 +1,22 @@
+use backon::{ConstantBuilder, Retryable};
 use deku::{DekuContainerRead, DekuContainerWrite};
 use std::io::{Error, ErrorKind};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::task::JoinHandle;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time::sleep;
 
-use bluer::rfcomm::Stream;
 use iap2_proto::{IAP2_HANDSHAKE, Packet};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
 
 use crate::iap2::config::LinkConfig;
 
 /// Models iAP2 protocol, abstracting RFCOMM stream into `Packet` stream and sink.
 #[derive(Debug)]
-pub struct Iap2 {
-    stream: Stream,
+pub struct Iap2<R, W> {
+    read_stream: Mutex<R>,
+    write_stream: Mutex<W>,
     buffer: Vec<u8>,
     write_buffer: Option<Vec<u8>>,
     write_pos: usize,
@@ -22,11 +25,16 @@ pub struct Iap2 {
     pub config: LinkConfig,
 }
 
-impl Iap2 {
+impl<R, W> Iap2<R, W>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
     //Create an iap2 link, starting with an iap2 compatibility hanshake with the receiving end
-    pub async fn start(stream: Stream, config: LinkConfig) -> Result<Self, Error> {
-        let mut link = Iap2 {
-            stream,
+    pub async fn start(read_stream: R, write_stream: W, config: LinkConfig) -> Result<Self, Error> {
+        let link = Iap2 {
+            read_stream: Mutex::new(read_stream),
+            write_stream: Mutex::new(write_stream),
             buffer: Vec::new(),
             write_buffer: None,
             write_pos: 0,
@@ -43,7 +51,7 @@ impl Iap2 {
 
         if let Some(buf) = &this.write_buffer {
             while this.write_pos < buf.len() {
-                match Pin::new(&mut this.stream).poll_write(cx, &buf[this.write_pos..]) {
+                match Pin::new(this.write_stream.get_mut()).poll_write(cx, &buf[this.write_pos..]) {
                     Poll::Ready(Ok(0)) => {
                         return Poll::Ready(Err(Error::new(
                             ErrorKind::WriteZero,
@@ -65,22 +73,63 @@ impl Iap2 {
         Poll::Ready(Ok(()))
     }
 
-    pub async fn handshake(&mut self) -> Result<(), Error> {
-        self.stream.write(&IAP2_HANDSHAKE).await?;
-        //Ensure link responds with equal handshake packet
-        let mut buf = [0u8; 6];
-        self.stream.read_exact(&mut buf).await?;
-        if buf != IAP2_HANDSHAKE {
-            Err(Error::new(
-                ErrorKind::ConnectionAborted,
-                "IAP2 handshake failed",
-            ))?
+    //Keep reading until we find the iap2 handshake bytes
+    async fn read_iap2_handshake(&self) -> Result<(), Error> {
+        let mut buf = [0u8; 256];
+
+        //Accumulate bytes in case the 6 bytes arrive fragmented across reads
+        let mut accumulated = Vec::with_capacity(1024);
+
+        loop {
+            // Read whatever is currently waiting in the OS buffer
+            let n = self.read_stream.lock().await.read(&mut buf).await?;
+            if n == 0 {
+                Err(Error::new(
+                    ErrorKind::ConnectionAborted,
+                    "Stream closed by remote side",
+                ))?;
+            }
+
+            accumulated.extend_from_slice(&buf[..n]);
+
+            if accumulated
+                .windows(IAP2_HANDSHAKE.len())
+                .find(|w| *w == IAP2_HANDSHAKE)
+                .is_some()
+            {
+                return Ok(());
+            }
+
+            //Keep our accumulationg buffer from growing too large
+            if accumulated.len() > 512 {
+                accumulated.drain(506..);
+            }
         }
-        Ok(())
+    }
+
+    pub async fn handshake(&self) -> Result<(), Error> {
+        tokio::select!(
+            _ = sleep(self.config.handshake_timeout) => {
+                Err(Error::new(ErrorKind::TimedOut, "Timed out waiting for iAP2 handshake"))
+            },
+            _ = (|| async { self.write_stream.lock().await.write(&IAP2_HANDSHAKE).await })
+                    .retry(ConstantBuilder::new().with_delay(Duration::from_secs(1)))
+            => {
+                Err(Error::new(ErrorKind::BrokenPipe, "Sender ended prematurely"))
+            },
+            res = (|| async { self.read_iap2_handshake().await })
+                    .retry(ConstantBuilder::new().with_delay(Duration::from_secs(1))) => {
+                res
+            },
+        )
     }
 }
 
-impl futures::Stream for Iap2 {
+impl<R, W> futures::Stream for Iap2<R, W>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
     type Item = Packet;
 
     // Try to create a packet from our persistent buffer, otherwise read into the buffer what we can
@@ -96,7 +145,7 @@ impl futures::Stream for Iap2 {
             let mut buf = vec![0u8; 4096];
             let mut read_buf = ReadBuf::new(&mut buf);
 
-            match Pin::new(&mut this.stream).poll_read(cx, &mut read_buf) {
+            match Pin::new(this.read_stream.get_mut()).poll_read(cx, &mut read_buf) {
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
                     if n == 0 {
@@ -111,7 +160,11 @@ impl futures::Stream for Iap2 {
     }
 }
 
-impl futures::Sink<Packet> for Iap2 {
+impl<R, W> futures::Sink<Packet> for Iap2<R, W>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
     type Error = Error;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -146,7 +199,7 @@ impl futures::Sink<Packet> for Iap2 {
             Poll::Pending => return Poll::Pending,
         }
 
-        match Pin::new(&mut this.stream).poll_flush(cx) {
+        match Pin::new(this.write_stream.get_mut()).poll_flush(cx) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
             Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
             Poll::Pending => Poll::Pending,
@@ -161,7 +214,7 @@ impl futures::Sink<Packet> for Iap2 {
             Poll::Pending => return Poll::Pending,
         }
 
-        match Pin::new(&mut this.stream).poll_shutdown(cx) {
+        match Pin::new(this.write_stream.get_mut()).poll_shutdown(cx) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
             Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
             Poll::Pending => Poll::Pending,
