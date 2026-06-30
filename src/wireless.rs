@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::iap2::stream::Iap2;
+use crate::iap2::{config::LinkConfig, stream::Iap2};
 use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
@@ -60,9 +60,9 @@ pub async fn wireless_carplay() -> Result<()> {
 
     while let Some(rq) = iap2_handle.next().await {
         tracing::debug!(?rq, "Got connection request");
-        let stream = rq.accept()?;
+        let (rx, tx) = rq.accept()?.into_split();
         tracing::debug!("Establishing iAP2 link");
-        let mut iap2 = Iap2::start(stream).await?;
+        let mut iap2 = Iap2::start(rx, tx, LinkConfig::default()).await?;
         tracing::debug!("iAP2 link established");
         let _handle = tokio::spawn(async move {
             while let Some(packet) = iap2.next().await {
