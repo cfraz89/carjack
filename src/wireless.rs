@@ -61,15 +61,15 @@ pub async fn wireless_carplay() -> Result<()> {
     while let Some(rq) = iap2_handle.next().await {
         tracing::debug!(?rq, "Got connection request");
         let stream = rq.accept()?;
-        let mut iap2 = Iap2::new(stream);
-        iap2.handshake().await?;
-        tracing::info!("iAP2 link established");
-        let handle = tokio::spawn(async move {
+        tracing::debug!("Establishing iAP2 link");
+        let mut iap2 = Iap2::start(stream).await?;
+        tracing::debug!("iAP2 link established");
+        let _handle = tokio::spawn(async move {
             while let Some(packet) = iap2.next().await {
-                tracing::info!(?packet, "Received packet");
+                tracing::debug!(?packet, "Received packet");
             }
+            tracing::debug!("iAP lifecycle ended");
         });
-        handle.await?;
     }
 
     Ok(())
