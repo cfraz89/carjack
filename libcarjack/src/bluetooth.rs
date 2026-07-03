@@ -17,3 +17,5 @@ pub const CARPLAY_ADV_PAYLOAD: [u8; 8] = [
     IDENTITY[1],
     IDENTITY[2],
 ];
+
+// pub const CARPLAY_ADV_PAYLOAD: [u8; 3] = [02, 24, 02];
