@@ -1,5 +1,6 @@
 use backon::{ConstantBuilder, Retryable};
 use deku::{DekuContainerRead, DekuContainerWrite};
+use pretty_hex::PrettyHex;
 use std::io::{Error, ErrorKind};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -82,7 +83,9 @@ where
 
         loop {
             // Read whatever is currently waiting in the OS buffer
-            let n = self.read_stream.lock().await.read(&mut buf).await?;
+            let mut read_stream = self.read_stream.lock().await;
+            let n = read_stream.read(&mut buf).await?;
+            tracing::debug!(buf = ?buf.hex_dump(), "Read stream");
             if n == 0 {
                 Err(Error::new(
                     ErrorKind::ConnectionAborted,
@@ -112,10 +115,18 @@ where
             _ = sleep(self.config.handshake_timeout) => {
                 Err(Error::new(ErrorKind::TimedOut, "Timed out waiting for iAP2 handshake"))
             },
-            _ = (|| async { self.write_stream.lock().await.write(&IAP2_HANDSHAKE).await })
+            res = (async || -> Result<(), Error> {
+                    loop {
+                        let mut write_stream = self.write_stream.lock().await;
+                        write_stream.write(&IAP2_HANDSHAKE).await?;
+                        write_stream.flush().await?;
+                        tracing::debug!("Wrote IAP2 handshake packet");
+                        sleep(Duration::from_secs(1)).await;
+                    }
+                })
                     .retry(ConstantBuilder::new().with_delay(Duration::from_secs(1)))
             => {
-                Err(Error::new(ErrorKind::BrokenPipe, "Sender ended prematurely"))
+                res
             },
             res = (|| async { self.read_iap2_handshake().await })
                     .retry(ConstantBuilder::new().with_delay(Duration::from_secs(1))) => {
