@@ -1,4 +1,7 @@
+use std::iter;
+
 use deku::prelude::*;
+use zbus::zvariant::dbus::StructSeqSerializer::Seq;
 
 pub mod typ {
     pub const NIL: u8 = 0;
@@ -402,27 +405,19 @@ impl SdpRecord {
     }
 
     pub fn service_class_ids(&self) -> Vec<uuid::Uuid> {
-        const BT_BASE_UUID: u128 = 0x00000000_0000_1000_8000_00805F9B34FB;
-        let mut ids = Vec::new();
-        if let Some(attr) = self.find_attribute(0x0001) {
-            if let DataElement::Seq(seq) = &attr.value {
-                for de in seq {
-                    match de {
-                        DataElement::Uuid16(id) => {
-                            ids.push(uuid::Uuid::from_u128(BT_BASE_UUID | ((*id as u128) << 96)));
-                        }
-                        DataElement::Uuid32(id) => {
-                            ids.push(uuid::Uuid::from_u128(BT_BASE_UUID | ((*id as u128) << 96)));
-                        }
-                        DataElement::Uuid128(bytes) => {
-                            ids.push(uuid::Uuid::from_bytes(*bytes));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        ids
+        self.find_attribute(0x0001)
+            .into_iter()
+            .flat_map(|attr| match &attr.value {
+                DataElement::Seq(seq) => seq.iter(),
+                _ => [].iter(),
+            })
+            .filter_map(|de| match de {
+                DataElement::Uuid16(id) => Some(uuid::Uuid::from_u128(*id as u128)),
+                DataElement::Uuid32(id) => Some(uuid::Uuid::from_u128(*id as u128)),
+                DataElement::Uuid128(bytes) => Some(uuid::Uuid::from_bytes(*bytes)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Extract the RFCOMM channel number from the ProtocolDescriptorList
@@ -453,10 +448,6 @@ impl SdpRecord {
             }
         }
         return None;
-    }
-
-    fn extract_rfcomm(element: &DataElement) -> Option<u16> {
-        None
     }
 }
 

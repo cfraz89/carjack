@@ -28,7 +28,6 @@ pub(crate) async fn get_rfcomm_channel(address: &bluer::Address) -> Result<u16> 
         .into_iter()
         .filter_map(|r| SdpRecord::from_bytes(&r).ok())
         .collect::<Vec<_>>();
-    tracing::info!(?sdp_records, "Retrieved service records from device");
     let channel = sdp_records
         .iter()
         .filter_map(|r| {
