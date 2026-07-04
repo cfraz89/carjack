@@ -1,15 +1,22 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
-use crate::iap2::{config::LinkConfig, stream::Iap2};
+use crate::{
+    iap2::{config::LinkConfig, stream::Iap2},
+    sdp::channel::get_rfcomm_channel,
+};
 use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
     Device, DiscoveryFilter, Session, Uuid,
     adv::{Advertisement, Type},
     agent::Agent,
-    rfcomm::{self, Role},
+    rfcomm,
 };
 use eyre::{Result, eyre};
+use futures::channel;
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
     uuid::{
@@ -27,69 +34,72 @@ pub async fn wireless_carplay() -> Result<()> {
     adapter.set_powered(true).await?;
     let _advertisement_handle = publish_advertisement(&adapter).await?;
 
-    // let mut iap2_handle = setup_iap_profile(
-    //     &session,
-    //     String::from("Wireless iAP v2"),
-    //     IAP2_UUID,
-    //     None,
-    //     false,
-    // )
-    // .await?;
-    let iap_device_handle = setup_iap_profile(
-        &session,
-        String::from("Wireless iAP"),
-        IAP_DEVICE_UUID,
-        None,
-        false,
-    )
-    .await?;
-    let iap_accessory_handle = setup_iap_profile(
-        &session,
-        String::from("Wireless iAP"),
-        IAP_ACCESSORY_UUID,
-        None,
-        true,
-    )
-    .await?;
-    //Need this on just to add the carplay uuid to eir data
-    // let mut carplay_handle = setup_iap_profile(
-    //     &session,
-    //     String::from("Carplay"),
-    //     CARPLAY_DEVICE_UUID,
-    //     None,
-    //     false,
-    // )
-    // .await?;
     let device = pair_available_accessory(&adapter).await?;
+    let rfcomm_channel = get_rfcomm_channel(&device.address()).await?;
+    let mut iap2_handle = session
+        .register_profile(rfcomm::Profile {
+            name: Some(String::from("Wireless iAP v2")),
+            uuid: IAP2_UUID,
+            channel: Some(rfcomm_channel),
+            ..Default::default()
+        })
+        .await?;
+    device.connect().await?;
+    tracing::info!(?rfcomm_channel, "Resolved iAP2 RFCOMM channel");
+    let iap_device_handle = session
+        .register_profile(rfcomm::Profile {
+            uuid: IAP_DEVICE_UUID,
+            name: Some(String::from("Wireless iAP")),
+            ..Default::default()
+        })
+        .await?;
+    let iap_accessory_handle = session
+        .register_profile(rfcomm::Profile {
+            uuid: IAP_ACCESSORY_UUID,
+            name: Some(String::from("Wireless iAP")),
+            channel: Some(rfcomm_channel),
+            ..Default::default()
+        })
+        .await?;
+    //Need this on just to add the carplay uuid to eir data
+    let carplay_handle = session
+        .register_profile(rfcomm::Profile {
+            name: Some(String::from("Carplay")),
+            uuid: CARPLAY_DEVICE_UUID,
+            ..Default::default()
+        })
+        .await?;
     if device.is_connected().await? {
         tracing::info!("Already connected, reconnecting");
         device.disconnect().await?;
     } else {
         tracing::info!("Connecting...");
-        device.connect().await?;
     }
+    device.connect().await?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     tracing::debug!("Waiting for iAP2 connection requests");
-    let mut connections = StreamMap::new();
-    connections.insert("iap_device", iap_device_handle);
-    connections.insert("iap_accessory", iap_accessory_handle);
+    // let mut connections = StreamMap::new();
+    // connections.insert("iap_device", iap_device_handle);
+    // connections.insert("iap_accessory", iap_accessory_handle);
 
-    while let Some((k, rq)) = connections.next().await {
-        tracing::debug!(?k, ?rq, "Got connection request");
-        let (rx, tx) = rq.accept()?.into_split();
+    loop {
+        let socket = rfcomm::Socket::new()?;
+        let stream = socket
+            .connect(rfcomm::SocketAddr {
+                addr: device.address(),
+                channel: 0x01u8,
+            })
+            .await?;
+        let (rx, tx) = stream.into_split();
         tracing::debug!("Establishing iAP2 link");
         let mut iap2 = Iap2::start(rx, tx, LinkConfig::default()).await?;
         tracing::debug!("iAP2 link established");
-        let _handle = tokio::spawn(async move {
-            while let Some(packet) = iap2.next().await {
-                tracing::debug!(?packet, "Received packet");
-            }
-            tracing::debug!("iAP lifecycle ended");
-        });
+        while let Some(packet) = iap2.next().await {
+            tracing::debug!(?packet, "Received packet");
+        }
+        tracing::debug!("iAP lifecycle ended");
     }
-    tracing::debug!("No more iAP connections");
-
-    Ok(())
 }
 
 async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::AdvertisementHandle> {
@@ -105,26 +115,6 @@ async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::Advertis
         })
         .await?;
     Ok(handle)
-}
-
-async fn setup_iap_profile(
-    session: &Session,
-    name: String,
-    uuid: Uuid,
-    role: Option<rfcomm::Role>,
-    auto_connect: bool,
-) -> Result<rfcomm::ProfileHandle> {
-    let profile_handle = session
-        .register_profile(rfcomm::Profile {
-            uuid,
-            name: Some(name),
-            auto_connect: Some(auto_connect),
-            role,
-            ..Default::default()
-        })
-        .await?;
-
-    Ok(profile_handle)
 }
 
 async fn pair_available_accessory(adapter: &Adapter) -> Result<Device> {

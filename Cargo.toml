@@ -15,6 +15,7 @@ backon = "1.6.0"
 bluer = { version = "0.17.4", features = ["full", "rfcomm"] }
 color-eyre = "0.6.5"
 deku = "0.20.3"
+uuid = "1.23.3"
 eyre = "0.6.12"
 futures = "0.3.32"
 gst = { package = "gstreamer", version = "0.25.2" }
@@ -26,3 +27,4 @@ tokio-stream = "0.1.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 usb-gadget = "1.2.0"
+zbus = { version = "5.16.0", default-features = false, features = ["tokio"] }
