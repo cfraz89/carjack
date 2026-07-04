@@ -36,20 +36,23 @@ pub async fn wireless_carplay() -> Result<()> {
 
     let device = pair_available_accessory(&adapter).await?;
     let rfcomm_channel = get_rfcomm_channel(&device.address()).await?;
-    let mut iap2_handle = session
-        .register_profile(rfcomm::Profile {
-            name: Some(String::from("Wireless iAP v2")),
-            uuid: IAP2_UUID,
-            channel: Some(rfcomm_channel),
-            ..Default::default()
-        })
-        .await?;
-    device.connect().await?;
+    // let mut iap2_handle = session
+    //     .register_profile(rfcomm::Profile {
+    //         name: Some(String::from("Wireless iAP v2")),
+    //         uuid: IAP2_UUID,
+    //         channel: Some(rfcomm_channel),
+    //         ..Default::default()
+    //     })
+    //     .await?;
     tracing::info!(?rfcomm_channel, "Resolved iAP2 RFCOMM channel");
     let iap_device_handle = session
         .register_profile(rfcomm::Profile {
             uuid: IAP_DEVICE_UUID,
             name: Some(String::from("Wireless iAP")),
+            //This is super important, at least on my test device. Even though we dont connect through this profile,
+            // the test device detects our machine as an android phone without the channel set to 1,
+            // ie the channel its using on the accessory profile.
+            channel: Some(rfcomm_channel),
             ..Default::default()
         })
         .await?;
@@ -58,17 +61,18 @@ pub async fn wireless_carplay() -> Result<()> {
             uuid: IAP_ACCESSORY_UUID,
             name: Some(String::from("Wireless iAP")),
             channel: Some(rfcomm_channel),
+            auto_connect: Some(true),
             ..Default::default()
         })
         .await?;
     //Need this on just to add the carplay uuid to eir data
-    let carplay_handle = session
-        .register_profile(rfcomm::Profile {
-            name: Some(String::from("Carplay")),
-            uuid: CARPLAY_DEVICE_UUID,
-            ..Default::default()
-        })
-        .await?;
+    // let carplay_handle = session
+    //     .register_profile(rfcomm::Profile {
+    //         name: Some(String::from("Carplay")),
+    //         uuid: CARPLAY_DEVICE_UUID,
+    //         ..Default::default()
+    //     })
+    //     .await?;
     if device.is_connected().await? {
         tracing::info!("Already connected, reconnecting");
         device.disconnect().await?;
@@ -79,18 +83,20 @@ pub async fn wireless_carplay() -> Result<()> {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     tracing::debug!("Waiting for iAP2 connection requests");
-    // let mut connections = StreamMap::new();
-    // connections.insert("iap_device", iap_device_handle);
-    // connections.insert("iap_accessory", iap_accessory_handle);
+    let mut connections = StreamMap::new();
+    connections.insert("iap_device", iap_device_handle);
+    connections.insert("iap_accessory", iap_accessory_handle);
 
-    loop {
-        let socket = rfcomm::Socket::new()?;
-        let stream = socket
-            .connect(rfcomm::SocketAddr {
-                addr: device.address(),
-                channel: 0x01u8,
-            })
-            .await?;
+    while let Some((k, rq)) = connections.next().await {
+        let stream = rq.accept()?;
+        tracing::debug!(?k, "Accepted iAP2 connection request");
+        // let socket = rfcomm::Socket::new()?;
+        // let stream = socket
+        //     .connect(rfcomm::SocketAddr {
+        //         addr: device.address(),
+        //         channel: rfcomm_channel as u8,
+        //     })
+        //     .await?;
         let (rx, tx) = stream.into_split();
         tracing::debug!("Establishing iAP2 link");
         let mut iap2 = Iap2::start(rx, tx, LinkConfig::default()).await?;
@@ -100,6 +106,7 @@ pub async fn wireless_carplay() -> Result<()> {
         }
         tracing::debug!("iAP lifecycle ended");
     }
+    Ok(())
 }
 
 async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::AdvertisementHandle> {
