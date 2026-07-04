@@ -45,7 +45,7 @@ pub async fn wireless_carplay() -> Result<()> {
     //     })
     //     .await?;
     tracing::info!(?rfcomm_channel, "Resolved iAP2 RFCOMM channel");
-    let iap_device_handle = session
+    let mut iap_device_handle = session
         .register_profile(rfcomm::Profile {
             uuid: IAP_DEVICE_UUID,
             name: Some(String::from("Wireless iAP")),
@@ -53,15 +53,6 @@ pub async fn wireless_carplay() -> Result<()> {
             // the test device detects our machine as an android phone without the channel set to 1,
             // ie the channel its using on the accessory profile.
             channel: Some(rfcomm_channel),
-            ..Default::default()
-        })
-        .await?;
-    let iap_accessory_handle = session
-        .register_profile(rfcomm::Profile {
-            uuid: IAP_ACCESSORY_UUID,
-            name: Some(String::from("Wireless iAP")),
-            channel: Some(rfcomm_channel),
-            auto_connect: Some(true),
             ..Default::default()
         })
         .await?;
@@ -80,23 +71,26 @@ pub async fn wireless_carplay() -> Result<()> {
         tracing::info!("Connecting...");
     }
     device.connect().await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
     tracing::debug!("Waiting for iAP2 connection requests");
-    let mut connections = StreamMap::new();
-    connections.insert("iap_device", iap_device_handle);
-    connections.insert("iap_accessory", iap_accessory_handle);
+    // let mut connections = StreamMap::new();
+    // connections.insert("iap_device", iap_device_handle);
+    // connections.insert("iap_accessory", iap_accessory_handle);
 
-    while let Some((k, rq)) = connections.next().await {
-        let stream = rq.accept()?;
-        tracing::debug!(?k, "Accepted iAP2 connection request");
-        // let socket = rfcomm::Socket::new()?;
-        // let stream = socket
-        //     .connect(rfcomm::SocketAddr {
-        //         addr: device.address(),
-        //         channel: rfcomm_channel as u8,
-        //     })
-        //     .await?;
+    loop {
+        let socket = rfcomm::Socket::new()?;
+        let stream = tokio::select! {
+            conn = socket.connect(rfcomm::SocketAddr {
+                addr: device.address(),
+                channel: rfcomm_channel as u8,
+            }) => {
+                tracing::debug!(?conn, "Received connection request");
+                conn?
+            }
+            Some(rq) = iap_device_handle.next() => {
+                rq.accept()?
+            }
+        };
         let (rx, tx) = stream.into_split();
         tracing::debug!("Establishing iAP2 link");
         let mut iap2 = Iap2::start(rx, tx, LinkConfig::default()).await?;
