@@ -17,6 +17,8 @@ use bluer::{
 };
 use eyre::{Result, eyre};
 use futures::channel;
+use gst::glib::UnicodeType::Control;
+use iap2_proto::{ControlByte, Header, Packet};
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
     uuid::{
@@ -65,12 +67,12 @@ pub async fn wireless_carplay() -> Result<()> {
     //     })
     //     .await?;
     if device.is_connected().await? {
-        tracing::info!("Already connected, reconnecting");
-        device.disconnect().await?;
+        tracing::info!("Already connected");
+        // device.disconnect().await?;
     } else {
         tracing::info!("Connecting...");
-    }
-    device.connect().await?;
+        device.connect().await?;
+    };
 
     tracing::debug!("Waiting for iAP2 connection requests");
     // let mut connections = StreamMap::new();
@@ -100,7 +102,6 @@ pub async fn wireless_carplay() -> Result<()> {
         }
         tracing::debug!("iAP lifecycle ended");
     }
-    Ok(())
 }
 
 async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::AdvertisementHandle> {

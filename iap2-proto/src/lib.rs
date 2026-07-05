@@ -58,7 +58,7 @@ impl Checksumable for Header {
 #[deku(ctx = "endian: Endian, ack: bool, count: usize", endian = "endian")]
 pub struct Payload(#[deku(cond = "ack", count = "count")] Vec<u8>);
 
-#[derive(DekuRead, DekuWrite, DekuSize, Debug, Clone, PartialEq)]
+#[derive(DekuRead, DekuWrite, DekuSize, Debug, Clone, PartialEq, Default)]
 #[deku(ctx = "endian: Endian", endian = "endian")]
 pub struct ControlByte {
     #[deku(bits = "1")]
