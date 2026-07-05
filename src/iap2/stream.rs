@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-use iap2_proto::{IAP2_HANDSHAKE, Packet};
+use iap2_proto::{ControlByte, Header, IAP2_HANDSHAKE, Packet};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
 
 use crate::iap2::config::LinkConfig;
@@ -43,6 +43,7 @@ where
             ack: 0x00,
             config: config,
         };
+        link.reset().await;
         link.handshake().await?;
         Ok(link)
     }
@@ -119,7 +120,6 @@ where
                     loop {
                         let mut write_stream = self.write_stream.lock().await;
                         write_stream.write(&IAP2_HANDSHAKE).await?;
-                        write_stream.flush().await?;
                         tracing::debug!("Wrote IAP2 handshake packet");
                         sleep(Duration::from_secs(1)).await;
                     }
@@ -133,6 +133,27 @@ where
                 res
             },
         )
+    }
+
+    pub async fn reset(&self) -> Result<(), Error> {
+        let packet = Packet {
+            header: Header {
+                control: ControlByte {
+                    rst: true,
+                    ..Default::default()
+                },
+                length: 0,
+                seq: self.seq,
+                ack: self.ack,
+                session_id: 0,
+            },
+            header_checksum: 0,
+            payload: Vec::new(),
+            payload_checksum: None,
+        };
+        let mut write_stream = self.write_stream.lock().await;
+        write_stream.write(&packet.to_bytes()?).await?;
+        Ok(())
     }
 }
 
