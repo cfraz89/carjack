@@ -1,321 +1,248 @@
-use std::iter;
-
 use deku::prelude::*;
-use zbus::zvariant::dbus::StructSeqSerializer::Seq;
-
-pub mod typ {
-    pub const NIL: u8 = 0;
-    pub const UINT: u8 = 1;
-    pub const SINT: u8 = 2;
-    pub const UUID: u8 = 3;
-    pub const TEXT: u8 = 4;
-    pub const BOOL: u8 = 5;
-    pub const SEQ: u8 = 6;
-    pub const ALT: u8 = 7;
-    pub const URL: u8 = 8;
-}
-
-/// SDP Data Element header byte.
-///
-/// Bit layout: `[7:3] type_id (5 bits)` | `[2:0] size_desc (3 bits)`
-///
-/// size_desc interpretation:
-///   0-4   → data length = 2^size_desc bytes (1, 2, 4, 8, 16)
-///   5     → 1 additional uint8 byte gives the data length
-///   6     → 2 additional uint16 bytes give the data length
-///   7     → 4 additional uint32 bytes give the data length
-#[derive(DekuRead, Debug, Clone, PartialEq)]
-pub struct DataElementHeader {
-    #[deku(bits = "5")]
-    pub type_id: u8,
-    #[deku(bits = "3")]
-    pub size_desc: u8,
-}
-
-/// A parsed SDP Data Element value.
-#[derive(Debug, Clone, PartialEq)]
-pub enum DataElement {
-    Nil,
-    U8(u8),
-    U16(u16),
-    U32(u32),
-    U64(u64),
-    U128(u128),
-    I8(i8),
-    I16(i16),
-    I32(i32),
-    I64(i64),
-    I128(i128),
-    Uuid16(u16),
-    Uuid32(u32),
-    Uuid128([u8; 16]),
-    Text(Vec<u8>),
-    Bool(bool),
-    Seq(Vec<DataElement>),
-    Alt(Vec<DataElement>),
-    Url(Vec<u8>),
-}
-
-/// An SDP attribute (attribute ID + value).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Attribute {
-    pub id: u16,
-    pub value: DataElement,
-}
-
-/// A parsed SDP record containing a sequence of attributes.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SdpRecord {
-    pub attributes: Vec<Attribute>,
-}
 
 // ---------------------------------------------------------------------------
-// Size resolution helpers
+// Helpers for variable-length payloads (size_desc 5 / 6 / 7)
 // ---------------------------------------------------------------------------
 
-/// Resolve the data length from a size descriptor.
-///
-/// Returns `(size_header_bytes, data_length)` where `size_header_bytes` is
-/// how many bytes of the length prefix were consumed (0 for fixed sizes).
-fn resolve_size(size_desc: u8, input: &[u8]) -> Result<(usize, usize), DekuError> {
-    match size_desc {
-        0..=4 => Ok((0, 1 << size_desc)),
-        5 => {
-            let len = *input.first().ok_or(DekuError::Parse(
-                "size_desc 5: missing 1-byte length field".into(),
-            ))?;
-            Ok((1, len as usize))
-        }
-        6 => {
-            if input.len() < 2 {
-                return Err(DekuError::Parse(
-                    "size_desc 6: missing 2-byte length field".into(),
-                ));
-            }
-            let len = u16::from_be_bytes([input[0], input[1]]);
-            Ok((2, len as usize))
-        }
-        7 => {
-            if input.len() < 4 {
-                return Err(DekuError::Parse(
-                    "size_desc 7: missing 4-byte length field".into(),
-                ));
-            }
-            let len = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
-            Ok((4, len as usize))
-        }
-        _ => Err(DekuError::Parse("invalid size descriptor".into())),
-    }
+/// One-byte length prefix, then `len` bytes of data.
+#[derive(DekuRead, DekuWrite, Debug, Clone, PartialEq)]
+#[deku(ctx = "_: deku::ctx::Endian")]
+pub struct VarLen8 {
+    pub len: u8,
+    #[deku(count = "len")]
+    pub data: Vec<u8>,
 }
 
-/// Pick the smallest size descriptor for a given data byte-length.
-///
-/// Returns `(size_desc, header_bytes)` where `header_bytes` is the optional
-/// length-prefix (empty for fixed sizes).
-fn pick_size_desc(data_len: usize) -> (u8, Vec<u8>) {
-    match data_len {
-        1 => (0, vec![]),
-        2 => (1, vec![]),
-        4 => (2, vec![]),
-        8 => (3, vec![]),
-        16 => (4, vec![]),
-        n if n <= 0xFF => (5, vec![n as u8]),
-        n if n <= 0xFFFF => (6, (n as u16).to_be_bytes().to_vec()),
-        n if n <= 0xFFFF_FFFF => (7, (n as u32).to_be_bytes().to_vec()),
-        _ => panic!("SDP data element too large ({data_len} bytes)"),
-    }
+/// Two-byte (big-endian) length prefix, then `len` bytes of data.
+#[derive(DekuRead, DekuWrite, Debug, Clone, PartialEq)]
+#[deku(endian = "big", ctx = "_: deku::ctx::Endian")]
+pub struct VarLen16 {
+    pub len: u16,
+    #[deku(count = "len")]
+    pub data: Vec<u8>,
 }
 
-// ---------------------------------------------------------------------------
-// Value byte readers
-// ---------------------------------------------------------------------------
-
-fn read_uint(data: &[u8]) -> Result<DataElement, DekuError> {
-    match data.len() {
-        1 => Ok(DataElement::U8(data[0])),
-        2 => Ok(DataElement::U16(u16::from_be_bytes([data[0], data[1]]))),
-        4 => Ok(DataElement::U32(u32::from_be_bytes([
-            data[0], data[1], data[2], data[3],
-        ]))),
-        8 => Ok(DataElement::U64(u64::from_be_bytes([
-            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-        ]))),
-        16 => {
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(data);
-            Ok(DataElement::U128(u128::from_be_bytes(arr)))
-        }
-        n if n < 16 => {
-            let mut padded = [0u8; 16];
-            padded[16 - n..].copy_from_slice(data);
-            Ok(DataElement::U128(u128::from_be_bytes(padded)))
-        }
-        _ => Err(DekuError::Parse("unsigned integer exceeds 128 bits".into())),
-    }
-}
-
-fn read_sint(data: &[u8]) -> Result<DataElement, DekuError> {
-    match data.len() {
-        1 => Ok(DataElement::I8(data[0] as i8)),
-        2 => Ok(DataElement::I16(i16::from_be_bytes([data[0], data[1]]))),
-        4 => Ok(DataElement::I32(i32::from_be_bytes([
-            data[0], data[1], data[2], data[3],
-        ]))),
-        8 => Ok(DataElement::I64(i64::from_be_bytes([
-            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-        ]))),
-        16 => {
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(data);
-            Ok(DataElement::I128(i128::from_be_bytes(arr)))
-        }
-        _ => Err(DekuError::Parse("signed integer exceeds 128 bits".into())),
-    }
-}
-
-fn read_uuid(data: &[u8]) -> Result<DataElement, DekuError> {
-    match data.len() {
-        2 => Ok(DataElement::Uuid16(u16::from_be_bytes([data[0], data[1]]))),
-        4 => Ok(DataElement::Uuid32(u32::from_be_bytes([
-            data[0], data[1], data[2], data[3],
-        ]))),
-        16 => {
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(data);
-            Ok(DataElement::Uuid128(arr))
-        }
-        _ => Err(DekuError::Parse("unsupported UUID width".into())),
-    }
-}
-
-fn parse_seq(data: &[u8]) -> Result<Vec<DataElement>, DekuError> {
-    let mut elements = Vec::new();
-    let mut remaining = data;
-    while !remaining.is_empty() {
-        let (rest, element) = DataElement::from_bytes(remaining)?;
-        elements.push(element);
-        remaining = rest;
-    }
-    Ok(elements)
-}
-
-fn write_seq(elements: &[DataElement]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    for el in elements {
-        buf.extend(el.to_bytes());
-    }
-    buf
+/// Four-byte (big-endian) length prefix, then `len` bytes of data.
+#[derive(DekuRead, DekuWrite, Debug, Clone, PartialEq)]
+#[deku(endian = "big", ctx = "_: deku::ctx::Endian")]
+pub struct VarLen32 {
+    pub len: u32,
+    #[deku(count = "len")]
+    pub data: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
 // DataElement
 // ---------------------------------------------------------------------------
 
+/// An SDP Data Element decoded from its wire tag byte.
+///
+/// The tag byte packs `type_id (5 bits) | size_desc (3 bits)`.
+/// Each valid `(type_id, size_desc)` combination has its own variant
+/// so that the `data` field is typed appropriately.
+#[derive(DekuRead, DekuWrite, Debug, Clone, PartialEq)]
+#[deku(id_type = "u8", endian = "big")]
+pub enum DataElement {
+
+    // -- Nil ----------------------------------------------------------------
+    #[deku(id = "0b00000_000")]
+    Nil,
+
+    // -- Unsigned integers --------------------------------------------------
+    #[deku(id = "0b00001_000")]
+    U8(u8),
+    #[deku(id = "0b00001_001")]
+    U16(u16),
+    #[deku(id = "0b00001_010")]
+    U32(u32),
+    #[deku(id = "0b00001_011")]
+    U64(u64),
+    #[deku(id = "0b00001_100")]
+    U128(u128),
+
+    // -- Signed integers ----------------------------------------------------
+    #[deku(id = "0b00010_000")]
+    S8(i8),
+    #[deku(id = "0b00010_001")]
+    S16(i16),
+    #[deku(id = "0b00010_010")]
+    S32(i32),
+    #[deku(id = "0b00010_011")]
+    S64(i64),
+    // -- UUIDs --------------------------------------------------------------
+    #[deku(id = "0b00011_001")]
+    UUID16(u16),
+    #[deku(id = "0b00011_010")]
+    UUID32(u32),
+    #[deku(id = "0b00011_100")]
+    UUID128([u8; 16]),
+
+    // -- Text strings (variable length) ------------------------------------
+    #[deku(id = "0b00100_101")]
+    String1(VarLen8),
+    #[deku(id = "0b00100_110")]
+    String2(VarLen16),
+    #[deku(id = "0b00100_111")]
+    String4(VarLen32),
+
+    // -- Boolean ------------------------------------------------------------
+    #[deku(id = "0b00101_000")]
+    Bool(bool),
+
+    // -- Sequences ----------------------------------------------------------
+    #[deku(id = "0b00110_101")]
+    Seq1(VarLen8),
+    #[deku(id = "0b00110_110")]
+    Seq2(VarLen16),
+    #[deku(id = "0b00110_111")]
+    Seq4(VarLen32),
+
+    // -- Alternatives -------------------------------------------------------
+    #[deku(id = "0b00111_101")]
+    Alt1(VarLen8),
+    #[deku(id = "0b00111_110")]
+    Alt2(VarLen16),
+    #[deku(id = "0b00111_111")]
+    Alt4(VarLen32),
+
+    // -- URLs ---------------------------------------------------------------
+    #[deku(id = "0b01000_101")]
+    Url1(VarLen8),
+    #[deku(id = "0b01000_110")]
+    Url2(VarLen16),
+    #[deku(id = "0b01000_111")]
+    Url4(VarLen32),
+}
+
+// ---------------------------------------------------------------------------
+// DataElement helper methods
+// ---------------------------------------------------------------------------
+
+/// Pick the smallest size descriptor for a given data byte-length.
+fn pick_size_desc(len: usize) -> u8 {
+    match len {
+        0 => 0,
+        1 => 0,
+        2 => 1,
+        4 => 2,
+        8 => 3,
+        16 => 4,
+        n if n <= 0xFF => 5,
+        n if n <= 0xFFFF => 6,
+        n if n <= 0xFFFF_FFFF => 7,
+        _ => panic!("SDP data element too large ({len} bytes)"),
+    }
+}
+
 impl DataElement {
-    /// Parse a `DataElement` from the front of `input`, returning the
-    /// remaining slice and the parsed element.
-    pub fn from_bytes(input: &[u8]) -> Result<(&[u8], Self), DekuError> {
-        let (rest, header) = DataElementHeader::from_bytes((input, 0))
-            .map_err(|_| DekuError::Parse("failed to read data element header".into()))?;
-        let rest = rest.0;
+    // -- raw data access for variable-length variants -----------------------
 
-        let min_extra = match header.size_desc {
-            5 => 1,
-            6 => 2,
-            7 => 4,
-            _ => 0,
-        };
-        if rest.len() < min_extra {
-            return Err(DekuError::Parse("input too short".into()));
-        }
-
-        let (size_len, data_len) = resolve_size(header.size_desc, rest)?;
-
-        if rest.len() < size_len + data_len {
-            return Err(DekuError::Parse("input too short for data".into()));
-        }
-
-        let data = &rest[size_len..size_len + data_len];
-        let remaining = &rest[size_len + data_len..];
-
-        let value = match header.type_id {
-            0 => DataElement::Nil,
-            1 => read_uint(data)?,
-            2 => read_sint(data)?,
-            3 => read_uuid(data)?,
-            4 => DataElement::Text(data.to_vec()),
-            5 => DataElement::Bool(data.first().map_or(false, |&b| b != 0)),
-            6 => DataElement::Seq(parse_seq(data)?),
-            7 => DataElement::Alt(parse_seq(data)?),
-            8 => DataElement::Url(data.to_vec()),
-            t => {
-                return Err(DekuError::Parse(
-                    format!("unknown data element type {t}").into(),
-                ));
-            }
-        };
-
-        Ok((remaining, value))
-    }
-
-    /// Serialize this `DataElement` into bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    fn var_data(&self) -> Option<&[u8]> {
         match self {
-            DataElement::Nil => vec![0b00000_000],
-            _ => {
-                let type_id = self.type_id();
-                let raw_data = self.raw_data();
-                let data_len = raw_data.len();
-                let (size_desc, prefix) = pick_size_desc(data_len);
-                let header_byte: u8 = (type_id << 3) | size_desc;
-                [vec![header_byte], prefix, raw_data].concat()
-            }
+            DataElement::String1(v)
+            | DataElement::Url1(v)
+            | DataElement::Seq1(v)
+            | DataElement::Alt1(v) => Some(&v.data),
+            DataElement::String2(v)
+            | DataElement::Url2(v)
+            | DataElement::Seq2(v)
+            | DataElement::Alt2(v) => Some(&v.data),
+            DataElement::String4(v)
+            | DataElement::Url4(v)
+            | DataElement::Seq4(v)
+            | DataElement::Alt4(v) => Some(&v.data),
+            _ => None,
         }
     }
 
-    fn type_id(&self) -> u8 {
+    // -- typed accessors ----------------------------------------------------
+
+    /// Interpret the element as a `u8` (must be `U8`).
+    pub fn as_u8(&self) -> Option<u8> {
         match self {
-            DataElement::Nil => 0,
-            DataElement::U8(_)
-            | DataElement::U16(_)
-            | DataElement::U32(_)
-            | DataElement::U64(_)
-            | DataElement::U128(_) => 1,
-            DataElement::I8(_)
-            | DataElement::I16(_)
-            | DataElement::I32(_)
-            | DataElement::I64(_)
-            | DataElement::I128(_) => 2,
-            DataElement::Uuid16(_) | DataElement::Uuid32(_) | DataElement::Uuid128(_) => 3,
-            DataElement::Text(_) => 4,
-            DataElement::Bool(_) => 5,
-            DataElement::Seq(_) => 6,
-            DataElement::Alt(_) => 7,
-            DataElement::Url(_) => 8,
+            DataElement::U8(v) => Some(*v),
+            _ => None,
         }
     }
 
-    fn raw_data(&self) -> Vec<u8> {
+    /// Interpret the element as a `u16` (must be `U16`).
+    pub fn as_u16(&self) -> Option<u16> {
         match self {
-            DataElement::Nil => vec![],
-            DataElement::U8(v) => v.to_be_bytes().to_vec(),
-            DataElement::U16(v) => v.to_be_bytes().to_vec(),
-            DataElement::U32(v) => v.to_be_bytes().to_vec(),
-            DataElement::U64(v) => v.to_be_bytes().to_vec(),
-            DataElement::U128(v) => v.to_be_bytes().to_vec(),
-            DataElement::I8(v) => v.to_be_bytes().to_vec(),
-            DataElement::I16(v) => v.to_be_bytes().to_vec(),
-            DataElement::I32(v) => v.to_be_bytes().to_vec(),
-            DataElement::I64(v) => v.to_be_bytes().to_vec(),
-            DataElement::I128(v) => v.to_be_bytes().to_vec(),
-            DataElement::Uuid16(v) => v.to_be_bytes().to_vec(),
-            DataElement::Uuid32(v) => v.to_be_bytes().to_vec(),
-            DataElement::Uuid128(v) => v.to_vec(),
-            DataElement::Text(v) => v.clone(),
-            DataElement::Bool(v) => vec![*v as u8],
-            DataElement::Seq(v) => write_seq(v),
-            DataElement::Alt(v) => write_seq(v),
-            DataElement::Url(v) => v.clone(),
+            DataElement::U16(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Interpret the element as a UUID (UUID16 / UUID32 / UUID128).
+    pub fn as_uuid(&self) -> Option<uuid::Uuid> {
+        match self {
+            DataElement::UUID16(id) => Some(uuid::Uuid::from_u128(*id as u128)),
+            DataElement::UUID32(id) => Some(uuid::Uuid::from_u128(*id as u128)),
+            DataElement::UUID128(bytes) => Some(uuid::Uuid::from_bytes(*bytes)),
+            _ => None,
+        }
+    }
+
+    /// Parse the raw data of a SEQ / ALT variant into its child elements.
+    pub fn parse_seq_data(&self) -> Result<Vec<DataElement>, DekuError> {
+        let data = self.var_data().unwrap_or(&[]);
+        if data.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut elements = Vec::new();
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            let ((rest, _), el) = DataElement::from_bytes((remaining, 0))?;
+            elements.push(el);
+            remaining = rest;
+        }
+        Ok(elements)
+    }
+
+    // -- constructors -------------------------------------------------------
+
+    pub fn nil() -> Self {
+        DataElement::Nil
+    }
+
+    pub fn u8(v: u8) -> Self {
+        DataElement::U8(v)
+    }
+
+    pub fn u16(v: u16) -> Self {
+        DataElement::U16(v)
+    }
+
+    pub fn uuid16(v: u16) -> Self {
+        DataElement::UUID16(v)
+    }
+
+    pub fn uuid128(v: [u8; 16]) -> Self {
+        DataElement::UUID128(v)
+    }
+
+    pub fn text(v: Vec<u8>) -> Self {
+        let len = v.len();
+        match pick_size_desc(len) {
+            5 => DataElement::String1(VarLen8 { len: len as u8, data: v }),
+            6 => DataElement::String2(VarLen16 { len: len as u16, data: v }),
+            7 => DataElement::String4(VarLen32 { len: len as u32, data: v }),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Build a SEQ from child elements.
+    pub fn seq(elements: Vec<DataElement>) -> Self {
+        let mut data = Vec::new();
+        for el in elements {
+            data.extend(el.to_bytes().unwrap());
+        }
+        let len = data.len();
+        match pick_size_desc(len) {
+            5 => DataElement::Seq1(VarLen8 { len: len as u8, data }),
+            6 => DataElement::Seq2(VarLen16 { len: len as u16, data }),
+            7 => DataElement::Seq4(VarLen32 { len: len as u32, data }),
+            _ => unreachable!(),
         }
     }
 }
@@ -324,130 +251,76 @@ impl DataElement {
 // Attribute
 // ---------------------------------------------------------------------------
 
-impl Attribute {
-    /// Parse a single attribute (UINT16 ID + DataElement value).
-    pub fn from_bytes(input: &[u8]) -> Result<(&[u8], Self), DekuError> {
-        let (rest, id_de) = DataElement::from_bytes(input)?;
-        let id = match id_de {
-            DataElement::U16(id) => id,
-            _ => {
-                return Err(DekuError::Parse(
-                    "expected UINT16 data element for attribute ID".into(),
-                ));
-            }
-        };
-        let (rest, value) = DataElement::from_bytes(rest)?;
-        Ok((rest, Attribute { id, value }))
-    }
-
-    /// Serialize this attribute into bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = DataElement::U16(self.id).to_bytes();
-        buf.extend(self.value.to_bytes());
-        buf
-    }
+/// An SDP attribute (attribute ID + value).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attribute {
+    pub id: DataElement,
+    pub value: DataElement,
 }
 
 // ---------------------------------------------------------------------------
 // SdpRecord
 // ---------------------------------------------------------------------------
 
-impl SdpRecord {
-    /// Parse an SDP record from a byte slice.
-    ///
-    /// The top-level element must be a `DataElement::Seq` containing interleaved
-    /// attribute-ID / attribute-value pairs.
-    pub fn from_bytes(input: &[u8]) -> Result<Self, DekuError> {
-        let (_rest, top) = DataElement::from_bytes(input)?;
-        let elements = match top {
-            DataElement::Seq(e) => e,
-            _ => {
-                return Err(DekuError::Parse(
-                    "SDP record must be a DataElementSequence".into(),
-                ));
-            }
-        };
+/// A parsed SDP record.
+///
+/// Wire format: a `DataElement::Seq` containing interleaved
+/// attribute-ID / attribute-value pairs.
+#[derive(DekuRead, DekuWrite, Debug, Clone, PartialEq)]
+pub struct SdpRecord(pub DataElement);
 
-        let mut attributes = Vec::new();
+impl SdpRecord {
+    /// Iterate over the attributes stored in the inner Seq.
+    fn parse_attributes(&self) -> Result<Vec<Attribute>, DekuError> {
+        let elements = self.0.parse_seq_data()?;
+        let mut attrs = Vec::new();
         let mut iter = elements.into_iter();
         while let Some(id_de) = iter.next() {
-            let id = match id_de {
-                DataElement::U16(id) => id,
-                other => {
-                    return Err(DekuError::Parse(
-                        format!("expected UINT16 attribute ID, got {other:?}").into(),
-                    ));
-                }
-            };
             let value = iter
                 .next()
                 .ok_or(DekuError::Parse("attribute value missing after ID".into()))?;
-            attributes.push(Attribute { id, value });
+            attrs.push(Attribute {
+                id: id_de,
+                value,
+            });
         }
-
-        Ok(SdpRecord { attributes })
-    }
-
-    /// Serialize this record into bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut attr_bytes = Vec::new();
-        for attr in &self.attributes {
-            attr_bytes.extend(attr.to_bytes());
-        }
-        let (sd, prefix) = pick_size_desc(attr_bytes.len());
-        let header_byte: u8 = (typ::SEQ << 3) | sd;
-        [vec![header_byte], prefix, attr_bytes].concat()
+        Ok(attrs)
     }
 
     /// Find the first attribute with the given ID.
-    pub fn find_attribute(&self, id: u16) -> Option<&Attribute> {
-        self.attributes.iter().find(|a| a.id == id)
+    pub fn find_attribute(&self, id: u16) -> Option<Attribute> {
+        self.parse_attributes()
+            .ok()?
+            .into_iter()
+            .find(|a| a.id.as_u16() == Some(id))
     }
 
     pub fn service_class_ids(&self) -> Vec<uuid::Uuid> {
         self.find_attribute(0x0001)
             .into_iter()
-            .flat_map(|attr| match &attr.value {
-                DataElement::Seq(seq) => seq.iter(),
-                _ => [].iter(),
-            })
-            .filter_map(|de| match de {
-                DataElement::Uuid16(id) => Some(uuid::Uuid::from_u128(*id as u128)),
-                DataElement::Uuid32(id) => Some(uuid::Uuid::from_u128(*id as u128)),
-                DataElement::Uuid128(bytes) => Some(uuid::Uuid::from_bytes(*bytes)),
-                _ => None,
-            })
+            .flat_map(|attr| attr.value.parse_seq_data().unwrap_or_default())
+            .filter_map(|de| de.as_uuid())
             .collect()
     }
 
     /// Extract the RFCOMM channel number from the ProtocolDescriptorList
     /// (attribute ID 0x0004) or AdditionalProtocolDescriptorLists (0x000D).
     pub fn rfcomm_channel(&self) -> Option<u16> {
-        let DataElement::Seq(ref protos) = self
+        let attr = self
             .find_attribute(0x0004)
-            .or_else(|| self.find_attribute(0x000D))?
-            .value
-        else {
-            return None;
-        };
-        for proto in protos {
-            let stack = match proto {
-                DataElement::Seq(s) => s,
-                _ => continue,
-            };
+            .or_else(|| self.find_attribute(0x000D))?;
+        let protos = attr.value.parse_seq_data().ok()?;
+        for proto in &protos {
+            let stack = proto.parse_seq_data().ok()?;
             for (i, item) in stack.iter().enumerate() {
-                if matches!(item, DataElement::Uuid16(0x0003)) {
+                if item.as_uuid() == Some(uuid::Uuid::from_u128(0x0003)) {
                     if let Some(next) = stack.get(i + 1) {
-                        return match next {
-                            DataElement::U8(ch) => Some(*ch as u16),
-                            DataElement::U16(ch) => Some(*ch),
-                            _ => None,
-                        };
+                        return next.as_u8().map(|v| v as u16).or_else(|| next.as_u16());
                     }
                 }
             }
         }
-        return None;
+        None
     }
 }
 
@@ -458,7 +331,7 @@ mod tests {
     #[test]
     fn test_nil() {
         let data = [0b00000_000];
-        let (rest, de) = DataElement::from_bytes(&data).unwrap();
+        let ((rest, _), de) = DataElement::from_bytes((&data, 0)).unwrap();
         assert_eq!(de, DataElement::Nil);
         assert!(rest.is_empty());
     }
@@ -466,31 +339,34 @@ mod tests {
     #[test]
     fn test_uint8() {
         let data = [0b00001_000, 0x42];
-        let (rest, de) = DataElement::from_bytes(&data).unwrap();
+        let ((rest, _), de) = DataElement::from_bytes((&data, 0)).unwrap();
         assert_eq!(de, DataElement::U8(0x42));
+        assert_eq!(de.as_u8(), Some(0x42));
         assert!(rest.is_empty());
     }
 
     #[test]
     fn test_uint16() {
         let data = [0b00001_001, 0x01, 0x02];
-        let (rest, de) = DataElement::from_bytes(&data).unwrap();
+        let ((rest, _), de) = DataElement::from_bytes((&data, 0)).unwrap();
         assert_eq!(de, DataElement::U16(0x0102));
+        assert_eq!(de.as_u16(), Some(0x0102));
         assert!(rest.is_empty());
     }
 
     #[test]
     fn test_uuid16() {
         let data = [0b00011_001, 0x01, 0x00];
-        let (rest, de) = DataElement::from_bytes(&data).unwrap();
-        assert_eq!(de, DataElement::Uuid16(0x0100));
+        let ((rest, _), de) = DataElement::from_bytes((&data, 0)).unwrap();
+        assert_eq!(de, DataElement::UUID16(0x0100));
+        assert_eq!(de.as_uuid(), Some(uuid::Uuid::from_u128(0x0100)));
         assert!(rest.is_empty());
     }
 
     #[test]
     fn test_bool_true() {
         let data = [0b00101_000, 0x01];
-        let (rest, de) = DataElement::from_bytes(&data).unwrap();
+        let ((rest, _), de) = DataElement::from_bytes((&data, 0)).unwrap();
         assert_eq!(de, DataElement::Bool(true));
         assert!(rest.is_empty());
     }
@@ -498,7 +374,7 @@ mod tests {
     #[test]
     fn test_bool_false() {
         let data = [0b00101_000, 0x00];
-        let (rest, de) = DataElement::from_bytes(&data).unwrap();
+        let ((rest, _), de) = DataElement::from_bytes((&data, 0)).unwrap();
         assert_eq!(de, DataElement::Bool(false));
         assert!(rest.is_empty());
     }
@@ -506,8 +382,15 @@ mod tests {
     #[test]
     fn test_text() {
         let data = [0b00100_101, 0x03, b'f', b'o', b'o'];
-        let (rest, de) = DataElement::from_bytes(&data).unwrap();
-        assert_eq!(de, DataElement::Text(b"foo".to_vec()));
+        let ((rest, _), de) = DataElement::from_bytes((&data, 0)).unwrap();
+        assert_eq!(
+            de,
+            DataElement::String1(VarLen8 {
+                len: 3,
+                data: b"foo".to_vec()
+            })
+        );
+        assert_eq!(de.var_data(), Some(&b"foo"[..]));
         assert!(rest.is_empty());
     }
 
@@ -521,11 +404,18 @@ mod tests {
             0b00001_000,
             0x02, // UINT8(2)
         ];
-        let (rest, de) = DataElement::from_bytes(&data).unwrap();
+        let ((rest, _), de) = DataElement::from_bytes((&data, 0)).unwrap();
         assert_eq!(
             de,
-            DataElement::Seq(vec![DataElement::U8(1), DataElement::U8(2)])
+            DataElement::Seq1(VarLen8 {
+                len: 4,
+                data: vec![0b00001_000, 0x01, 0b00001_000, 0x02]
+            })
         );
+        let elements = de.parse_seq_data().unwrap();
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0].as_u8(), Some(1));
+        assert_eq!(elements[1].as_u8(), Some(2));
         assert!(rest.is_empty());
     }
 
@@ -561,30 +451,43 @@ mod tests {
             0x05, // UINT8(5) = RFCOMM channel
         ];
 
-        let record = SdpRecord::from_bytes(&record_data).unwrap();
-        assert_eq!(record.attributes.len(), 2);
-        assert_eq!(record.attributes[0].id, 0x0001);
+        let ((_rest, _), seq) = DataElement::from_bytes((&record_data, 0)).unwrap();
+        let record = SdpRecord(seq);
+        let attrs = record.parse_attributes().unwrap();
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(attrs[0].id.as_u16(), Some(0x0001));
         assert_eq!(record.rfcomm_channel(), Some(5));
     }
 
     #[test]
     fn test_roundtrip_uint16() {
         let original = DataElement::U16(0x1234);
-        let bytes = original.to_bytes();
-        let (_rest, parsed) = DataElement::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed, original);
+        let bytes = original.to_bytes().unwrap();
+        let ((_rest, _), parsed) = DataElement::from_bytes((&bytes, 0)).unwrap();
+        assert_eq!(parsed, DataElement::U16(0x1234));
+        assert_eq!(parsed.as_u16(), Some(0x1234));
     }
 
     #[test]
     fn test_seq_roundtrip() {
-        let original = DataElement::Seq(vec![
-            DataElement::U8(1),
+        let inner = DataElement::seq(vec![
+            DataElement::u8(1),
             DataElement::U16(0x0200),
-            DataElement::Text(b"hello".to_vec()),
+            DataElement::text(b"hello".to_vec()),
         ]);
-        let bytes = original.to_bytes();
-        let (_rest, parsed) = DataElement::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed, original);
+        let bytes = inner.to_bytes().unwrap();
+        let ((_rest, _), parsed) = DataElement::from_bytes((&bytes, 0)).unwrap();
+        let elements = parsed.parse_seq_data().unwrap();
+        assert_eq!(elements.len(), 3);
+        assert_eq!(elements[0], DataElement::U8(1));
+        assert_eq!(elements[1], DataElement::U16(0x0200));
+        assert_eq!(
+            elements[2],
+            DataElement::String1(VarLen8 {
+                len: 5,
+                data: b"hello".to_vec()
+            })
+        );
     }
 
     #[test]
@@ -595,35 +498,18 @@ mod tests {
         ];
         let data = [
             0b00011_100, // UUID type, size_desc=4 (16 bytes)
-            uuid_bytes[0],
-            uuid_bytes[1],
-            uuid_bytes[2],
-            uuid_bytes[3],
-            uuid_bytes[4],
-            uuid_bytes[5],
-            uuid_bytes[6],
-            uuid_bytes[7],
-            uuid_bytes[8],
-            uuid_bytes[9],
-            uuid_bytes[10],
-            uuid_bytes[11],
-            uuid_bytes[12],
-            uuid_bytes[13],
-            uuid_bytes[14],
-            uuid_bytes[15],
+            uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3],
+            uuid_bytes[4], uuid_bytes[5], uuid_bytes[6], uuid_bytes[7],
+            uuid_bytes[8], uuid_bytes[9], uuid_bytes[10], uuid_bytes[11],
+            uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15],
         ];
-        let (_rest, de) = DataElement::from_bytes(&data).unwrap();
-        assert_eq!(de, DataElement::Uuid128(uuid_bytes));
+        let ((_rest, _), de) = DataElement::from_bytes((&data, 0)).unwrap();
+        assert_eq!(de, DataElement::UUID128(uuid_bytes));
+        assert_eq!(de.as_uuid(), Some(uuid::Uuid::from_bytes(uuid_bytes)));
     }
 
     #[test]
     fn test_service_class_ids_with_uuid128() {
-        // Build a minimal SDP record with ServiceClassIDList (0x0001)
-        // containing a 128-bit UUID.
-        // Top-level SEQ, variable uint8 length
-        //   UINT16(0x0001) = attribute ID
-        //   SEQ, variable uint8 length
-        //     UUID128(02 03 03 02 1d 19 41 5f 86 f2 22 a2 10 6a 0a 77)
         let uuid_bytes: [u8; 16] = [
             0x02, 0x03, 0x03, 0x02, 0x1d, 0x19, 0x41, 0x5f, 0x86, 0xf2, 0x22, 0xa2, 0x10, 0x6a,
             0x0a, 0x77,
@@ -640,8 +526,9 @@ mod tests {
         ];
         record_data.extend_from_slice(&uuid_bytes);
 
-        let parsed = SdpRecord::from_bytes(&record_data).unwrap();
-        let ids = parsed.service_class_ids();
+        let ((_rest, _), seq) = DataElement::from_bytes((&record_data, 0)).unwrap();
+        let record = SdpRecord(seq);
+        let ids = record.service_class_ids();
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], uuid::Uuid::from_bytes(uuid_bytes));
     }

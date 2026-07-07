@@ -1,3 +1,4 @@
+use deku::DekuContainerRead;
 use eyre::{Result, eyre};
 
 use zbus::{self, Connection, proxy};
@@ -26,7 +27,7 @@ pub(crate) async fn get_rfcomm_channel(address: &bluer::Address) -> Result<u16> 
     let records = device1.get_service_records().await?;
     let sdp_records = records
         .into_iter()
-        .filter_map(|r| SdpRecord::from_bytes(&r).ok())
+        .filter_map(|r| SdpRecord::from_bytes((&r, 0)).ok().map(|(_, rec)| rec))
         .collect::<Vec<_>>();
     let channel = sdp_records
         .iter()
