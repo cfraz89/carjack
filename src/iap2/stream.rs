@@ -43,7 +43,7 @@ where
             ack: 0x00,
             config: config,
         };
-        link.reset().await;
+        link.reset().await?;
         link.handshake().await?;
         Ok(link)
     }
