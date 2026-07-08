@@ -6,7 +6,6 @@ use crate::{portal::start_remote_desktop, usb::register_gadget, wireless::wirele
 mod encode;
 mod iap2;
 mod portal;
-mod sdp;
 mod usb;
 mod wireless;
 

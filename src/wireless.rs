@@ -3,10 +3,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{
-    iap2::{config::LinkConfig, stream::Iap2},
-    sdp::channel::get_rfcomm_channel,
-};
+use crate::iap2::{config::LinkConfig, stream::Iap2};
 use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
@@ -16,9 +13,6 @@ use bluer::{
     rfcomm::{self, Role},
 };
 use eyre::{Result, eyre};
-use futures::channel;
-use gst::glib::UnicodeType::Control;
-use iap2_proto::{ControlByte, Header, Packet};
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
     uuid::{
@@ -50,7 +44,7 @@ pub async fn wireless_carplay() -> Result<()> {
         .register_profile(rfcomm::Profile {
             uuid: IAP_DEVICE_UUID,
             name: Some(String::from("Wireless iAP")),
-            //This is super important, at least on my test device. Even though we dont connect through this profile,
+            //This is important, at least on my test device. Even though we dont connect through this profile,
             // the test device detects our machine as an android phone without the channel set to 1,
             // ie the channel its using on the accessory profile.
             role: Some(Role::Server),
@@ -59,7 +53,6 @@ pub async fn wireless_carplay() -> Result<()> {
         })
         .await?;
     let device = pair_available_accessory(&adapter).await?;
-    // let rfcomm_channel = get_rfcomm_channel(&device.address()).await?;
     // let mut iap2_handle = session
     //     .register_profile(rfcomm::Profile {
     //         name: Some(String::from("Wireless iAP v2")),
@@ -68,7 +61,6 @@ pub async fn wireless_carplay() -> Result<()> {
     //         ..Default::default()
     //     })
     //     .await?;
-    // tracing::info!(?rfcomm_channel, "Resolved iAP2 RFCOMM channel");
     //Need this on just to add the carplay uuid to eir data
     // let carplay_handle = session
     //     .register_profile(rfcomm::Profile {
@@ -88,9 +80,6 @@ pub async fn wireless_carplay() -> Result<()> {
     //};
 
     tracing::debug!("Waiting for iAP2 connection requests");
-    // let mut connections = StreamMap::new();
-    // connections.insert("iap_device", iap_device_handle);
-    // connections.insert("iap_accessory", iap_accessory_handle);
 
     let mut profiles = iap_accessory_handle.merge(iap_device_handle);
     while let Some(rq) = profiles.next().await {
@@ -112,10 +101,7 @@ async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::Advertis
         .advertise(Advertisement {
             advertisement_type: Type::Peripheral,
             service_uuids: BTreeSet::from([CARPLAY_DEVICE_UUID, IAP2_UUID]),
-            manufacturer_data: BTreeMap::from([
-                (MANUFACTURER_APPLE, CARPLAY_ADV_PAYLOAD.to_vec()),
-                (MANUFACTURER_APPLE, vec![0x02, 0x00, 0x00, 0x00]),
-            ]),
+            manufacturer_data: BTreeMap::from([(MANUFACTURER_APPLE, CARPLAY_ADV_PAYLOAD.to_vec())]),
             ..Default::default()
         })
         .await?;
