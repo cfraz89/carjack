@@ -1,5 +1,7 @@
 use backon::{ConstantBuilder, Retryable};
+use bytes::BytesMut;
 use deku::{DekuContainerRead, DekuContainerWrite};
+use futures::SinkExt;
 use pretty_hex::PrettyHex;
 use std::io::{Error, ErrorKind};
 use std::pin::Pin;
@@ -8,12 +10,14 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-use iap2_proto::{ControlByte, Header, IAP2_HANDSHAKE, Packet};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
 
-use crate::iap2::config::LinkConfig;
+use crate::config::LinkConfig;
+use crate::error::Iap2Error;
+use crate::packet::{ControlByte, Header, Packet};
+use crate::switch::REQUEST_IAP2_SWITCH_BYTES;
 
-/// Models iAP2 protocol, abstracting RFCOMM stream into `Packet` stream and sink.
+/// Models iAP2 protocol, manages read and write network streams, providing a `Packet` stream and sink.
 #[derive(Debug)]
 pub struct Iap2<R, W> {
     read_stream: Mutex<R>,
@@ -32,7 +36,11 @@ where
     W: AsyncWriteExt + Unpin,
 {
     //Create an iap2 link, starting with an iap2 compatibility hanshake with the receiving end
-    pub async fn start(read_stream: R, write_stream: W, config: LinkConfig) -> Result<Self, Error> {
+    pub async fn start(
+        read_stream: R,
+        write_stream: W,
+        config: LinkConfig,
+    ) -> Result<Self, Iap2Error> {
         let link = Iap2 {
             read_stream: Mutex::new(read_stream),
             write_stream: Mutex::new(write_stream),
@@ -43,8 +51,8 @@ where
             ack: 0x00,
             config: config,
         };
-        link.reset().await?;
-        link.handshake().await?;
+        // link.reset().await?;
+        link.request_iap2_switch().await?;
         Ok(link)
     }
 
@@ -75,85 +83,55 @@ where
         Poll::Ready(Ok(()))
     }
 
-    //Keep reading until we find the iap2 handshake bytes
-    async fn read_iap2_handshake(&self) -> Result<(), Error> {
-        let mut buf = [0u8; 256];
-
-        //Accumulate bytes in case the 6 bytes arrive fragmented across reads
-        let mut accumulated = Vec::with_capacity(1024);
-
-        loop {
-            // Read whatever is currently waiting in the OS buffer
-            let mut read_stream = self.read_stream.lock().await;
-            let n = read_stream.read(&mut buf).await?;
-            tracing::debug!(buf = ?buf.hex_dump(), "Read stream");
-            if n == 0 {
-                Err(Error::new(
-                    ErrorKind::ConnectionAborted,
-                    "Stream closed by remote side",
-                ))?;
-            }
-
-            accumulated.extend_from_slice(&buf[..n]);
-
-            if accumulated
-                .windows(IAP2_HANDSHAKE.len())
-                .find(|w| *w == IAP2_HANDSHAKE)
-                .is_some()
-            {
-                return Ok(());
-            }
-
-            //Keep our accumulationg buffer from growing too large
-            if accumulated.len() > 512 {
-                accumulated.drain(506..);
-            }
-        }
-    }
-
-    pub async fn handshake(&self) -> Result<(), Error> {
+    /// Write out iAP2 switch bytes, and attempt to read back the same bytes as response.
+    pub async fn request_iap2_switch(&self) -> Result<(), Iap2Error> {
         tokio::select!(
-            _ = sleep(self.config.handshake_timeout) => {
-                Err(Error::new(ErrorKind::TimedOut, "Timed out waiting for iAP2 handshake"))
-            },
-            res = (async || -> Result<(), Error> {
+            _ = sleep(self.config.iap2_switch_timeout) => Err(Iap2Error::Timeout("iAP2 switch".to_string())),
+            res = (async || -> Result<(), Iap2Error> {
                     loop {
                         let mut write_stream = self.write_stream.lock().await;
-                        write_stream.write(&IAP2_HANDSHAKE).await?;
-                        tracing::debug!("Wrote IAP2 handshake packet");
+                        write_stream.write(&REQUEST_IAP2_SWITCH_BYTES).await?;
+                        tracing::debug!("Wrote IAP2 switch packet");
                         sleep(Duration::from_secs(1)).await;
                     }
-                })
-                    .retry(ConstantBuilder::new().with_delay(Duration::from_secs(1)))
-            => {
-                res
-            },
-            res = (|| async { self.read_iap2_handshake().await })
-                    .retry(ConstantBuilder::new().with_delay(Duration::from_secs(1))) => {
-                res
-            },
+            }).retry(ConstantBuilder::new().with_delay(Duration::from_secs(1))) => res,
+            res = (async || -> Result<(), Iap2Error> {
+                let mut buf = BytesMut::with_capacity(6);
+                let mut read_stream = self.read_stream.lock().await;
+                let n = read_stream.read_exact(&mut buf).await?;
+                tracing::debug!(buf = ?buf.hex_dump(), "Read stream");
+                if n == 0 {
+                    Err(Error::new(
+                        ErrorKind::ConnectionAborted,
+                        "Stream closed by remote side",
+                    ))?;
+                }
+                if buf != REQUEST_IAP2_SWITCH_BYTES {
+                    Err(Iap2Error::UnexpectedIAP2SwitchResponse(buf.freeze()))?;
+                }
+                Ok(())
+            }).retry(ConstantBuilder::new().with_delay(Duration::from_secs(1))) => res,
         )
     }
 
-    pub async fn reset(&self) -> Result<(), Error> {
-        let packet = Packet {
-            header: Header {
-                control: ControlByte {
-                    rst: true,
-                    ..Default::default()
+    pub async fn reset(&mut self) -> Result<(), Iap2Error> {
+        Ok(self
+            .send(Packet {
+                header: Header {
+                    control: ControlByte {
+                        rst: true,
+                        ..Default::default()
+                    },
+                    length: 0,
+                    seq: self.seq,
+                    ack: self.ack,
+                    session_id: 0,
                 },
-                length: 0,
-                seq: self.seq,
-                ack: self.ack,
-                session_id: 0,
-            },
-            header_checksum: 0,
-            payload: Vec::new(),
-            payload_checksum: None,
-        };
-        let mut write_stream = self.write_stream.lock().await;
-        write_stream.write(&packet.to_bytes()?).await?;
-        Ok(())
+                header_checksum: 0,
+                payload: Vec::new(),
+                payload_checksum: None,
+            })
+            .await?)
     }
 }
 

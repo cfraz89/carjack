@@ -3,23 +3,23 @@ use std::{
     time::Duration,
 };
 
-use crate::iap2::{config::LinkConfig, stream::Iap2};
 use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
-    Device, DiscoveryFilter, Session, Uuid,
+    Device, DiscoveryFilter, Session,
     adv::{Advertisement, Type},
     agent::Agent,
     rfcomm::{self, Role},
 };
 use eyre::{Result, eyre};
+use iap2_proto::{config::LinkConfig, stream::Iap2};
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
     uuid::{
         CARPLAY_ACCESSORY_UUID, CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID, IAP2_UUID,
     },
 };
-use tokio_stream::{StreamExt, StreamMap};
+use tokio_stream::StreamExt;
 
 pub async fn wireless_carplay() -> Result<()> {
     let session = Session::new().await?;

@@ -4,7 +4,6 @@ use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use crate::{portal::start_remote_desktop, usb::register_gadget, wireless::wireless_carplay};
 
 mod encode;
-mod iap2;
 mod portal;
 mod usb;
 mod wireless;

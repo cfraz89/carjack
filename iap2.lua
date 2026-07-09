@@ -781,7 +781,6 @@ function iap2_post_proto.dissector(tvb, pinfo, tree)
 
     -- 3. Check for specific Link Initialization / iAP Handshake pattern
     if payload_length >= 6 and iap2_tvb(0, 6):bytes():tohex() == "FF550200EE10" then
-    	print(match)
         pinfo.cols.protocol:set("iAP")
         pinfo.cols.info:set("iAP Link Initialization Handshake")
         tree:add(iap2_post_proto, iap2_tvb(0, 6), "iAP Link Initialization Handshake")
