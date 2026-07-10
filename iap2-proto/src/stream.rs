@@ -1,128 +1,83 @@
-use backon::{ConstantBuilder, Retryable};
-use bytes::BytesMut;
+use bytes::{Buf, BytesMut};
 use deku::{DekuContainerRead, DekuContainerWrite};
-use futures::SinkExt;
 use pretty_hex::PrettyHex;
 use std::io::{Error, ErrorKind};
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::sync::Mutex;
-use tokio::time::sleep;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::codec::{Decoder, Encoder, Framed};
 
 use crate::config::LinkConfig;
 use crate::error::Iap2Error;
-use crate::packet::{ControlByte, Header, Packet};
-use crate::switch::REQUEST_IAP2_SWITCH_BYTES;
+use crate::packet::{Header, Packet};
+
+#[derive(Debug)]
+pub struct Iap2Codec;
+
+impl Decoder for Iap2Codec {
+    type Item = Packet;
+    type Error = Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Packet>, Error> {
+        match Packet::from_bytes((&src[..], 0)) {
+            Ok((rest, packet)) => {
+                let consumed = src.len() - rest.0.len();
+                src.advance(consumed);
+                Ok(Some(packet))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+}
+
+impl Encoder<Packet> for Iap2Codec {
+    type Error = Error;
+
+    fn encode(&mut self, packet: Packet, dst: &mut BytesMut) -> Result<(), Error> {
+        let bytes = packet
+            .to_bytes()
+            .map_err(|err| Error::new(ErrorKind::InvalidData, err.to_string()))?;
+        dst.extend_from_slice(&bytes);
+        Ok(())
+    }
+}
 
 /// Models iAP2 protocol, manages read and write network streams, providing a `Packet` stream and sink.
 #[derive(Debug)]
-pub struct Iap2<R, W> {
-    read_stream: Mutex<R>,
-    write_stream: Mutex<W>,
-    buffer: Vec<u8>,
-    write_buffer: Option<Vec<u8>>,
-    write_pos: usize,
+pub struct Iap2<T> {
+    pub framed: Framed<T, Iap2Codec>,
     seq: u8,
     ack: u8,
     pub config: LinkConfig,
 }
 
-impl<R, W> Iap2<R, W>
+impl<T> Iap2<T>
 where
-    R: AsyncReadExt + Unpin,
-    W: AsyncWriteExt + Unpin,
+    T: AsyncReadExt + AsyncWriteExt + Unpin,
 {
-    //Create an iap2 link, starting with an iap2 compatibility hanshake with the receiving end
-    pub async fn start(
-        read_stream: R,
-        write_stream: W,
-        config: LinkConfig,
-    ) -> Result<Self, Iap2Error> {
-        let link = Iap2 {
-            read_stream: Mutex::new(read_stream),
-            write_stream: Mutex::new(write_stream),
-            buffer: Vec::new(),
-            write_buffer: None,
-            write_pos: 0,
+    /// Create an iap2 link, starting with an iap2 compatibility handshake with the receiving end.
+    pub async fn start(stream: T, config: LinkConfig) -> Result<Self, Iap2Error> {
+        let mut stream = stream;
+        request_iap2_switch(&mut stream, &config).await?;
+        Ok(Iap2 {
+            framed: Framed::new(stream, Iap2Codec),
             seq: config.initial_seq,
             ack: 0x00,
-            config: config,
-        };
-        // link.reset().await?;
-        link.request_iap2_switch().await?;
-        Ok(link)
-    }
-
-    fn poll_write_buffer(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        let this = self.get_mut();
-
-        if let Some(buf) = &this.write_buffer {
-            while this.write_pos < buf.len() {
-                match Pin::new(this.write_stream.get_mut()).poll_write(cx, &buf[this.write_pos..]) {
-                    Poll::Ready(Ok(0)) => {
-                        return Poll::Ready(Err(Error::new(
-                            ErrorKind::WriteZero,
-                            "failed to write packet",
-                        )));
-                    }
-                    Poll::Ready(Ok(n)) => {
-                        this.write_pos += n;
-                    }
-                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                    Poll::Pending => return Poll::Pending,
-                }
-            }
-
-            this.write_buffer = None;
-            this.write_pos = 0;
-        }
-
-        Poll::Ready(Ok(()))
-    }
-
-    /// Write out iAP2 switch bytes, and attempt to read back the same bytes as response.
-    pub async fn request_iap2_switch(&self) -> Result<(), Iap2Error> {
-        tokio::select!(
-            _ = sleep(self.config.iap2_switch_timeout) => Err(Iap2Error::Timeout("iAP2 switch".to_string())),
-            res = (async || -> Result<(), Iap2Error> {
-                    loop {
-                        let mut write_stream = self.write_stream.lock().await;
-                        write_stream.write(&REQUEST_IAP2_SWITCH_BYTES).await?;
-                        tracing::debug!("Wrote IAP2 switch packet");
-                        sleep(Duration::from_secs(1)).await;
-                    }
-            }).retry(ConstantBuilder::new().with_delay(Duration::from_secs(1))) => res,
-            res = (async || -> Result<(), Iap2Error> {
-                let mut buf = BytesMut::with_capacity(6);
-                let mut read_stream = self.read_stream.lock().await;
-                let n = read_stream.read_exact(&mut buf).await?;
-                tracing::debug!(buf = ?buf.hex_dump(), "Read stream");
-                if n == 0 {
-                    Err(Error::new(
-                        ErrorKind::ConnectionAborted,
-                        "Stream closed by remote side",
-                    ))?;
-                }
-                if buf != REQUEST_IAP2_SWITCH_BYTES {
-                    Err(Iap2Error::UnexpectedIAP2SwitchResponse(buf.freeze()))?;
-                }
-                Ok(())
-            }).retry(ConstantBuilder::new().with_delay(Duration::from_secs(1))) => res,
-        )
+            config,
+        })
     }
 
     pub async fn reset(&mut self) -> Result<(), Iap2Error> {
+        use futures::SinkExt;
         Ok(self
+            .framed
             .send(Packet {
                 header: Header {
-                    control: ControlByte {
+                    length: 0,
+                    control: crate::packet::ControlByte {
                         rst: true,
                         ..Default::default()
                     },
-                    length: 0,
                     seq: self.seq,
                     ack: self.ack,
                     session_id: 0,
@@ -135,99 +90,47 @@ where
     }
 }
 
-impl<R, W> futures::Stream for Iap2<R, W>
-where
-    R: AsyncReadExt + Unpin,
-    W: AsyncWriteExt + Unpin,
-{
-    type Item = Packet;
+/// Write out iAP2 switch bytes, and attempt to read back the same bytes as response.
+async fn request_iap2_switch<T: AsyncReadExt + AsyncWriteExt + Unpin>(
+    stream: &mut T,
+    config: &LinkConfig,
+) -> Result<(), Iap2Error> {
+    let mut buf = BytesMut::with_capacity(6);
+    //Keep trying to send iap2 switch packet until we receive matching response, or timeout
+    let deadline = tokio::time::Instant::now() + config.iap2_switch_timeout;
 
-    // Try to create a packet from our persistent buffer, otherwise read into the buffer what we can
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Packet>> {
-        let this = self.get_mut();
-
-        loop {
-            if let Some(((_, offset), packet)) = Packet::from_bytes((&mut this.buffer, 0)).ok() {
-                this.buffer.drain(..offset);
-                return Poll::Ready(Some(packet));
+    loop {
+        match stream.write_all(&Packet::REQUEST_IAP2_SWITCH).await {
+            Ok(()) => tracing::debug!("Wrote IAP2 switch packet"),
+            Err(e) => {
+                tracing::debug!(?e, "Write failed, retrying");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
             }
+        }
 
-            let mut buf = vec![0u8; 4096];
-            let mut read_buf = ReadBuf::new(&mut buf);
-
-            match Pin::new(this.read_stream.get_mut()).poll_read(cx, &mut read_buf) {
-                Poll::Ready(Ok(())) => {
-                    let n = read_buf.filled().len();
-                    if n == 0 {
-                        return Poll::Ready(None);
-                    }
-                    this.buffer.extend_from_slice(read_buf.filled());
+        match tokio::time::timeout_at(deadline, stream.read_exact(&mut buf)).await {
+            Ok(Ok(n)) => {
+                tracing::debug!(buf = ?buf.hex_dump(), "Read stream");
+                if n == 0 {
+                    return Err(Error::new(
+                        ErrorKind::ConnectionAborted,
+                        "Stream closed by remote side",
+                    )
+                    .into());
                 }
-                Poll::Ready(Err(_)) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
+                if buf != Packet::REQUEST_IAP2_SWITCH {
+                    return Err(Iap2Error::UnexpectedIAP2SwitchResponse(buf.freeze()));
+                }
+                return Ok(());
             }
-        }
-    }
-}
-
-impl<R, W> futures::Sink<Packet> for Iap2<R, W>
-where
-    R: AsyncReadExt + Unpin,
-    W: AsyncWriteExt + Unpin,
-{
-    type Error = Error;
-
-    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.poll_write_buffer(cx)
-    }
-
-    fn start_send(self: Pin<&mut Self>, packet: Packet) -> Result<(), Self::Error> {
-        let this = self.get_mut();
-
-        if this.write_buffer.is_some() {
-            return Err(Error::new(
-                ErrorKind::WouldBlock,
-                "previous packet not yet flushed",
-            ));
-        }
-
-        let bytes = packet
-            .to_bytes()
-            .map_err(|err| Error::new(ErrorKind::InvalidData, err.to_string()))?;
-
-        this.write_buffer = Some(bytes);
-        this.write_pos = 0;
-
-        Ok(())
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let this = self.get_mut();
-        match Pin::new(&mut *this).poll_write_buffer(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-            Poll::Pending => return Poll::Pending,
-        }
-
-        match Pin::new(this.write_stream.get_mut()).poll_flush(cx) {
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let this = self.get_mut();
-        match Pin::new(&mut *this).poll_flush(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-            Poll::Pending => return Poll::Pending,
-        }
-
-        match Pin::new(this.write_stream.get_mut()).poll_shutdown(cx) {
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Pending => Poll::Pending,
+            Ok(Err(e)) => {
+                tracing::debug!(?e, "Read failed, retrying");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(_) => {
+                return Err(Iap2Error::Timeout("iAP2 switch".to_string()));
+            }
         }
     }
 }
