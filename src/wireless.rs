@@ -84,12 +84,14 @@ pub async fn wireless_carplay() -> Result<()> {
     let mut profiles = iap_accessory_handle.merge(iap_device_handle);
     while let Some(rq) = profiles.next().await {
         let stream = rq.accept()?;
-        let (rx, tx) = stream.into_split();
         tracing::debug!("Establishing iAP2 link");
-        let mut iap2 = Iap2::start(rx, tx, LinkConfig::default()).await?;
+        let mut iap2 = Iap2::start(stream, LinkConfig::default()).await?;
         tracing::debug!("iAP2 link established");
-        while let Some(packet) = iap2.next().await {
-            tracing::debug!(?packet, "Received packet");
+        while let Some(result) = iap2.framed.next().await {
+            match result {
+                Ok(packet) => tracing::debug!(?packet, "Received packet"),
+                Err(e) => tracing::warn!(?e, "Error reading packet"),
+            }
         }
         tracing::debug!("iAP lifecycle ended");
     }
