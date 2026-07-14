@@ -1,5 +1,5 @@
 [workspace]
-members = ["iap2-proto"]
+members = ["iap2-proto", "libcarjack"]
 
 [workspace.package]
 edition = "2024"
@@ -18,7 +18,7 @@ deku = "0.20.3"
 uuid = "1.23.3"
 eyre = "0.6.12"
 futures = "0.3.32"
-gst = { package = "gstreamer", version = "0.25.2" }
+
 iap2-proto = { version = "0.1.0", path = "iap2-proto" }
 libcarjack = { path = "libcarjack" }
 tokio = { version = "1.52.3", features = ["full"] }
