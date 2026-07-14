@@ -21,18 +21,13 @@ pub struct Packet {
     pub payload: Vec<u8>,
     #[deku(
         cond = "!payload.is_empty()",
-        assert_eq = "if !payload.is_empty() { Some(payload.calculate_checksum()) } else { None }"
+        assert_eq = "if !payload.is_empty() { Some(payload.calculate_checksum()) } else { None }",
+        update = "self.payload.calculate_checksum()"
     )]
     pub payload_checksum: Option<u8>,
 }
 
-impl Packet {
-    //One-of-a-kind initial packet thats actually iAP1, so we just leave it raw
-    pub const REQUEST_IAP2_SWITCH: Bytes =
-        Bytes::from_static(&[0xFF, 0x55, 0x02, 0x00, 0xEE, 0x10]);
-}
-
-trait Checksumable {
+pub trait Checksumable {
     fn calculate_checksum(&self) -> u8;
 }
 
