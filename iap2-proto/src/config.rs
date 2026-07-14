@@ -8,7 +8,6 @@ pub struct LinkConfig {
     pub timeout: Duration,
     pub detect_to_syn_delay: Duration,
     pub syn_retry_delay: Duration,
-    pub iap2_switch_timeout: Duration,
     pub initial_seq: u8,
 }
 
@@ -19,7 +18,6 @@ impl Default for LinkConfig {
             timeout: Duration::from_millis(1500),
             detect_to_syn_delay: Duration::from_millis(100),
             syn_retry_delay: Duration::from_millis(150),
-            iap2_switch_timeout: Duration::from_secs(30),
             initial_seq: 0x9D,
         }
     }

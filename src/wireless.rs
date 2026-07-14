@@ -12,7 +12,7 @@ use bluer::{
     rfcomm::{self, Role},
 };
 use eyre::{Result, eyre};
-use iap2_proto::{config::LinkConfig, stream::Iap2};
+use iap2_proto::{config::LinkConfig, iap2::Iap2};
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
     uuid::{
@@ -85,9 +85,10 @@ pub async fn wireless_carplay() -> Result<()> {
     while let Some(rq) = profiles.next().await {
         let stream = rq.accept()?;
         tracing::debug!("Establishing iAP2 link");
-        let mut iap2 = Iap2::start(stream, LinkConfig::default()).await?;
+        let iap2 = Iap2::start(stream, LinkConfig::default()).await?;
         tracing::debug!("iAP2 link established");
-        while let Some(result) = iap2.framed.next().await {
+        let mut packet_stream = iap2.packet_stream.lock().await;
+        while let Some(result) = packet_stream.next().await {
             match result {
                 Ok(packet) => tracing::debug!(?packet, "Received packet"),
                 Err(e) => tracing::warn!(?e, "Error reading packet"),

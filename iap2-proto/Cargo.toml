@@ -8,6 +8,7 @@ name = "iap2_proto"
 path = "src/lib.rs"
 
 [dependencies]
+backon = { version = "1.6.0", features = ["tokio"] }
 bytes = "1.12.1"
 deku = "0.20.3"
 futures = "0.3.32"
