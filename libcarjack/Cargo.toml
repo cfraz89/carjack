@@ -1,12 +1,16 @@
 [package]
 name = "libcarjack"
 version = "0.1.0"
-edition.workspace = true
+edition = "2021"
 
 [lib]
 name = "libcarjack"
 path = "src/lib.rs"
 
 [dependencies]
+deku = "0.20.3"
+iap2-proto = { version = "0.1.0", path = "../iap2-proto" }
+tokio = { version = "1.52.3", features = ["sync"] }
+tracing = "0.1.44"
 usb = "0.3.0"
 uuid = "1.23.3"

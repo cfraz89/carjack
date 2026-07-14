@@ -1,7 +1,6 @@
-use std::time::Duration;
-
 use bytes::{Bytes, BytesMut};
 use pretty_hex::PrettyHex;
+use std::time::Duration;
 
 use crate::{
     error::Iap2Error,
@@ -23,8 +22,20 @@ impl<S: Stream> Switch<'_, S> {
         let mut packet_stream = self.0.packet_stream.lock().await;
         let stream = packet_stream.get_mut();
         stream.write_all(&REQUEST_IAP2_SWITCH).await?;
+        stream.flush().await?;
         tracing::debug!("Wrote IAP2 switch packet");
-        stream.read_exact(&mut buf).await?;
+
+        let result = tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut buf)).await;
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                return Err(Iap2Error::SwitchFailed(
+                    "Timeout waiting for IAP2 switch response",
+                ));
+            }
+        }
+
         tracing::debug!(buf = ?buf.hex_dump(), "Read stream");
         if buf != REQUEST_IAP2_SWITCH {
             Err(Iap2Error::UnexpectedIAP2SwitchResponse(buf.freeze()))?;
