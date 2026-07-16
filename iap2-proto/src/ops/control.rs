@@ -244,9 +244,9 @@ impl GetParam for [Parameter] {
 pub struct ControlMessage {
     #[deku(endian = "big")]
     pub som: u16,
+    pub message_id: ControlMessageId,
     #[deku(update = "6 + self.raw_parameters.len() as u16", endian = "big")]
     pub total_length: u16,
-    pub message_id: ControlMessageId,
     #[deku(count = "total_length.saturating_sub(6) as usize")]
     pub raw_parameters: Vec<u8>,
 }
