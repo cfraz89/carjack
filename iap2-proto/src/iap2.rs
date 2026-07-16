@@ -16,8 +16,6 @@ use crate::stream::SessionTable;
 #[derive(Debug)]
 pub struct Iap2Codec;
 
-const IAP1_SWITCH_PATTERN: [u8; 6] = [0xFF, 0x55, 0x02, 0x00, 0xEE, 0x10];
-
 impl Decoder for Iap2Codec {
     type Item = Packet;
     type Error = Iap2Error;
