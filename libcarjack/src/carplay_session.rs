@@ -104,10 +104,6 @@ impl<S: Stream> CarplaySession<S> {
                 }
                 else => break,
             }
-
-            if self.ready_tx.is_none() {
-                break;
-            }
         }
         Ok(())
     }
