@@ -19,8 +19,23 @@ impl<S: Stream> Syn<'_, S> {
     }
 
     async fn perform_inner(&self) -> Result<SessionTable, Iap2Error> {
-        let mut syn = SynPayload::new();
-        syn.sessions = vec![
+        tracing::debug!("Waiting for SYN from accessory");
+
+        let packet = tokio::time::timeout(Duration::from_secs(5), self.0.receive_packet())
+            .await
+            .map_err(|_| Iap2Error::SynFailed("Timeout waiting for SYN"))?
+            .ok_or(Iap2Error::SynFailed("No response"))??;
+
+        if !packet.header.control.syn || packet.header.control.ack {
+            return Err(Iap2Error::SynFailed("Expected SYN (not SYN+ACK)"));
+        }
+
+        let accessory_sessions = SynPayload::from_bytes(&packet.payload)
+            .map_err(|_| Iap2Error::SynFailed("Bad SYN payload"))?;
+        tracing::debug!(?accessory_sessions, "Received SYN from accessory");
+
+        let mut our_syn = SynPayload::new();
+        our_syn.sessions = vec![
             SessionEntry {
                 id: 0,
                 session_type: SessionType::Control,
@@ -38,23 +53,14 @@ impl<S: Stream> Syn<'_, S> {
             ack: true,
             ..Default::default()
         };
-        self.0.send_packet(control, 0, syn.to_bytes()).await?;
-        tracing::debug!("Sent SYN");
-
-        let packet = tokio::time::timeout(Duration::from_secs(5), self.0.receive_packet())
-            .await
-            .map_err(|_| Iap2Error::SynFailed("Timeout waiting for SYN+ACK"))?
-            .ok_or(Iap2Error::SynFailed("No response to SYN"))??;
-
-        if !packet.header.control.syn || !packet.header.control.ack {
-            return Err(Iap2Error::SynFailed("Expected SYN+ACK"));
-        }
-
-        let response = SynPayload::from_bytes(&packet.payload)
-            .map_err(|_| Iap2Error::SynFailed("Bad SYN+ACK payload"))?;
+        self.0.send_packet(control, 0, our_syn.to_bytes()).await?;
+        tracing::debug!("Sent SYN+ACK");
 
         let mut table = SessionTable::new();
-        for s in response.sessions {
+        for s in accessory_sessions.sessions {
+            table.add(s);
+        }
+        for s in our_syn.sessions {
             table.add(s);
         }
         tracing::debug!(?table, "SYN exchange complete");

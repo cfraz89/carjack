@@ -1,4 +1,4 @@
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use pretty_hex::PrettyHex;
 use std::time::Duration;
 
@@ -18,31 +18,21 @@ pub struct Switch<'a, S>(pub &'a Iap2<S>);
 
 impl<S: Stream> Switch<'_, S> {
     async fn perform_inner(&self) -> Result<(), Iap2Error> {
-        let mut buf = BytesMut::with_capacity(512);
+        let mut buf = [0u8; 6];
         let mut packet_stream = self.0.packet_stream.lock().await;
         let stream = packet_stream.get_mut();
-        stream.write_all(&REQUEST_IAP2_SWITCH).await?;
-        tracing::debug!("Wrote IAP2 switch packet");
-
-        //Not sure if it is correct to allow a lack of response
-        match tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await {
-            Ok(Ok(n)) => {
-                tracing::trace!(buf = ?buf.hex_dump(), "Read stream");
-                if n != 0 && buf != REQUEST_IAP2_SWITCH {
-                    Err(Iap2Error::UnexpectedIAP2SwitchResponse(buf.freeze()))?;
-                }
-                tracing::debug!("Received iap2 switch response");
-                Ok(())
-            }
-            Ok(Err(e)) => Err(e)?,
-            Err(_) => {
-                tracing::debug!("Timed out waiting for switch packet response. Continuing.");
-                Ok(())
-            }
+        tracing::debug!("Waiting for iap2 switch command");
+        stream.read_exact(&mut buf).await?;
+        tracing::trace!(buf = ?buf.hex_dump(), "Read stream");
+        if buf.as_slice() != REQUEST_IAP2_SWITCH.as_ref() {
+            Err(Iap2Error::UnexpectedIAP2SwitchResponse(Bytes::copy_from_slice(&buf)))?;
         }
+        tracing::debug!("Received iap2 switch command");
+        stream.write_all(&REQUEST_IAP2_SWITCH).await?;
+        Ok(())
     }
 
-    /// Write out iAP2 switch bytes, and attempt to read back the same bytes as response.
+    /// Wait for iAP1 switch from accessory, then echo it back.
     pub async fn perform(&self) -> Result<(), Iap2Error> {
         (|| async { self.perform_inner().await })
             .retry(

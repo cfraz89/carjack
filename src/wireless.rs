@@ -13,7 +13,7 @@ use bluer::{
     rfcomm::{self, Role},
 };
 use eyre::{Result, eyre};
-use iap2_proto::error::Iap2Error;
+use iap2_proto::{config::LinkConfig, error::Iap2Error, iap2::Iap2};
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
     carplay_session::TouchEvent,
@@ -43,8 +43,8 @@ pub async fn wireless_carplay(
         .register_profile(rfcomm::Profile {
             uuid: IAP_ACCESSORY_UUID,
             name: Some(String::from("Wireless iAP")),
-            // auto_connect: Some(false),
             role: Some(Role::Client),
+            // auto_connect: Some(true),
             ..Default::default()
         })
         .await?;
@@ -61,22 +61,32 @@ pub async fn wireless_carplay(
     let device = pair_available_accessory(&adapter).await?;
     if device.is_connected().await? {
         tracing::info!("Already connected");
+    } else {
+        device.connect().await?;
     }
-    //device.connect().await?;
+    // let socket = rfcomm::Socket::new()?;
+    // let stream = socket
+    //     .connect(rfcomm::SocketAddr::new(device.address(), 1))
+    //     .await?;
 
     tracing::debug!("Waiting for iAP2 connection requests");
     let mut profiles = iap_accessory_handle.merge(iap_device_handle);
-    let rq = tokio::spawn(async move {
+    let acceptance = tokio::spawn(async move {
         let Some(rq) = profiles.next().await else {
             return Err(Iap2Error::ChannelClosed);
         };
         tracing::info!("Got connect request");
         let stream = rq.accept().map_err(|e| std::io::Error::from(e))?;
-        Ok(stream)
+        Ok((stream, profiles))
     });
     device.connect_profile(&IAP_ACCESSORY_UUID).await?;
-    let stream = rq.await??;
-    carplay::run_carplay_session(stream, video_rx, touch_tx, ready_tx).await?;
+    let (stream, _profiles) = acceptance.await??;
+    tracing::debug!("Establishing iAP2 link");
+
+    let iap2 = Iap2::start(stream, LinkConfig::default()).await?;
+
+    tracing::debug!("iAP2 link established");
+    carplay::run_carplay_session(iap2, video_rx, touch_tx, ready_tx).await?;
     tracing::debug!("iAP lifecycle ended");
     Ok(())
 }
