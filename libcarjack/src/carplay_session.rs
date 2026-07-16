@@ -90,11 +90,20 @@ impl<S: Stream> CarplaySession<S> {
         loop {
             tokio::select! {
                 packet = self.iap2.receive_packet() => {
-                    let packet = packet?;
-                    if !packet.header.control.ack || packet.payload.is_empty() {
-                        continue;
+                    match packet {
+                        Ok(packet) => {
+                            if !packet.header.control.ack || packet.payload.is_empty() {
+                                continue;
+                            }
+                            if let Err(e) = self.dispatch_packet(packet).await {
+                                tracing::warn!("Dispatch error: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Packet receive error: {e}");
+                            continue;
+                        }
                     }
-                    self.dispatch_packet(packet).await?;
                 }
                 video = self.video_rx.recv() => {
                     if self.ea_session_id != 0 {
@@ -111,11 +120,12 @@ impl<S: Stream> CarplaySession<S> {
     async fn do_identification(&mut self) -> Result<(), Iap2Error> {
         tracing::debug!("Sending StartIdentification");
         let payload = control::make_start_identification();
+        tracing::debug!("StartIdentification payload: {:?}", payload);
         let ctrl = ControlByte {
             ack: true,
             ..Default::default()
         };
-        self.iap2.send_packet(ctrl, 0, payload).await?;
+        self.iap2.send_packet(ctrl, 1, payload).await?;
         Ok(())
     }
 
@@ -169,7 +179,7 @@ impl<S: Stream> CarplaySession<S> {
             ack: true,
             ..Default::default()
         };
-        self.iap2.send_packet(ctrl, 0, payload).await
+        self.iap2.send_packet(ctrl, 1, payload).await
     }
 
     async fn handle_control_message(&mut self, msg: ControlMessage) -> Result<(), Iap2Error> {
@@ -205,6 +215,14 @@ impl<S: Stream> CarplaySession<S> {
                 tracing::info!("Authentication complete");
                 self.send_ctrl(control::make_authentication_succeeded()).await?;
                 self.auth_step = None;
+                // Request WiFi config and proactively start EA session
+                self.send_ctrl(control::make_request_accessory_wifi_config()).await?;
+                let payload = control::make_start_ea_session("com.apple.carplay");
+                self.send_ctrl(payload).await?;
+                tracing::info!("Started EA session");
+                if let Some(tx) = self.ready_tx.take() {
+                    let _ = tx.send(());
+                }
             }
             ControlMessageId::RequestAppLaunch
             | ControlMessageId::StatusExternalAccessoryProtocolSession => {
@@ -219,6 +237,12 @@ impl<S: Stream> CarplaySession<S> {
                 tracing::info!("Started EA session");
                 if let Some(tx) = self.ready_tx.take() {
                     let _ = tx.send(());
+                }
+            }
+            ControlMessageId::AccessoryWiFiConfigurationInformation => {
+                tracing::debug!("Received AccessoryWiFiConfigurationInformation");
+                if let Some(ssid) = params.get_param::<String>(ParameterId::SSID) {
+                    tracing::info!("Accessory WiFi SSID: {}", ssid);
                 }
             }
             ControlMessageId::RequestWiFiInformation => {
@@ -238,11 +262,24 @@ impl<S: Stream> CarplaySession<S> {
                 let payload = control::make_wifi_information("CarJack-WiFi", "carjack123");
                 self.send_ctrl(payload).await?;
             }
+            ControlMessageId::StartNowPlayingUpdates => {
+                tracing::debug!("Accessory requested now playing updates");
+                self.send_ctrl(control::make_now_playing_update()).await?;
+            }
+            ControlMessageId::WirelessCarPlayUpdate => {
+                tracing::debug!("Received WirelessCarPlayUpdate");
+                self.send_ctrl(control::make_wireless_carplay_update()).await?;
+            }
             ControlMessageId::BluetoothComponentInformation => {
                 tracing::debug!("Received BluetoothComponentInformation");
             }
             ControlMessageId::DeviceInformationUpdate => {
                 tracing::debug!("Received DeviceInformationUpdate");
+            }
+            ControlMessageId::DeviceTimeUpdate
+            | ControlMessageId::DeviceLanguageUpdate
+            | ControlMessageId::DeviceUUIDUpdate => {
+                tracing::debug!("Received device info update: {:?}", msg.message_id);
             }
             _ => {
                 tracing::debug!("Unhandled control message: {:?}", msg.message_id);

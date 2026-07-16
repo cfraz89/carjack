@@ -4,7 +4,7 @@ use deku::prelude::*;
 pub const SOM: u16 = 0x4040;
 
 #[derive(DekuRead, DekuWrite, Debug, Clone, Copy, PartialEq, Eq)]
-#[deku(id_type = "u16")]
+#[deku(id_type = "u16", endian = "big")]
 pub enum ControlMessageId {
     #[deku(id = "0xAA00")]
     RequestAuthenticationCertificate,
@@ -297,7 +297,9 @@ impl IntoParameter for &[u8] {
 
 impl Parameter {
     pub fn new<T: IntoParameter>(id: ParameterId, value: T) -> Self {
-        value.into_parameter(id)
+        let mut p = value.into_parameter(id);
+        p.total_length = 4 + p.data.len() as u16;
+        p
     }
 }
 
@@ -339,9 +341,9 @@ impl GetParam for [Parameter] {
 pub struct ControlMessage {
     #[deku(endian = "big")]
     pub som: u16,
-    pub message_id: ControlMessageId,
     #[deku(update = "6 + self.raw_parameters.len() as u16", endian = "big")]
     pub total_length: u16,
+    pub message_id: ControlMessageId,
     #[deku(count = "total_length.saturating_sub(6) as usize")]
     pub raw_parameters: Vec<u8>,
 }
@@ -354,9 +356,10 @@ impl ControlMessage {
                 &<Parameter as deku::DekuContainerWrite>::to_bytes(p).unwrap_or_default(),
             );
         }
+        let total_len = 6u16 + raw_parameters.len() as u16;
         ControlMessage {
             som: SOM,
-            total_length: 0,
+            total_length: total_len,
             message_id,
             raw_parameters,
         }
@@ -483,6 +486,18 @@ pub fn make_wireless_carplay_update() -> Vec<u8> {
     )
     .to_bytes()
     .expect("ControlMessage serialization")
+}
+
+pub fn make_now_playing_update() -> Vec<u8> {
+    ControlMessage::new(ControlMessageId::NowPlayingUpdate, vec![])
+        .to_bytes()
+        .expect("ControlMessage serialization")
+}
+
+pub fn make_request_accessory_wifi_config() -> Vec<u8> {
+    ControlMessage::new(ControlMessageId::RequestAccessoryWiFiConfigurationInformation, vec![])
+        .to_bytes()
+        .expect("ControlMessage serialization")
 }
 
 pub fn make_wifi_information(ssid: &str, passphrase: &str) -> Vec<u8> {
