@@ -25,10 +25,14 @@ impl<S: Stream> Switch<'_, S> {
         stream.read_exact(&mut buf).await?;
         tracing::trace!(buf = ?buf.hex_dump(), "Read stream");
         if buf.as_slice() != REQUEST_IAP2_SWITCH.as_ref() {
-            Err(Iap2Error::UnexpectedIAP2SwitchResponse(Bytes::copy_from_slice(&buf)))?;
+            Err(Iap2Error::UnexpectedBytes(
+                String::from("Unexpected switch response"),
+                Bytes::copy_from_slice(&buf),
+            ))?;
         }
         tracing::debug!("Received iap2 switch command");
         stream.write_all(&REQUEST_IAP2_SWITCH).await?;
+        tracing::debug!("Sent iap2 switch response");
         Ok(())
     }
 

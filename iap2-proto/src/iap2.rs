@@ -109,15 +109,9 @@ impl<S: Stream> Iap2<S> {
         Ok(())
     }
 
-    pub async fn receive_packet(&self) -> Option<Result<Packet, Error>> {
-        let result = {
-            let mut stream = self.packet_stream.lock().await;
-            stream.next().await
-        };
-        if let Some(Ok(ref packet)) = result {
-            self.ack.store(packet.header.seq, Ordering::Relaxed);
-        }
-        result
+    pub async fn receive_packet(&self) -> Result<Packet, Iap2Error> {
+        let mut stream = self.packet_stream.lock().await;
+        Ok(stream.next().await.ok_or(Iap2Error::NoPacket)??)
     }
 
     /// Perform the iAP2 link establishment handshake:

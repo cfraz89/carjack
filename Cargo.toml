@@ -27,3 +27,4 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 usb-gadget = "1.2.0"
 zbus = { version = "5.17.0", features = ["tokio"] }
+tap = "1.0.1"

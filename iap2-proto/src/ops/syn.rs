@@ -8,14 +8,23 @@ use crate::{
     packet::ControlByte,
     stream::{SessionEntry, SessionTable, SessionType, SynPayload},
 };
+use tap::prelude::*;
 
 pub struct Syn<'a, S>(pub &'a Iap2<S>);
 
 impl<S: Stream> Syn<'_, S> {
     pub async fn perform(&self) -> Result<SessionTable, Iap2Error> {
-        (|| async { self.perform_inner().await })
-            .retry(ConstantBuilder::new().with_delay(Duration::from_secs(1)).with_max_times(5))
-            .await
+        (|| async {
+            self.perform_inner()
+                .await
+                .tap_err(|e| tracing::error!(?e, "Error performing syn"))
+        })
+        .retry(
+            ConstantBuilder::new()
+                .with_delay(Duration::from_secs(1))
+                .with_max_times(5),
+        )
+        .await
     }
 
     async fn perform_inner(&self) -> Result<SessionTable, Iap2Error> {
@@ -23,15 +32,17 @@ impl<S: Stream> Syn<'_, S> {
 
         let packet = tokio::time::timeout(Duration::from_secs(5), self.0.receive_packet())
             .await
-            .map_err(|_| Iap2Error::SynFailed("Timeout waiting for SYN"))?
-            .ok_or(Iap2Error::SynFailed("No response"))??;
+            .map_err(|_| Iap2Error::Timeout(String::from("Timeout waiting for SYN")))??;
 
         if !packet.header.control.syn || packet.header.control.ack {
-            return Err(Iap2Error::SynFailed("Expected SYN (not SYN+ACK)"));
+            return Err(Iap2Error::UnexpectedPacket(
+                String::from("Expected SYN (not SYN+ACK)"),
+                packet,
+            ));
         }
 
         let accessory_sessions = SynPayload::from_bytes(&packet.payload)
-            .map_err(|_| Iap2Error::SynFailed("Bad SYN payload"))?;
+            .map_err(|_| Iap2Error::Other(String::from("Bad SYN payload")))?;
         tracing::debug!(?accessory_sessions, "Received SYN from accessory");
 
         let mut our_syn = SynPayload::new();

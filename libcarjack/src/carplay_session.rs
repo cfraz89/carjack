@@ -94,7 +94,7 @@ impl<S: Stream> CarplaySession<S> {
         loop {
             tokio::select! {
                 packet = self.iap2.receive_packet() => {
-                    let packet = packet.ok_or(Iap2Error::ConnectionClosed)??;
+                    let packet = packet?;
                     if !packet.header.control.ack || packet.payload.is_empty() {
                         continue;
                     }
