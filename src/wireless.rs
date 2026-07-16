@@ -3,6 +3,7 @@ use std::{
     time::Duration,
 };
 
+use ashpd::zbus;
 use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
@@ -12,6 +13,7 @@ use bluer::{
     rfcomm::{self, Role},
 };
 use eyre::{Result, eyre};
+use iap2_proto::error::Iap2Error;
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
     carplay_session::TouchEvent,
@@ -41,7 +43,7 @@ pub async fn wireless_carplay(
         .register_profile(rfcomm::Profile {
             uuid: IAP_ACCESSORY_UUID,
             name: Some(String::from("Wireless iAP")),
-            auto_connect: Some(true),
+            // auto_connect: Some(false),
             role: Some(Role::Client),
             ..Default::default()
         })
@@ -59,20 +61,23 @@ pub async fn wireless_carplay(
     let device = pair_available_accessory(&adapter).await?;
     if device.is_connected().await? {
         tracing::info!("Already connected");
-        device.disconnect().await?;
     }
-    tracing::info!("Connecting...");
-    device.connect().await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    //device.connect().await?;
 
     tracing::debug!("Waiting for iAP2 connection requests");
-
     let mut profiles = iap_accessory_handle.merge(iap_device_handle);
-    if let Some(rq) = profiles.next().await {
-        let stream = rq.accept()?;
-        carplay::run_carplay_session(stream, video_rx, touch_tx, ready_tx).await?;
-        tracing::debug!("iAP lifecycle ended");
-    }
+    let rq = tokio::spawn(async move {
+        let Some(rq) = profiles.next().await else {
+            return Err(Iap2Error::ChannelClosed);
+        };
+        tracing::info!("Got connect request");
+        let stream = rq.accept().map_err(|e| std::io::Error::from(e))?;
+        Ok(stream)
+    });
+    device.connect_profile(&IAP_ACCESSORY_UUID).await?;
+    let stream = rq.await??;
+    carplay::run_carplay_session(stream, video_rx, touch_tx, ready_tx).await?;
+    tracing::debug!("iAP lifecycle ended");
     Ok(())
 }
 
@@ -88,7 +93,20 @@ async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::Advertis
     Ok(handle)
 }
 
+// #[zbus::proxy(
+//     interface = "org.bluez.Adapter1",
+//     default_service = "org.bluez",
+//     default_path = "/org/bluez/hci0"
+// )]
+// trait Bluez {
+//     async fn stop_discovery(&self) -> zbus::Result<()>;
+// }
+
 async fn pair_available_accessory(adapter: &Adapter) -> Result<Device> {
+    //This ensures we aren't already discovering when we start the process
+    // let connection = zbus::Connection::system().await?;
+    // let proxy = BluezProxy::new(&connection).await?;
+    // proxy.stop_discovery().await?;
     adapter
         .set_discovery_filter(DiscoveryFilter {
             discoverable: true,
@@ -98,7 +116,6 @@ async fn pair_available_accessory(adapter: &Adapter) -> Result<Device> {
             ..DiscoveryFilter::default()
         })
         .await?;
-
     let mut device_events = adapter.discover_devices_with_changes().await?;
     while let Some(DeviceAdded(addr)) = device_events.next().await {
         let device = adapter.device(addr)?;
@@ -114,7 +131,7 @@ async fn pair_available_accessory(adapter: &Adapter) -> Result<Device> {
             if !device.is_paired().await? {
                 device.pair().await?;
             }
-            device.set_trusted(false).await?;
+            device.set_trusted(true).await?;
             return Ok(device);
         }
     }
