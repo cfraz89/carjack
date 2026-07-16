@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use deku::DekuError;
 use thiserror::Error;
 use tokio::time::error::Elapsed;
 
@@ -10,6 +11,10 @@ pub enum Iap2Error {
     UnexpectedBytes(String, Bytes),
     #[error("Unexpected packet: {0} {0:?}")]
     UnexpectedPacket(String, Packet),
+    #[error("Error with packet decoding. Bytes: {0:?}, error: {1}")]
+    PacketDecoding(Bytes, DekuError),
+    #[error("Error with packet encoding. Packet: {0:?}, error: {1}")]
+    PacketEncoding(Packet, DekuError),
     #[error("No packet received")]
     NoPacket,
     #[error("Control session error: {0}")]

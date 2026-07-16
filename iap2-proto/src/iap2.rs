@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use bytes::{Buf, BytesMut};
 use deku::{DekuContainerRead, DekuContainerWrite};
 use futures::{SinkExt, StreamExt};
-use std::io::{Error, ErrorKind};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_util::codec::{Decoder, Encoder, Framed};
@@ -17,11 +16,13 @@ use crate::stream::SessionTable;
 #[derive(Debug)]
 pub struct Iap2Codec;
 
+const IAP1_SWITCH_PATTERN: [u8; 6] = [0xFF, 0x55, 0x02, 0x00, 0xEE, 0x10];
+
 impl Decoder for Iap2Codec {
     type Item = Packet;
-    type Error = Error;
+    type Error = Iap2Error;
 
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Packet>, Error> {
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Packet>, Iap2Error> {
         if src.len() < 9 {
             return Ok(None);
         }
@@ -32,18 +33,18 @@ impl Decoder for Iap2Codec {
                 Ok(Some(packet))
             }
             Err(deku::DekuError::Incomplete(_)) => Ok(None),
-            Err(e) => Err(Error::new(ErrorKind::InvalidData, e.to_string())),
+            Err(e) => Err(Iap2Error::PacketDecoding(src.clone().freeze(), e)),
         }
     }
 }
 
 impl Encoder<Packet> for Iap2Codec {
-    type Error = Error;
+    type Error = Iap2Error;
 
-    fn encode(&mut self, packet: Packet, dst: &mut BytesMut) -> Result<(), Error> {
+    fn encode(&mut self, packet: Packet, dst: &mut BytesMut) -> Result<(), Iap2Error> {
         let bytes = packet
             .to_bytes()
-            .map_err(|err| Error::new(ErrorKind::InvalidData, err.to_string()))?;
+            .map_err(|err| Iap2Error::PacketEncoding(packet, err))?;
         dst.extend_from_slice(&bytes);
         Ok(())
     }
