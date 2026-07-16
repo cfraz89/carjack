@@ -14,7 +14,7 @@ pub struct Packet {
     )]
     pub header_checksum: u8,
     #[deku(
-        cond = "header.control.ack",
+        cond = "header.length > 9",
         count = "header.length.saturating_sub(10) as usize"
     )]
     pub payload: Vec<u8>,
@@ -47,8 +47,9 @@ impl Checksumable for Header {
         let mut buff = Cursor::new(vec![0; HEADER_SIZE]);
         self.to_writer(&mut Writer::new(&mut buff), Endian::Big)
             .expect("Unable to write control byte");
+        buff.set_position(0);
         let sum = buff.bytes().fold(0u8, |a, b| {
-            a.wrapping_add(b.expect("Couldn't read byt from header buffer"))
+            a.wrapping_add(b.expect("Couldn't read byte from header buffer"))
         });
         sum.wrapping_neg()
     }

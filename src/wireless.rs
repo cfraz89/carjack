@@ -44,7 +44,8 @@ pub async fn wireless_carplay(
             uuid: IAP_ACCESSORY_UUID,
             name: Some(String::from("Wireless iAP")),
             role: Some(Role::Client),
-            // auto_connect: Some(true),
+            //Make sure we don't auto connect, otherwise it will connect before we're ready to accept a connection
+            auto_connect: Some(false),
             ..Default::default()
         })
         .await?;
@@ -61,8 +62,9 @@ pub async fn wireless_carplay(
     let device = pair_available_accessory(&adapter).await?;
     if device.is_connected().await? {
         tracing::info!("Already connected");
-    } else {
-        device.connect().await?;
+        //This is to ensure we successfully do the iAP 2 switch every time.
+        //Later will see if theres a way to resume the link without resetting bt
+        device.disconnect().await?;
     }
     // let socket = rfcomm::Socket::new()?;
     // let stream = socket
@@ -79,6 +81,7 @@ pub async fn wireless_carplay(
         let stream = rq.accept().map_err(|e| std::io::Error::from(e))?;
         Ok((stream, profiles))
     });
+    // device.connect().await?;
     device.connect_profile(&IAP_ACCESSORY_UUID).await?;
     let (stream, _profiles) = acceptance.await??;
     tracing::debug!("Establishing iAP2 link");
