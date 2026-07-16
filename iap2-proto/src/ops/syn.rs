@@ -45,19 +45,7 @@ impl<S: Stream> Syn<'_, S> {
             .map_err(|_| Iap2Error::Other(String::from("Bad SYN payload")))?;
         tracing::debug!(?accessory_sessions, "Received SYN from accessory");
 
-        let mut our_syn = SynPayload::new();
-        our_syn.sessions = vec![
-            SessionEntry {
-                id: 0,
-                session_type: SessionType::Control,
-                version: 1,
-            },
-            SessionEntry {
-                id: 2,
-                session_type: SessionType::ExternalAccessory,
-                version: 1,
-            },
-        ];
+        let our_syn = accessory_sessions.clone();
 
         let control = ControlByte {
             syn: true,
@@ -65,13 +53,27 @@ impl<S: Stream> Syn<'_, S> {
             ..Default::default()
         };
         self.0.send_packet(control, 0, our_syn.to_bytes()).await?;
-        tracing::debug!("Sent SYN+ACK");
+        tracing::debug!("Sent SYN+ACK, waiting for ACK");
+
+        let ack_packet = tokio::time::timeout(Duration::from_secs(5), self.0.receive_packet())
+            .await
+            .map_err(|_| Iap2Error::Timeout(String::from("Timeout waiting for ACK after SYN+ACK")))??;
+
+        if ack_packet.header.control.syn || !ack_packet.header.control.ack {
+            return Err(Iap2Error::UnexpectedPacket(
+                String::from("Expected ACK after SYN+ACK"),
+                ack_packet,
+            ));
+        }
+        tracing::debug!("Received ACK, handshake complete");
 
         let mut table = SessionTable::new();
         for s in accessory_sessions.sessions {
             table.add(s);
         }
-        for s in our_syn.sessions {
+        for s in [SessionEntry { id: 0, session_type: SessionType::Control, version: 1 },
+                  SessionEntry { id: 2, session_type: SessionType::ExternalAccessory, version: 1 }]
+        {
             table.add(s);
         }
         tracing::debug!(?table, "SYN exchange complete");

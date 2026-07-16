@@ -62,14 +62,9 @@ pub async fn wireless_carplay(
     let device = pair_available_accessory(&adapter).await?;
     if device.is_connected().await? {
         tracing::info!("Already connected");
-        //This is to ensure we successfully do the iAP 2 switch every time.
-        //Later will see if theres a way to resume the link without resetting bt
         device.disconnect().await?;
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    // let socket = rfcomm::Socket::new()?;
-    // let stream = socket
-    //     .connect(rfcomm::SocketAddr::new(device.address(), 1))
-    //     .await?;
 
     tracing::debug!("Waiting for iAP2 connection requests");
     let mut profiles = iap_accessory_handle.merge(iap_device_handle);
@@ -81,7 +76,6 @@ pub async fn wireless_carplay(
         let stream = rq.accept().map_err(|e| std::io::Error::from(e))?;
         Ok((stream, profiles))
     });
-    // device.connect().await?;
     device.connect_profile(&IAP_ACCESSORY_UUID).await?;
     let (stream, _profiles) = acceptance.await??;
     tracing::debug!("Establishing iAP2 link");
@@ -142,9 +136,11 @@ async fn pair_available_accessory(adapter: &Adapter) -> Result<Device> {
                 "Attempting connection",
             );
             if !device.is_paired().await? {
-                device.pair().await?;
+                if let Err(e) = device.pair().await {
+                    tracing::warn!(?e, "Pairing failed, trying to proceed anyway");
+                }
             }
-            device.set_trusted(true).await?;
+            let _ = device.set_trusted(true).await;
             return Ok(device);
         }
     }

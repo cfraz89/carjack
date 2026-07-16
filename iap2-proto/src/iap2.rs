@@ -24,6 +24,15 @@ impl Decoder for Iap2Codec {
         if src.len() < 9 {
             return Ok(None);
         }
+        // Skip bytes that don't start with iAP2 magic to recover from noise
+        if src.len() >= 9 && (src[0] != 0xFF || src[1] != 0x5A) {
+            tracing::warn!("Skipping {} bytes with invalid magic: {:02X} {:02X}", src.len(), src[0], src[1]);
+            src.clear();
+            return Ok(None);
+        }
+        if src.len() < 9 {
+            return Ok(None);
+        }
         match Packet::from_bytes((&src[..], 0)) {
             Ok((rest, packet)) => {
                 let consumed = src.len() - rest.0.len();
