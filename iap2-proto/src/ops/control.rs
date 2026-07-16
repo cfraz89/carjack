@@ -1,104 +1,199 @@
-use deku::prelude::*;
 use deku::DekuContainerWrite;
+use deku::prelude::*;
 
 pub const SOM: u16 = 0x4040;
 
 #[derive(DekuRead, DekuWrite, Debug, Clone, Copy, PartialEq, Eq)]
 #[deku(id_type = "u16")]
 pub enum ControlMessageId {
-    #[deku(id = "0xAA00")] RequestAuthenticationCertificate,
-    #[deku(id = "0xAA01")] AuthenticationCertificate,
-    #[deku(id = "0xAA02")] RequestAuthenticationChallengeResponse,
-    #[deku(id = "0xAA03")] AuthenticationResponse,
-    #[deku(id = "0xAA04")] AuthenticationFailed,
-    #[deku(id = "0xAA05")] AuthenticationSucceeded,
-    #[deku(id = "0xAA10")] RequestDeviceAuthenticationCertificate,
-    #[deku(id = "0xAA11")] DeviceAuthenticationCertificate,
-    #[deku(id = "0xAA12")] RequestDeviceAuthenticationChallengeResponse,
-    #[deku(id = "0xAA13")] DeviceAuthenticationResponse,
-    #[deku(id = "0xAA14")] DeviceAuthenticationFailed,
-    #[deku(id = "0xAA15")] DeviceAuthenticationSucceeded,
-    #[deku(id = "0x1D00")] StartIdentification,
-    #[deku(id = "0x1D01")] IdentificationInformation,
-    #[deku(id = "0x1D02")] IdentificationAccepted,
-    #[deku(id = "0x1D03")] IdentificationRejected,
-    #[deku(id = "0x1D05")] CancelIdentification,
-    #[deku(id = "0x1D06")] IdentificationInformationUpdate,
-    #[deku(id = "0xEA00")] StartExternalAccessoryProtocolSession,
-    #[deku(id = "0xEA01")] StopExternalAccessoryProtocolSession,
-    #[deku(id = "0xEA02")] RequestAppLaunch,
-    #[deku(id = "0xEA03")] StatusExternalAccessoryProtocolSession,
-    #[deku(id = "0xAD00")] StartAppDiscoveryUpdates,
-    #[deku(id = "0xAD01")] AppDiscoveryUpdate,
-    #[deku(id = "0xAD02")] StopAppDiscoveryUpdates,
-    #[deku(id = "0x5400")] StartAssistiveTouch,
-    #[deku(id = "0x5401")] StopAssistiveTouch,
-    #[deku(id = "0x5402")] StartAssistiveTouchInformation,
-    #[deku(id = "0x5403")] AssistiveTouchInformation,
-    #[deku(id = "0x5404")] StopAssistiveTouchInformation,
-    #[deku(id = "0x4E01")] BluetoothComponentInformation,
-    #[deku(id = "0x4E03")] StartBluetoothConnectionUpdates,
-    #[deku(id = "0x4E04")] BluetoothConnectionUpdate,
-    #[deku(id = "0x4E05")] StopBluetoothConnectionUpdates,
-    #[deku(id = "0x4E09")] DeviceInformationUpdate,
-    #[deku(id = "0x4E0A")] DeviceLanguageUpdate,
-    #[deku(id = "0x4E0B")] DeviceTimeUpdate,
-    #[deku(id = "0x4E0C")] DeviceUUIDUpdate,
-    #[deku(id = "0x4E0D")] WirelessCarPlayUpdate,
-    #[deku(id = "0x4E0E")] DeviceTransportIdentifierNotification,
-    #[deku(id = "0x4154")] StartCallStateUpdates,
-    #[deku(id = "0x4155")] CallStateUpdate,
-    #[deku(id = "0x4156")] StopCallStateUpdates,
-    #[deku(id = "0x4157")] StartCommunicationsUpdates,
-    #[deku(id = "0x4158")] CommunicationsUpdate,
-    #[deku(id = "0x4159")] StopCommunicationsUpdates,
-    #[deku(id = "0x415A")] InitiateCall,
-    #[deku(id = "0x415B")] AcceptCall,
-    #[deku(id = "0x415C")] EndCall,
-    #[deku(id = "0x415D")] SwapCalls,
-    #[deku(id = "0x415E")] MergeCalls,
-    #[deku(id = "0x415F")] HoldStatusUpdate,
-    #[deku(id = "0x4160")] MuteStatusUpdate,
-    #[deku(id = "0x4161")] SendDTMF,
-    #[deku(id = "0x4C00")] StartMediaLibraryInformation,
-    #[deku(id = "0x4C01")] MediaLibraryInformation,
-    #[deku(id = "0x4C02")] StopMediaLibraryInformation,
-    #[deku(id = "0x4C06")] PlayMediaLibraryCurrentSelection,
-    #[deku(id = "0x5000")] StartNowPlayingUpdates,
-    #[deku(id = "0x5001")] NowPlayingUpdate,
-    #[deku(id = "0x5002")] StopNowPlayingUpdates,
-    #[deku(id = "0x5003")] SetNowPlayingInformation,
-    #[deku(id = "0xAE00")] StartPowerUpdates,
-    #[deku(id = "0xAE01")] PowerUpdate,
-    #[deku(id = "0xAE02")] StopPowerUpdates,
-    #[deku(id = "0xAE03")] PowerSourceUpdate,
-    #[deku(id = "0x6800")] StartHID,
-    #[deku(id = "0x6801")] DeviceHIDReport,
-    #[deku(id = "0x6802")] AccessoryHIDReport,
-    #[deku(id = "0x6803")] StopHID,
-    #[deku(id = "0x6806")] StartNativeHID,
-    #[deku(id = "0xFFFA")] StartLocationInformation,
-    #[deku(id = "0xFFFB")] LocationInformation,
-    #[deku(id = "0xFFFC")] StopLocationInformation,
-    #[deku(id = "0xDA00")] StartUSBDeviceModeAudio,
-    #[deku(id = "0xDA01")] USBDeviceModeAudioInformation,
-    #[deku(id = "0xDA02")] StopUSBDeviceModeAudio,
-    #[deku(id = "0x5700")] RequestWiFiInformation,
-    #[deku(id = "0x5701")] WiFiInformation,
-    #[deku(id = "0x5702")] RequestAccessoryWiFiConfigurationInformation,
-    #[deku(id = "0x5703")] AccessoryWiFiConfigurationInformation,
-    #[deku(id = "0x0B00")] StartBluetoothPairing,
-    #[deku(id = "0x0B01")] BluetoothPairingAccessoryInformation,
-    #[deku(id = "0x0B02")] BluetoothPairingStatus,
-    #[deku(id = "0x0B03")] StopBluetoothPairing,
-    #[deku(id = "0xA100")] StartVehicleStatusUpdates,
-    #[deku(id = "0xA101")] VehicleStatusUpdate,
-    #[deku(id = "0xA102")] StopVehicleStatusUpdates,
-    #[deku(id = "0x5200")] StartRouteGuidanceUpdates,
-    #[deku(id = "0x5201")] RouteGuidanceUpdate,
-    #[deku(id = "0x5202")] RouteGuidanceManeuverUpdate,
-    #[deku(id = "0x5203")] StopRouteGuidanceUpdates,
-    #[deku(id_pat = "_")] Unknown(u16),
+    #[deku(id = "0xAA00")]
+    RequestAuthenticationCertificate,
+    #[deku(id = "0xAA01")]
+    AuthenticationCertificate,
+    #[deku(id = "0xAA02")]
+    RequestAuthenticationChallengeResponse,
+    #[deku(id = "0xAA03")]
+    AuthenticationResponse,
+    #[deku(id = "0xAA04")]
+    AuthenticationFailed,
+    #[deku(id = "0xAA05")]
+    AuthenticationSucceeded,
+    #[deku(id = "0xAA06")]
+    AccessoryAuthenticationSerialNumber,
+    #[deku(id = "0xAA10")]
+    RequestDeviceAuthenticationCertificate,
+    #[deku(id = "0xAA11")]
+    DeviceAuthenticationCertificate,
+    #[deku(id = "0xAA12")]
+    RequestDeviceAuthenticationChallengeResponse,
+    #[deku(id = "0xAA13")]
+    DeviceAuthenticationResponse,
+    #[deku(id = "0xAA14")]
+    DeviceAuthenticationFailed,
+    #[deku(id = "0xAA15")]
+    DeviceAuthenticationSucceeded,
+    #[deku(id = "0x1D00")]
+    StartIdentification,
+    #[deku(id = "0x1D01")]
+    IdentificationInformation,
+    #[deku(id = "0x1D02")]
+    IdentificationAccepted,
+    #[deku(id = "0x1D03")]
+    IdentificationRejected,
+    #[deku(id = "0x1D05")]
+    CancelIdentification,
+    #[deku(id = "0x1D06")]
+    IdentificationInformationUpdate,
+    #[deku(id = "0xEA00")]
+    StartExternalAccessoryProtocolSession,
+    #[deku(id = "0xEA01")]
+    StopExternalAccessoryProtocolSession,
+    #[deku(id = "0xEA02")]
+    RequestAppLaunch,
+    #[deku(id = "0xEA03")]
+    StatusExternalAccessoryProtocolSession,
+    #[deku(id = "0xAD00")]
+    StartAppDiscoveryUpdates,
+    #[deku(id = "0xAD01")]
+    AppDiscoveryUpdate,
+    #[deku(id = "0xAD02")]
+    StopAppDiscoveryUpdates,
+    #[deku(id = "0x5400")]
+    StartAssistiveTouch,
+    #[deku(id = "0x5401")]
+    StopAssistiveTouch,
+    #[deku(id = "0x5402")]
+    StartAssistiveTouchInformation,
+    #[deku(id = "0x5403")]
+    AssistiveTouchInformation,
+    #[deku(id = "0x5404")]
+    StopAssistiveTouchInformation,
+    #[deku(id = "0x4E01")]
+    BluetoothComponentInformation,
+    #[deku(id = "0x4E03")]
+    StartBluetoothConnectionUpdates,
+    #[deku(id = "0x4E04")]
+    BluetoothConnectionUpdate,
+    #[deku(id = "0x4E05")]
+    StopBluetoothConnectionUpdates,
+    #[deku(id = "0x4E09")]
+    DeviceInformationUpdate,
+    #[deku(id = "0x4E0A")]
+    DeviceLanguageUpdate,
+    #[deku(id = "0x4E0B")]
+    DeviceTimeUpdate,
+    #[deku(id = "0x4E0C")]
+    DeviceUUIDUpdate,
+    #[deku(id = "0x4E0D")]
+    WirelessCarPlayUpdate,
+    #[deku(id = "0x4E0E")]
+    DeviceTransportIdentifierNotification,
+    #[deku(id = "0x4154")]
+    StartCallStateUpdates,
+    #[deku(id = "0x4155")]
+    CallStateUpdate,
+    #[deku(id = "0x4156")]
+    StopCallStateUpdates,
+    #[deku(id = "0x4157")]
+    StartCommunicationsUpdates,
+    #[deku(id = "0x4158")]
+    CommunicationsUpdate,
+    #[deku(id = "0x4159")]
+    StopCommunicationsUpdates,
+    #[deku(id = "0x415A")]
+    InitiateCall,
+    #[deku(id = "0x415B")]
+    AcceptCall,
+    #[deku(id = "0x415C")]
+    EndCall,
+    #[deku(id = "0x415D")]
+    SwapCalls,
+    #[deku(id = "0x415E")]
+    MergeCalls,
+    #[deku(id = "0x415F")]
+    HoldStatusUpdate,
+    #[deku(id = "0x4160")]
+    MuteStatusUpdate,
+    #[deku(id = "0x4161")]
+    SendDTMF,
+    #[deku(id = "0x4C00")]
+    StartMediaLibraryInformation,
+    #[deku(id = "0x4C01")]
+    MediaLibraryInformation,
+    #[deku(id = "0x4C02")]
+    StopMediaLibraryInformation,
+    #[deku(id = "0x4C06")]
+    PlayMediaLibraryCurrentSelection,
+    #[deku(id = "0x5000")]
+    StartNowPlayingUpdates,
+    #[deku(id = "0x5001")]
+    NowPlayingUpdate,
+    #[deku(id = "0x5002")]
+    StopNowPlayingUpdates,
+    #[deku(id = "0x5003")]
+    SetNowPlayingInformation,
+    #[deku(id = "0xAE00")]
+    StartPowerUpdates,
+    #[deku(id = "0xAE01")]
+    PowerUpdate,
+    #[deku(id = "0xAE02")]
+    StopPowerUpdates,
+    #[deku(id = "0xAE03")]
+    PowerSourceUpdate,
+    #[deku(id = "0x6800")]
+    StartHID,
+    #[deku(id = "0x6801")]
+    DeviceHIDReport,
+    #[deku(id = "0x6802")]
+    AccessoryHIDReport,
+    #[deku(id = "0x6803")]
+    StopHID,
+    #[deku(id = "0x6806")]
+    StartNativeHID,
+    #[deku(id = "0xFFFA")]
+    StartLocationInformation,
+    #[deku(id = "0xFFFB")]
+    LocationInformation,
+    #[deku(id = "0xFFFC")]
+    StopLocationInformation,
+    #[deku(id = "0xDA00")]
+    StartUSBDeviceModeAudio,
+    #[deku(id = "0xDA01")]
+    USBDeviceModeAudioInformation,
+    #[deku(id = "0xDA02")]
+    StopUSBDeviceModeAudio,
+    #[deku(id = "0x5700")]
+    RequestWiFiInformation,
+    #[deku(id = "0x5701")]
+    WiFiInformation,
+    #[deku(id = "0x5702")]
+    RequestAccessoryWiFiConfigurationInformation,
+    #[deku(id = "0x5703")]
+    AccessoryWiFiConfigurationInformation,
+    #[deku(id = "0x0B00")]
+    StartBluetoothPairing,
+    #[deku(id = "0x0B01")]
+    BluetoothPairingAccessoryInformation,
+    #[deku(id = "0x0B02")]
+    BluetoothPairingStatus,
+    #[deku(id = "0x0B03")]
+    StopBluetoothPairing,
+    #[deku(id = "0xA100")]
+    StartVehicleStatusUpdates,
+    #[deku(id = "0xA101")]
+    VehicleStatusUpdate,
+    #[deku(id = "0xA102")]
+    StopVehicleStatusUpdates,
+    #[deku(id = "0x5200")]
+    StartRouteGuidanceUpdates,
+    #[deku(id = "0x5201")]
+    RouteGuidanceUpdate,
+    #[deku(id = "0x5202")]
+    RouteGuidanceManeuverUpdate,
+    #[deku(id = "0x5203")]
+    StopRouteGuidanceUpdates,
+    #[deku(id_pat = "_")]
+    Unknown(u16),
 }
 
 #[derive(DekuRead, DekuWrite, Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,8 +351,7 @@ impl ControlMessage {
         let mut raw_parameters = Vec::new();
         for p in &parameters {
             raw_parameters.extend_from_slice(
-                &<Parameter as deku::DekuContainerWrite>::to_bytes(p)
-                    .unwrap_or_default(),
+                &<Parameter as deku::DekuContainerWrite>::to_bytes(p).unwrap_or_default(),
             );
         }
         ControlMessage {
@@ -295,7 +389,9 @@ impl ControlMessage {
     pub fn param_uint32(&self, id: ParameterId) -> Option<u32> {
         self.find_param(id).and_then(|p| {
             if p.data.len() == 4 {
-                Some(u32::from_be_bytes([p.data[0], p.data[1], p.data[2], p.data[3]]))
+                Some(u32::from_be_bytes([
+                    p.data[0], p.data[1], p.data[2], p.data[3],
+                ]))
             } else {
                 None
             }
@@ -351,6 +447,24 @@ pub fn make_request_auth_certificate() -> Vec<u8> {
     ControlMessage::new(ControlMessageId::RequestAuthenticationCertificate, vec![])
         .to_bytes()
         .expect("ControlMessage serialization")
+}
+
+pub fn make_request_auth_certificate_serial() -> Vec<u8> {
+    ControlMessage::new(
+        ControlMessageId::RequestAuthenticationCertificate,
+        vec![Parameter::new(ParameterId(0x0000), &[][..])],
+    )
+    .to_bytes()
+    .expect("ControlMessage serialization")
+}
+
+pub fn make_authentication_challenge(challenge: &[u8]) -> Vec<u8> {
+    ControlMessage::new(
+        ControlMessageId::RequestAuthenticationChallengeResponse,
+        vec![Parameter::new(ParameterId(0x0000), challenge)],
+    )
+    .to_bytes()
+    .expect("ControlMessage serialization")
 }
 
 pub fn make_authentication_succeeded() -> Vec<u8> {

@@ -2,15 +2,14 @@ use deku::prelude::*;
 use iap2_proto::{
     error::Iap2Error,
     iap2::{Iap2, Stream},
-    ops::{
-        control::{
-            self, parse_control_payload, ControlMessage, ControlMessageId, GetParam, ParameterId,
-        },
-        ea::EaFrame,
+    ops::control::{
+        self, parse_control_payload, ControlMessage, ControlMessageId, GetParam, ParameterId,
     },
+    ops::ea::EaFrame,
     packet::ControlByte,
     stream::SessionType,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(DekuRead, Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,12 +47,10 @@ pub struct WifiCredentials {
     pub bssid: Option<String>,
 }
 
-#[derive(Debug)]
-enum CarplayPhase {
-    Identifying,
-    Authenticating,
-    WaitingForEA,
-    Streaming,
+enum AuthStep {
+    WaitingForSerial,
+    WaitingForCertificate,
+    WaitingForAuthResponse,
 }
 
 pub struct CarplaySession<S: Stream> {
@@ -61,7 +58,7 @@ pub struct CarplaySession<S: Stream> {
     pub video_rx: mpsc::Receiver<Vec<u8>>,
     pub touch_tx: mpsc::Sender<TouchEvent>,
     pub wifi_tx: mpsc::Sender<WifiCredentials>,
-    phase: CarplayPhase,
+    auth_step: Option<AuthStep>,
     ea_session_id: u8,
     ea_transfer_id: u16,
     ready_tx: Option<oneshot::Sender<()>>,
@@ -80,7 +77,7 @@ impl<S: Stream> CarplaySession<S> {
             video_rx,
             touch_tx,
             wifi_tx,
-            phase: CarplayPhase::Identifying,
+            auth_step: None,
             ea_session_id: 0,
             ea_transfer_id: 0,
             ready_tx: Some(ready_tx),
@@ -89,7 +86,6 @@ impl<S: Stream> CarplaySession<S> {
 
     pub async fn run(&mut self) -> Result<(), Iap2Error> {
         self.do_identification().await?;
-        self.do_authentication().await?;
 
         loop {
             tokio::select! {
@@ -101,10 +97,16 @@ impl<S: Stream> CarplaySession<S> {
                     self.dispatch_packet(packet).await?;
                 }
                 video = self.video_rx.recv() => {
-                    let data = video.ok_or(Iap2Error::ChannelClosed)?;
-                    self.send_video_frame(data).await?;
+                    if self.ea_session_id != 0 {
+                        let data = video.ok_or(Iap2Error::ChannelClosed)?;
+                        self.send_video_frame(data).await?;
+                    }
                 }
                 else => break,
+            }
+
+            if self.ready_tx.is_none() {
+                break;
             }
         }
         Ok(())
@@ -118,26 +120,21 @@ impl<S: Stream> CarplaySession<S> {
             ..Default::default()
         };
         self.iap2.send_packet(ctrl, 0, payload).await?;
-        self.phase = CarplayPhase::Identifying;
         Ok(())
     }
 
-    async fn do_authentication(&mut self) -> Result<(), Iap2Error> {
-        tracing::debug!("Starting authentication");
-
-        let cert_payload = control::make_request_auth_certificate();
-        let ctrl = ControlByte {
-            ack: true,
-            ..Default::default()
-        };
-        self.iap2.send_packet(ctrl.clone(), 0, cert_payload).await?;
-        tracing::debug!("Sent RequestAuthenticationCertificate");
-
-        let ack_payload = control::make_authentication_succeeded();
-        self.iap2.send_packet(ctrl, 0, ack_payload).await?;
-        tracing::debug!("Sent AuthenticationSucceeded");
-        self.phase = CarplayPhase::WaitingForEA;
-        Ok(())
+    fn generate_challenge() -> [u8; 20] {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut challenge = [0u8; 20];
+        let mut state = seed;
+        for byte in challenge.iter_mut() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *byte = (state >> 32) as u8;
+        }
+        challenge
     }
 
     async fn dispatch_packet(
@@ -171,6 +168,14 @@ impl<S: Stream> CarplaySession<S> {
         Ok(())
     }
 
+    async fn send_ctrl(&self, payload: Vec<u8>) -> Result<(), Iap2Error> {
+        let ctrl = ControlByte {
+            ack: true,
+            ..Default::default()
+        };
+        self.iap2.send_packet(ctrl, 0, payload).await
+    }
+
     async fn handle_control_message(&mut self, msg: ControlMessage) -> Result<(), Iap2Error> {
         let params = msg.parameters();
         tracing::debug!(
@@ -185,13 +190,25 @@ impl<S: Stream> CarplaySession<S> {
                     .get_param::<String>(ParameterId::DISPLAY_NAME)
                     .unwrap_or_else(|| String::from("Unknown"));
                 tracing::info!("Accessory identified: {}", name);
-                let payload = control::make_identification_accepted();
-                let ctrl = ControlByte {
-                    ack: true,
-                    ..Default::default()
-                };
-                self.iap2.send_packet(ctrl, 0, payload).await?;
-                self.phase = CarplayPhase::Authenticating;
+                self.send_ctrl(control::make_identification_accepted()).await?;
+                self.send_ctrl(control::make_request_auth_certificate_serial()).await?;
+                self.auth_step = Some(AuthStep::WaitingForSerial);
+            }
+            ControlMessageId::AccessoryAuthenticationSerialNumber => {
+                tracing::debug!("Received accessory serial number");
+                self.send_ctrl(control::make_request_auth_certificate()).await?;
+                self.auth_step = Some(AuthStep::WaitingForCertificate);
+            }
+            ControlMessageId::AuthenticationCertificate => {
+                tracing::debug!("Received authentication certificate");
+                let challenge = Self::generate_challenge();
+                self.send_ctrl(control::make_authentication_challenge(&challenge)).await?;
+                self.auth_step = Some(AuthStep::WaitingForAuthResponse);
+            }
+            ControlMessageId::AuthenticationResponse => {
+                tracing::info!("Authentication complete");
+                self.send_ctrl(control::make_authentication_succeeded()).await?;
+                self.auth_step = None;
             }
             ControlMessageId::RequestAppLaunch
             | ControlMessageId::StatusExternalAccessoryProtocolSession => {
@@ -202,13 +219,8 @@ impl<S: Stream> CarplaySession<S> {
                     _ => 2,
                 };
                 let payload = control::make_start_ea_session("com.apple.carplay");
-                let ctrl = ControlByte {
-                    ack: true,
-                    ..Default::default()
-                };
-                self.iap2.send_packet(ctrl, 0, payload).await?;
+                self.send_ctrl(payload).await?;
                 tracing::info!("Started EA session");
-                self.phase = CarplayPhase::Streaming;
                 if let Some(tx) = self.ready_tx.take() {
                     let _ = tx.send(());
                 }
@@ -228,11 +240,7 @@ impl<S: Stream> CarplaySession<S> {
                     let _ = self.wifi_tx.send(creds).await;
                 }
                 let payload = control::make_wifi_information("CarJack-WiFi", "carjack123");
-                let ctrl = ControlByte {
-                    ack: true,
-                    ..Default::default()
-                };
-                self.iap2.send_packet(ctrl, 0, payload).await?;
+                self.send_ctrl(payload).await?;
             }
             ControlMessageId::BluetoothComponentInformation => {
                 tracing::debug!("Received BluetoothComponentInformation");
