@@ -313,7 +313,8 @@ pub trait TryFromParam: Sized {
 
 impl TryFromParam for String {
     fn try_from_param(data: &[u8]) -> Option<Self> {
-        String::from_utf8(data.to_vec()).ok()
+        let trimmed = data.iter().take_while(|&&b| b != 0).copied().collect();
+        String::from_utf8(trimmed).ok()
     }
 }
 

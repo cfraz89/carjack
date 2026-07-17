@@ -10,6 +10,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+nmrs = "3.4.0"
 ashpd = {version = "0.13.10", features = ["remote_desktop", "screencast"]  }
 backon = "1.6.0"
 bluer = { version = "0.17.4", features = ["full", "rfcomm"] }
