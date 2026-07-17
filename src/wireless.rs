@@ -79,7 +79,28 @@ pub async fn wireless_carplay(
         }
     });
 
-    device.connect_profile(&IAP_ACCESSORY_UUID).await?;
+    // Wait for services to be resolved before attempting profile connection
+    for _ in 0..50 {
+        if device.is_services_resolved().await? {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Retry connect_profile in case SDP is not yet ready
+    for attempt in 0..5 {
+        match device.connect_profile(&IAP_ACCESSORY_UUID).await {
+            Ok(()) => break,
+            Err(e) => {
+                tracing::warn!(?e, attempt, "connect_profile failed, retrying");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if attempt == 4 {
+                    return Err(e.into());
+                }
+            }
+        }
+    }
+
     let (stream, _profiles) = acceptance.await??;
     tracing::debug!("Establishing iAP2 link");
 

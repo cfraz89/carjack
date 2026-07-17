@@ -37,6 +37,8 @@ async fn main() -> Result<()> {
 
     let (airplay_video_tx, airplay_video_rx) = mpsc::channel::<Vec<u8>>(64);
 
+    tracing::info!("Starting CarPlay session");
+
     let carplay = wireless_carplay(video_rx, touch_tx, wifi_tx, ready_tx);
     tokio::pin!(carplay);
 
@@ -46,6 +48,7 @@ async fn main() -> Result<()> {
     // Phase 1: process carplay session, connect WiFi immediately when creds arrive
     loop {
         tokio::select! {
+            biased;
             result = &mut carplay => {
                 if let Err(e) = result {
                     tracing::error!("CarPlay session error: {e}");
@@ -54,16 +57,14 @@ async fn main() -> Result<()> {
             }
             Some(creds) = wifi_rx.recv() => {
                 if wifi_handle.is_none() {
-                    tracing::info!(
-                        "Got WiFi creds immediately, connecting to car WiFi"
-                    );
+                    tracing::info!("Got WiFi creds, connecting");
                     let handle = tokio::spawn(async move {
                         connect_to_car_wifi(&creds.ssid, creds.passphrase.as_deref().unwrap_or("")).await
                     });
                     wifi_handle = Some(handle);
                 }
             }
-            _ = async { ready_rx.as_mut().unwrap().await.ok() }, if ready_rx.is_some() => {
+            _ = async { ready_rx.as_mut()?.await.ok() } => {
                 tracing::info!("EA session ready");
                 break;
             }
