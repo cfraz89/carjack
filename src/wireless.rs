@@ -26,7 +26,6 @@ use tokio_stream::StreamExt;
 use crate::carplay;
 
 pub async fn wireless_carplay(
-    video_rx: mpsc::Receiver<Vec<u8>>,
     touch_tx: mpsc::Sender<TouchEvent>,
     wifi_tx: mpsc::Sender<WifiCredentials>,
     ready_tx: oneshot::Sender<()>,
@@ -99,7 +98,7 @@ pub async fn wireless_carplay(
     let iap2 = Iap2::start(stream, LinkConfig::default()).await?;
 
     tracing::debug!("iAP2 link established");
-    carplay::run_carplay_session(iap2, video_rx, touch_tx, wifi_tx, ready_tx).await?;
+    carplay::run_carplay_session(iap2, touch_tx, wifi_tx, ready_tx).await?;
     tracing::debug!("iAP lifecycle ended");
     Ok(())
 }

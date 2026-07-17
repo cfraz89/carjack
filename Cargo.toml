@@ -29,4 +29,10 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 usb-gadget = "1.2.0"
 zbus = { version = "5.17.0", features = ["tokio"] }
 tap = "1.0.1"
+ring = "0.17"
+num-bigint = { version = "0.4", features = ["rand"] }
+num-traits = "0.2"
+rand = "0.8"
+sha2 = "0.10"
+x25519-dalek = "2"
 

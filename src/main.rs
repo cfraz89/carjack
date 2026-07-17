@@ -5,6 +5,7 @@ use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 
 use crate::{
     airplay::start_video_stream,
+    carplay_ctrl::wait_for_carplay_ctrl_probe,
     encode::encode_h264_to_channel,
     portal::start_remote_desktop,
     wifi_connect::{CarWifi, connect_to_car_wifi},
@@ -13,7 +14,9 @@ use crate::{
 
 mod airplay;
 mod carplay;
+mod carplay_ctrl;
 mod encode;
+mod pairing;
 mod portal;
 mod usb;
 mod wifi_connect;
@@ -30,7 +33,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let (_video_tx, video_rx) = mpsc::channel::<Vec<u8>>(64);
     let (touch_tx, mut touch_rx) = mpsc::channel::<TouchEvent>(64);
     let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCredentials>(4);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
@@ -39,7 +41,7 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting CarPlay session");
 
-    let carplay = wireless_carplay(video_rx, touch_tx, wifi_tx, ready_tx);
+    let carplay = wireless_carplay(touch_tx, wifi_tx, ready_tx);
     tokio::pin!(carplay);
 
     let mut wifi_handle: Option<tokio::task::JoinHandle<Result<CarWifi>>> = None;
@@ -81,7 +83,12 @@ async fn main() -> Result<()> {
     };
     let car_wifi = car_wifi_result?;
 
-    tracing::info!("Car WiFi connected, proceeding to video streaming");
+    tracing::info!("Car WiFi connected, waiting for car probe...");
+
+    // Advertise _carplay-ctrl._tcp via mDNS and wait for car's GET /ctrl-int/1/connect
+    if let Err(e) = wait_for_carplay_ctrl_probe().await {
+        tracing::warn!("CarPlay Ctrl probe failed (will try AirPlay anyway): {e}");
+    }
 
     // Phase 3: start AirPlay video streaming over WiFi + remote desktop
     let airplay = start_video_stream(car_wifi.ip, airplay_video_rx);

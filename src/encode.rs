@@ -9,7 +9,7 @@ pub async fn encode_h264_to_channel(
     let encoder = std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from("nvh264enc"));
 
     let pipeline_str = format!(
-        "pipewiresrc path={} ! videoconvert ! {} ! h264parse ! fdsink fd=1 sync=false",
+        "pipewiresrc path={} ! videoconvert ! {} ! h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream,alignment=au ! rtph264pay pt=96 ! fdsink fd=1 sync=false",
         node_id, encoder
     );
 
