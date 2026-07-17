@@ -6,22 +6,18 @@ pub async fn encode_h264_to_channel(
     node_id: u32,
     video_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
-    let encoder = std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from("x264enc"));
+    let encoder = std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from("nvh264enc"));
 
-    let pipeline = format!(
-        "pipewiresrc path={} ! \
-         video/x-raw,framerate=30/1 ! \
-         videoconvert ! \
-         {} ! \
-         h264parse ! \
-         fdsink fd=1 sync=false",
+    let pipeline_str = format!(
+        "pipewiresrc path={} ! videoconvert ! {} ! h264parse ! fdsink fd=1 sync=false",
         node_id, encoder
     );
 
-    tracing::info!("Starting GStreamer pipeline: {}", pipeline);
+    tracing::info!("Starting GStreamer pipeline: {}", pipeline_str);
 
     let mut child = tokio::process::Command::new("gst-launch-1.0")
-        .args(["-e", &pipeline])
+        .arg("-e")
+        .args(pipeline_str.split(' ').filter(|s| !s.is_empty()))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
         .spawn()?;
