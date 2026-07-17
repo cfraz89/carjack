@@ -16,7 +16,6 @@ mod airplay;
 mod carplay;
 mod carplay_ctrl;
 mod encode;
-mod pairing;
 mod portal;
 mod usb;
 mod wifi_connect;
