@@ -69,13 +69,16 @@ pub async fn wireless_carplay(
     tracing::debug!("Waiting for iAP2 connection requests");
     let mut profiles = iap_accessory_handle.merge(iap_device_handle);
     let acceptance = tokio::spawn(async move {
-        let Some(rq) = profiles.next().await else {
-            return Err(Iap2Error::ChannelClosed);
-        };
-        tracing::info!("Got connect request");
-        let stream = rq.accept().map_err(|e| std::io::Error::from(e))?;
-        Ok((stream, profiles))
+        match profiles.next().await {
+            Some(rq) => {
+                tracing::info!("Got connect request");
+                let stream = rq.accept().map_err(|e| std::io::Error::from(e))?;
+                Ok((stream, profiles))
+            }
+            None => Err(Iap2Error::ChannelClosed),
+        }
     });
+
     device.connect_profile(&IAP_ACCESSORY_UUID).await?;
     let (stream, _profiles) = acceptance.await??;
     tracing::debug!("Establishing iAP2 link");

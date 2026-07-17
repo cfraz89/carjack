@@ -210,6 +210,10 @@ impl ParameterId {
     pub const VERSION: Self = Self(0x4E02);
     pub const FEATURES: Self = Self(0x4E03);
     pub const AUTH_CHALLENGE: Self = Self(0x0001);
+
+    pub fn raw(self) -> u16 {
+        self.0
+    }
 }
 
 #[derive(DekuRead, DekuWrite, Debug, Clone)]
