@@ -1,5 +1,16 @@
 [workspace]
-members = ["iap2-proto", "libcarjack"]
+resolver = "3"
+members = [
+    "iap2-proto",
+    "libcarjack",
+    "catplay/core/catplay_hap",
+    "catplay/core/catplay_mfi",
+    "catplay/core/catplay_tracing",
+    "catplay/core/catplay_tracing_macro",
+    "catplay/core/catplay_util",
+    "catplay/async/catplay_async",
+    "catplay/async/catplay_async_derive",
+]
 
 [workspace.package]
 edition = "2024"
@@ -30,9 +41,4 @@ usb-gadget = "1.2.0"
 zbus = { version = "5.17.0", features = ["tokio"] }
 tap = "1.0.1"
 ring = "0.17"
-num-bigint = { version = "0.4", features = ["rand"] }
-num-traits = "0.2"
-rand = "0.8"
-sha2 = "0.10"
-x25519-dalek = "2"
-
+catplay_hap = { git = "https://github.com/catplay-labs/catplay.git" }
