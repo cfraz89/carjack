@@ -55,7 +55,6 @@ enum SessionPhase {
 
 pub struct CarplaySession<S: Stream> {
     pub iap2: Iap2<S>,
-    pub video_rx: mpsc::Receiver<Vec<u8>>,
     pub touch_tx: mpsc::Sender<TouchEvent>,
     pub wifi_tx: mpsc::Sender<WifiCredentials>,
     phase: SessionPhase,
@@ -67,14 +66,12 @@ pub struct CarplaySession<S: Stream> {
 impl<S: Stream> CarplaySession<S> {
     pub fn new(
         iap2: Iap2<S>,
-        video_rx: mpsc::Receiver<Vec<u8>>,
         touch_tx: mpsc::Sender<TouchEvent>,
         wifi_tx: mpsc::Sender<WifiCredentials>,
         ready_tx: oneshot::Sender<()>,
     ) -> Self {
         CarplaySession {
             iap2,
-            video_rx,
             touch_tx,
             wifi_tx,
             phase: SessionPhase::Auth,
@@ -88,33 +85,14 @@ impl<S: Stream> CarplaySession<S> {
         self.do_identification().await?;
 
         loop {
-            tokio::select! {
-                packet = self.iap2.receive_packet() => {
-                    match packet {
-                        Ok(packet) => {
-                            if !packet.header.control.ack || packet.payload.is_empty() {
-                                continue;
-                            }
-                            if let Err(e) = self.dispatch_packet(packet).await {
-                                tracing::warn!("Dispatch error: {e}");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Packet receive error: {e}");
-                            continue;
-                        }
-                    }
-                }
-                video = self.video_rx.recv() => {
-                    if self.ea_session_id != 0 {
-                        let data = video.ok_or(Iap2Error::ChannelClosed)?;
-                        self.send_video_frame(data).await?;
-                    }
-                }
-                else => break,
+            let packet = self.iap2.receive_packet().await?;
+            if !packet.header.control.ack || packet.payload.is_empty() {
+                continue;
+            }
+            if let Err(e) = self.dispatch_packet(packet).await {
+                tracing::warn!("Dispatch error: {e}");
             }
         }
-        Ok(())
     }
 
     async fn do_identification(&mut self) -> Result<(), Iap2Error> {
@@ -328,20 +306,4 @@ impl<S: Stream> CarplaySession<S> {
         Ok(())
     }
 
-    async fn send_video_frame(&mut self, h264_data: Vec<u8>) -> Result<(), Iap2Error> {
-        let ea_session = self.ea_session_id;
-        if ea_session == 0 {
-            return Ok(());
-        }
-        let self_transfer_id = self.ea_transfer_id;
-        let frame = EaFrame::new(self_transfer_id, h264_data.into());
-        let payload = frame.to_bytes().to_vec();
-        let ctrl = ControlByte {
-            ack: true,
-            ..Default::default()
-        };
-        self.iap2.send_packet(ctrl, ea_session, payload).await?;
-        self.ea_transfer_id = self.ea_transfer_id.wrapping_add(1);
-        Ok(())
-    }
 }

@@ -21,14 +21,17 @@ impl Decoder for Iap2Codec {
     type Error = Iap2Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Packet>, Iap2Error> {
-        if src.len() < 9 {
-            return Ok(None);
+        // Walk bytes one at a time looking for iAP2 magic (FF 5A)
+        let mut pos = 0;
+        while pos + 2 <= src.len() {
+            if src[pos] == 0xFF && src[pos + 1] == 0x5A {
+                break;
+            }
+            pos += 1;
         }
-        // Skip bytes that don't start with iAP2 magic to recover from noise
-        if src.len() >= 9 && (src[0] != 0xFF || src[1] != 0x5A) {
-            tracing::warn!("Skipping {} bytes with invalid magic: {:02X} {:02X}", src.len(), src[0], src[1]);
-            src.clear();
-            return Ok(None);
+        if pos > 0 {
+            tracing::warn!("Skipping {} byte(s) before valid magic", pos);
+            src.advance(pos);
         }
         if src.len() < 9 {
             return Ok(None);
