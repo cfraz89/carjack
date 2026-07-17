@@ -79,15 +79,7 @@ pub async fn wireless_carplay(
         }
     });
 
-    // Wait for services to be resolved before attempting profile connection
-    for _ in 0..50 {
-        if device.is_services_resolved().await? {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-
-    // Retry connect_profile in case SDP is not yet ready
+    // Retry connect_profile — services may not be resolved yet
     for attempt in 0..5 {
         match device.connect_profile(&IAP_ACCESSORY_UUID).await {
             Ok(()) => break,
