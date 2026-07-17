@@ -1,5 +1,7 @@
 use eyre::{Result, eyre};
 use nmrs::{NetworkManager, WifiSecurity};
+use nmrs::builders::build_wifi_connection;
+use nmrs::models::ConnectionOptions;
 use std::net::IpAddr;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -13,11 +15,26 @@ pub struct CarWifi {
 pub async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<CarWifi> {
     let nm = NetworkManager::new().await?;
 
-    tracing::info!("Connecting to car WiFi via nmrs: {}", ssid);
+    tracing::info!("Connecting to car WiFi: {}", ssid);
 
-    nm.connect(ssid, None, WifiSecurity::WpaPsk {
+    let security = WifiSecurity::WpaPsk {
         psk: passphrase.to_string(),
-    }).await.map_err(|e| eyre!("WiFi connection failed: {e}"))?;
+    };
+    let settings = build_wifi_connection(ssid, &security, &ConnectionOptions::default());
+
+    tracing::info!("Calling add_and_activate_connection for SSID={}", ssid);
+
+    match nm.add_and_activate_connection(settings, None, None).await {
+        Ok((conn_path, active_path)) => {
+            tracing::info!("Connection created: {}, active: {}", conn_path, active_path);
+        }
+        Err(e) => {
+            tracing::error!("add_and_activate_connection failed: {e:#}");
+            return Err(eyre!("{e:#}"));
+        }
+    }
+
+    tracing::info!("WiFi connection initiated, waiting for IP address");
 
     // Wait for IP assignment
     sleep(Duration::from_secs(5)).await;
