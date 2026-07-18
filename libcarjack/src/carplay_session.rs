@@ -172,7 +172,9 @@ impl<S: Stream> CarplaySession<S> {
     }
 
     async fn handle_control(&mut self, payload: &[u8]) -> Result<(), Iap2Error> {
+        tracing::trace!("Control payload size: {0}", payload.len());
         let (_, set) = ControlMessageSet::from_bytes((payload, 0))?;
+        tracing::trace!("{:?}", set);
         for msg in set.messages {
             self.handle_control_message(msg).await?;
         }
