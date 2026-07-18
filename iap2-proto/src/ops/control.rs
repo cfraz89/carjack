@@ -1,5 +1,3 @@
-use std::io::Cursor;
-
 use deku::ctx::Endian;
 use deku::prelude::*;
 
@@ -199,7 +197,7 @@ pub enum ControlMessageId {
 }
 
 #[derive(DekuRead, DekuWrite, Debug, Clone, Copy, PartialEq, Eq)]
-#[deku(ctx = "endian: Endian")]
+#[deku(ctx = "endian: Endian", endian = "endian")]
 pub struct ParameterId(pub u16);
 
 impl ParameterId {
