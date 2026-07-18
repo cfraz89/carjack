@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use bytes::{Buf, BytesMut};
 use deku::{DekuContainerRead, DekuContainerWrite};
+use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -9,7 +10,7 @@ use tokio_util::codec::{Decoder, Encoder, Framed};
 
 use crate::config::LinkConfig;
 use crate::error::Iap2Error;
-use crate::ops::{switch::Switch, syn::Syn};
+use crate::ops::{switch::perform_switch, syn::Syn};
 use crate::packet::{Checksumable, ControlByte, Header, Packet};
 use crate::stream::SessionTable;
 
@@ -60,9 +61,13 @@ impl Encoder<Packet> for Iap2Codec {
     }
 }
 
-#[derive(Debug)]
 pub struct Iap2<T> {
-    pub packet_stream: Mutex<Framed<T, Iap2Codec>>,
+    // Split into independent read/write halves so a pending receive_packet() (which
+    // spends nearly all its time blocked waiting for the accessory's next byte) never
+    // blocks a concurrent send_packet() - needed for link-layer keep-alives to actually
+    // go out while otherwise idle.
+    sink: Mutex<SplitSink<Framed<T, Iap2Codec>, Packet>>,
+    stream: Mutex<SplitStream<Framed<T, Iap2Codec>>>,
     seq: AtomicU8,
     ack: AtomicU8,
     pub session_table: Mutex<SessionTable>,
@@ -73,15 +78,22 @@ pub trait Stream: AsyncWriteExt + AsyncReadExt + Unpin {}
 impl<S: AsyncWriteExt + AsyncReadExt + Unpin> Stream for S {}
 
 impl<S: Stream> Iap2<S> {
-    pub async fn start(stream: S, config: LinkConfig) -> Result<Self, Iap2Error> {
+    pub async fn start(mut stream: S, config: LinkConfig) -> Result<Self, Iap2Error> {
+        perform_switch(&mut stream).await?;
+
+        let framed = Framed::new(stream, Iap2Codec);
+        let (sink, stream) = framed.split();
+
         let iap2 = Iap2 {
-            packet_stream: Mutex::new(Framed::new(stream, Iap2Codec)),
+            sink: Mutex::new(sink),
+            stream: Mutex::new(stream),
             seq: AtomicU8::new(config.initial_seq),
             ack: AtomicU8::new(0),
             session_table: Mutex::new(SessionTable::new()),
             config,
         };
-        iap2.establish().await?;
+        let table = Syn(&iap2).perform().await?;
+        *iap2.session_table.lock().await = table;
         Ok(iap2)
     }
 
@@ -114,27 +126,16 @@ impl<S: Stream> Iap2<S> {
         payload: Vec<u8>,
     ) -> Result<(), Iap2Error> {
         let packet = self.make_packet(control, session_id, payload);
-        let mut packet_stream = self.packet_stream.lock().await;
-        packet_stream.send(packet).await?;
+        let mut sink = self.sink.lock().await;
+        sink.send(packet).await?;
         self.seq.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
     pub async fn receive_packet(&self) -> Result<Packet, Iap2Error> {
-        let mut stream = self.packet_stream.lock().await;
+        let mut stream = self.stream.lock().await;
         let packet = stream.next().await.ok_or(Iap2Error::NoPacket)??;
         self.ack.store(packet.header.seq, Ordering::Relaxed);
         Ok(packet)
-    }
-
-    /// Perform the iAP2 link establishment handshake:
-    /// 1. iAP1→iAP2 protocol switch
-    /// 2. SYN exchange
-    /// Populates the session table.
-    pub async fn establish(&self) -> Result<(), Iap2Error> {
-        Switch(self).perform().await?;
-        let table = Syn(self).perform().await?;
-        *self.session_table.lock().await = table;
-        Ok(())
     }
 }

@@ -3,13 +3,6 @@ resolver = "3"
 members = [
     "iap2-proto",
     "libcarjack",
-    "catplay/core/catplay_hap",
-    "catplay/core/catplay_mfi",
-    "catplay/core/catplay_tracing",
-    "catplay/core/catplay_tracing_macro",
-    "catplay/core/catplay_util",
-    "catplay/async/catplay_async",
-    "catplay/async/catplay_async_derive",
 ]
 
 [workspace.package]
@@ -41,4 +34,14 @@ usb-gadget = "1.2.0"
 zbus = { version = "5.17.0", features = ["tokio"] }
 tap = "1.0.1"
 ring = "0.17"
-catplay_hap = { git = "https://github.com/catplay-labs/catplay.git" }
+# Pinned to a fork/branch carrying an unmerged fix for a strict /info plist
+# parse failure (audio_output_formats must be optional - real head units omit
+# it for input-only audio entries like Siri). Revert to catplay-labs/catplay
+# once https://github.com/catplay-labs/catplay/pull/new/fix/audio-output-formats-optional
+# (or equivalent) lands upstream.
+catplay_hap = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/audio-output-formats-optional", default-features=false, features = ["std"] }
+catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/audio-output-formats-optional", default-features = false, features = ["tx"]}
+catplay_util = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/audio-output-formats-optional" }
+bytes = "1.12.1"
+gstreamer = "0.24"
+gstreamer-app = "0.24"
