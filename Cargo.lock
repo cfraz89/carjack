@@ -1890,6 +1890,7 @@ version = "0.1.0"
 dependencies = [
  "deku",
  "iap2-proto",
+ "tap",
  "tokio",
  "tracing",
  "usb",

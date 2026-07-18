@@ -74,6 +74,15 @@ pub struct ControlByte {
     pub sleep: bool, // Device Sleep
 }
 
+impl ControlByte {
+    pub fn with_ack() -> Self {
+        ControlByte {
+            ack: true,
+            ..Default::default()
+        }
+    }
+}
+
 impl Checksumable for Vec<u8> {
     fn calculate_checksum(&self) -> u8 {
         let sum = self.iter().fold(0u8, |a, b| a.wrapping_add(*b));
