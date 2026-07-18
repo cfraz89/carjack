@@ -4,11 +4,14 @@ use std::time::Duration;
 use bytes::BytesMut;
 use catplay_carplay::carplay_tx::{
     AirPlayTransmitter, AirPlayTransmitterBootstrap, AirPlayTransmitterProxy,
+    AirPlayTransmitterProxyRef,
 };
 use catplay_carplay::modes::{
     EntityEnum, Resource, ResourceConstraint, ResourceController, ResourceID,
     ResourceTransferPriority,
 };
+use catplay_carplay::msg::Command;
+use catplay_carplay::rtsp_frame::HttpStatus;
 use catplay_carplay::screen::tx::{ScreenTransmitError, ScreenTransmitSink};
 use catplay_carplay::video::{
     AnnexBIter, AvccConfig, AvccConfigExtended, EncodedVideoFrame, NalType, Pts,
@@ -16,6 +19,7 @@ use catplay_carplay::video::{
 use catplay_hap::HomekitStorageFile;
 use eyre::{Result, eyre};
 use tokio::sync::mpsc;
+use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
 fn extract_avcc_config(data: &[u8]) -> Option<AvccConfig> {
@@ -55,7 +59,7 @@ fn extract_avcc_config(data: &[u8]) -> Option<AvccConfig> {
 pub async fn start_video_stream(
     peer_addr: SocketAddr,
     remote_homekit_id: Option<Uuid>,
-    mut video_rx: mpsc::Receiver<Vec<u8>>,
+    node_id: u32,
 ) -> Result<()> {
     let homekit = HomekitStorageFile::memory();
 
@@ -68,6 +72,24 @@ pub async fn start_video_stream(
 
     let tx = AirPlayTransmitterProxy::connect(bootstrap).await?;
     tracing::info!("AirPlay bootstrap complete!");
+
+    // Encode at the car's declared display resolution - CarPlay head units size their decode
+    // framebuffer to it and drop a mismatched stream the moment they try to render it.
+    let disp = tx
+        .info_cached()
+        .displays
+        .first()
+        .ok_or_else(|| eyre!("car declared no display in /info"))?;
+    let (width, height) = (disp.width_pixels, disp.height_pixels);
+    let (max_fps, disp_uuid) = (disp.max_fps.unwrap_or(0), disp.uuid.clone());
+    tracing::info!("Car display: {width}x{height} @ {max_fps} fps, uuid={disp_uuid}");
+
+    // Own the H264 encoder here so it can be sized to the car's display (which we only learn
+    // from /info above) and torn down with the stream.
+    let (video_tx, mut video_rx) = mpsc::channel::<Vec<u8>>(64);
+    let _encoder = AbortOnDropHandle::new(tokio::spawn(crate::encode::encode_h264_to_channel(
+        node_id, width, height, video_tx,
+    )));
 
     // CarPlay resource arbitration: claim the main screen for us (the controller) via a
     // ModesChanged command BEFORE setting up the screen stream. This ordering is mandatory
@@ -84,6 +106,13 @@ pub async fn start_video_stream(
     }
     tx.assert_modes(modes.serialize_to_state()).await?;
     tracing::info!("Asserted screen modes (controller owns screen)");
+
+    // Service the CarPlay control commands the car sends back over the AirPlay event
+    // channel (HID reports, mode changes, key-frame requests, ...). catplay queues each one
+    // and blocks its event server waiting for our response; if we never answer, the car
+    // tears the whole session down within ~100ms of the first command (it sends a
+    // HidSendReport right after RECORD). Runs for the session lifetime.
+    let _cmd_handler = AbortOnDropHandle::new(tokio::spawn(handle_car_commands(tx.clone(), modes)));
 
     let latency = Duration::from_millis(100);
     let mut screen_guard = tx.setup_screen(latency).await?;
@@ -132,8 +161,8 @@ pub async fn start_video_stream(
                         hevc: false,
                         avcc,
                         video_latency: Duration::ZERO,
-                        width: 800,
-                        height: 480,
+                        width,
+                        height,
                         respect_timestamps: true,
                     };
                     screen_guard.push_avcc_config(config.clone())?;
@@ -147,8 +176,8 @@ pub async fn start_video_stream(
             // A bare `now` lands in the past relative to the media clock anchor, producing
             // the negative/backwards timestamps the head unit rejects.
             pts: Pts(std::time::Instant::now() + latency),
-            width: 800,
-            height: 480,
+            width,
+            height,
             data: BytesMut::from(&data[..]),
             config: None,
             nal_offsets: None,
@@ -179,4 +208,23 @@ pub async fn start_video_stream(
 
     tracing::info!("Video stream ended");
     Ok(())
+}
+
+/// Answer the CarPlay control commands the car sends over the AirPlay event channel.
+/// With no real iPhone to proxy to (we stream a desktop), the car just needs each command
+/// acknowledged: ChangeModes gets a mode-state response, everything else an OK.
+async fn handle_car_commands(tx: AirPlayTransmitterProxyRef, mut modes: ResourceController) {
+    while let Some(mut cmd) = tx.pop_command().await {
+        tracing::debug!("Car command: {:?}", cmd.command().get_type());
+        match cmd.command() {
+            Command::ChangeModes(change) => {
+                let resp = modes.process_request_to_response(change);
+                if cmd.respond_plist(HttpStatus::Ok, resp).is_err() {
+                    cmd.respond_err();
+                }
+            }
+            _ => cmd.respond_ok(),
+        }
+    }
+    tracing::debug!("Car command handler ended");
 }
