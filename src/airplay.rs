@@ -14,10 +14,12 @@ pub async fn start_video_stream(
     node_id: u32,
 ) -> Result<()> {
     let conn = libcarjack::airplay::connect_airplay(peer_addr, remote_homekit_id).await?;
-    let (width, height) = (conn.width, conn.height);
     let (video_tx, video_rx) = mpsc::channel::<EncodedFrame>(64);
     let _encoder = AbortOnDropHandle::new(tokio::spawn(crate::encode::encode_h264_to_channel(
-        node_id, width, height, video_tx,
+        node_id,
+        conn.width,
+        conn.height,
+        video_tx,
     )));
     libcarjack::airplay::run_video_stream(conn, video_rx).await
 }
