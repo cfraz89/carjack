@@ -13,47 +13,18 @@ use catplay_carplay::modes::{
 use catplay_carplay::msg::Command;
 use catplay_carplay::rtsp_frame::HttpStatus;
 use catplay_carplay::screen::tx::{ScreenTransmitError, ScreenTransmitSink};
-use catplay_carplay::video::{
-    AnnexBIter, AvccConfig, AvccConfigExtended, EncodedVideoFrame, NalType, Pts,
-};
+use catplay_carplay::video::{AvccConfig, AvccConfigExtended, EncodedVideoFrame, Pts};
 use catplay_hap::HomekitStorageFile;
 use eyre::{Result, eyre};
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
-fn extract_avcc_config(data: &[u8]) -> Option<AvccConfig> {
-    let mut sps = Vec::new();
-    let mut pps = Vec::new();
-
-    for chunk in AnnexBIter::annexb(data) {
-        let chunk = chunk.ok()?;
-        if chunk.data_size == 0 {
-            continue;
-        }
-        let nal_start = chunk.prefix_start + chunk.prefix_len;
-        let nal_type = NalType::from_byte(data[nal_start]);
-        match nal_type {
-            NalType::Sps => {
-                sps.extend_from_slice(&data[chunk.prefix_start..nal_start + chunk.data_size])
-            }
-            NalType::Pps => {
-                pps.extend_from_slice(&data[chunk.prefix_start..nal_start + chunk.data_size])
-            }
-            _ => {}
-        }
-    }
-
-    if sps.is_empty() {
-        return None;
-    }
-    let mut sps_pps = sps;
-    sps_pps.extend_from_slice(&pps);
-
-    Some(AvccConfig {
-        nal_size_len: 4,
-        sps_pps,
-    })
+/// A single encoded H264 access unit with optional AVCC configuration
+/// (present on keyframes, extracted by the encoder).
+pub struct EncodedFrame {
+    pub data: Vec<u8>,
+    pub config: Option<AvccConfig>,
 }
 
 pub async fn start_video_stream(
@@ -86,7 +57,7 @@ pub async fn start_video_stream(
 
     // Own the H264 encoder here so it can be sized to the car's display (which we only learn
     // from /info above) and torn down with the stream.
-    let (video_tx, mut video_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (video_tx, mut video_rx) = mpsc::channel::<EncodedFrame>(64);
     let _encoder = AbortOnDropHandle::new(tokio::spawn(crate::encode::encode_h264_to_channel(
         node_id, width, height, video_tx,
     )));
@@ -131,44 +102,18 @@ pub async fn start_video_stream(
         tracing::info!("Dropped {dropped} stale buffered frames before streaming");
     }
 
-    let mut last_config: Option<AvccConfig> = None;
     let mut sent_keyframe = false;
     let mut frames_sent: u64 = 0;
     let mut last_heartbeat = std::time::Instant::now();
     const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
-    while let Some(data) = video_rx.recv().await {
-        let data_len = data.len();
-
-        // data is now one complete Annex-B access unit (reassembled in encode.rs).
-        let is_keyframe = AnnexBIter::annexb(&data).any(|chunk| {
-            let Ok(chunk) = chunk else { return false };
-            let nal_start = chunk.prefix_start + chunk.prefix_len;
-            data.get(nal_start)
-                .map(|b| matches!(NalType::from_byte(*b), NalType::IdrSlice | NalType::Sps))
-                .unwrap_or(false)
-        });
+    while let Some(encoded) = video_rx.recv().await {
+        let data_len = encoded.data.len();
+        let is_keyframe = encoded.config.is_some();
 
         // After draining we may land mid-GOP; the stream has to open on a keyframe.
         if !sent_keyframe && !is_keyframe {
             continue;
-        }
-
-        if is_keyframe {
-            if let Some(avcc) = extract_avcc_config(&data) {
-                if last_config.as_ref() != Some(&avcc) {
-                    let config = AvccConfigExtended {
-                        hevc: false,
-                        avcc,
-                        video_latency: Duration::ZERO,
-                        width,
-                        height,
-                        respect_timestamps: true,
-                    };
-                    screen_guard.push_avcc_config(config.clone())?;
-                    last_config = Some(config.avcc);
-                }
-            }
         }
 
         let frame = EncodedVideoFrame {
@@ -178,8 +123,15 @@ pub async fn start_video_stream(
             pts: Pts(std::time::Instant::now() + latency),
             width,
             height,
-            data: BytesMut::from(&data[..]),
-            config: None,
+            data: BytesMut::from(&encoded.data[..]),
+            config: encoded.config.map(|avcc| AvccConfigExtended {
+                hevc: false,
+                avcc,
+                video_latency: Duration::ZERO,
+                width,
+                height,
+                respect_timestamps: true,
+            }),
             nal_offsets: None,
             is_keyframe: Some(is_keyframe),
             header_buf: BytesMut::new(),
