@@ -10,7 +10,7 @@ use usb_gadget::{
             TransferType,
         },
         hid::Hid,
-        net::{Net, NetClass},
+
     },
     udcs,
 };

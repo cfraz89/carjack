@@ -1,6 +1,5 @@
 use std::io::{Cursor, Read};
 
-use bytes::Bytes;
 use deku::ctx::Endian;
 use deku::prelude::*;
 
@@ -15,7 +14,7 @@ pub struct Packet {
     )]
     pub header_checksum: u8,
     #[deku(
-        cond = "header.control.ack",
+        cond = "header.length > 9",
         count = "header.length.saturating_sub(10) as usize"
     )]
     pub payload: Vec<u8>,
@@ -48,8 +47,9 @@ impl Checksumable for Header {
         let mut buff = Cursor::new(vec![0; HEADER_SIZE]);
         self.to_writer(&mut Writer::new(&mut buff), Endian::Big)
             .expect("Unable to write control byte");
+        buff.set_position(0);
         let sum = buff.bytes().fold(0u8, |a, b| {
-            a.wrapping_add(b.expect("Couldn't read byt from header buffer"))
+            a.wrapping_add(b.expect("Couldn't read byte from header buffer"))
         });
         sum.wrapping_neg()
     }
@@ -59,7 +59,7 @@ impl Checksumable for Header {
 #[deku(ctx = "endian: Endian, ack: bool, count: usize", endian = "endian")]
 pub struct Payload(#[deku(cond = "ack", count = "count")] Vec<u8>);
 
-#[derive(DekuRead, DekuWrite, DekuSize, Debug, Clone, PartialEq, Default)]
+#[derive(DekuRead, DekuWrite, DekuSize, Debug, Clone, Copy, PartialEq, Default)]
 #[deku(ctx = "endian: Endian", endian = "endian")]
 pub struct ControlByte {
     #[deku(bits = "1")]
@@ -72,6 +72,15 @@ pub struct ControlByte {
     pub rst: bool, // Link Reset
     #[deku(bits = "1", pad_bits_after = "3")]
     pub sleep: bool, // Device Sleep
+}
+
+impl ControlByte {
+    pub fn with_ack() -> Self {
+        ControlByte {
+            ack: true,
+            ..Default::default()
+        }
+    }
 }
 
 impl Checksumable for Vec<u8> {
