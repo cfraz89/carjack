@@ -9,7 +9,7 @@ use iap2_proto::{
     packet::ControlByte,
     stream::SessionType,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(DekuRead, Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,13 +84,33 @@ impl<S: Stream> CarplaySession<S> {
     pub async fn run(&mut self) -> Result<(), Iap2Error> {
         self.do_identification().await?;
 
+        // The accessory's SYN handshake negotiates a cumulative-ack timeout (typically
+        // ~1s x 6 = ~6s); if we go that long without sending anything, it considers the
+        // link dead and resets the Bluetooth connection - which otherwise happens right
+        // in the middle of the (silent, on this channel) AirPlay/screen-sharing phase.
+        let mut keepalive = tokio::time::interval(Duration::from_secs(1));
+
         loop {
-            let packet = self.iap2.receive_packet().await?;
-            if !packet.header.control.ack || packet.payload.is_empty() {
-                continue;
-            }
-            if let Err(e) = self.dispatch_packet(packet).await {
-                tracing::warn!("Dispatch error: {e}");
+            tokio::select! {
+                packet = self.iap2.receive_packet() => {
+                    let packet = packet?;
+                    if !packet.header.control.ack || packet.payload.is_empty() {
+                        continue;
+                    }
+                    if let Err(e) = self.dispatch_packet(packet).await {
+                        tracing::warn!("Dispatch error: {e}");
+                    }
+                }
+                _ = keepalive.tick() => {
+                    // Only once the identification/auth/wifi-config handshake has
+                    // settled (ready_tx already fired) - interleaving an out-of-band
+                    // packet during that sequence confuses some accessories.
+                    if self.ready_tx.is_none() {
+                        if let Err(e) = self.send_ctrl(Vec::new()).await {
+                            tracing::warn!("Keep-alive send error: {e}");
+                        }
+                    }
+                }
             }
         }
     }

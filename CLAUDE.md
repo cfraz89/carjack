@@ -1,5 +1,5 @@
 This project is carjack, which aims to implement ui streaming via carplay.
-ireless carplay is the first target, carplay over usb may come later.
+Wireless carplay is the first target, carplay over usb may come later.
 
 It is split into a number of subprojects:
 

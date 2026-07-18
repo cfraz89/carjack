@@ -1,91 +1,54 @@
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+
+use catplay_carplay::ctrl::CarPlayCtrlServer;
+use catplay_util::EventSleeper;
 use eyre::{Result, eyre};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio::time::{timeout, Duration};
-use zbus::Connection;
+use uuid::Uuid;
 
-/// Advertise _carplay-ctrl._tcp via mDNS and wait for the car's probe request.
-pub async fn wait_for_carplay_ctrl_probe() -> Result<()> {
-    let listen_port: u16 = 8082;
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", listen_port)).await?;
-    tracing::info!("CarPlay Ctrl listening on port {}", listen_port);
+/// Advertise `_carplay-ctrl._tcp` via mDNS, wait for the car's `ctrl-int/1/connect` invite,
+/// and correlate it against the car's own `_airplay._tcp` Bonjour record to learn its real
+/// AirPlay address and HomeKit pairing id (rather than guessing the WiFi gateway IP and
+/// skipping HomeKit pair-verify fast-path).
+pub async fn wait_for_carplay_ctrl_probe(iface: &str, bonjour_id: &str) -> Result<(SocketAddr, Option<Uuid>)> {
+    const PORT: u16 = 8082;
 
-    // Register _carplay-ctrl._tcp with avahi
-    if let Err(e) = register_carplay_ctrl(listen_port).await {
-        tracing::warn!("avahi registration failed (non-fatal): {e}");
-    } else {
-        tracing::info!("_carplay-ctrl._tcp registered via avahi");
-    }
+    let mut ctrl_server = CarPlayCtrlServer::new(bonjour_id, PORT, iface)
+        .map_err(|e| eyre!("Failed to start CarPlay ctrl server: {e}"))?;
+    tracing::info!("_carplay-ctrl._tcp advertised on {iface}:{PORT} (id={bonjour_id})");
 
-    // Wait for the car to probe us (timeout after 15s)
-    match timeout(Duration::from_secs(15), listener.accept()).await {
-        Ok(Ok((mut stream, addr))) => {
-            tracing::info!("Car connected from {}:{}", addr.ip(), addr.port());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut announce_interval = tokio::time::interval(Duration::from_millis(1000));
 
-            let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).await?;
-            let req = String::from_utf8_lossy(&buf[..n]);
-            tracing::info!("Probe request: {}", req.lines().next().unwrap_or("?"));
-
-            if req.contains("GET /ctrl-int/1/connect") {
-                let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                stream.write_all(resp.as_bytes()).await?;
-                tracing::info!("Responded 200 OK to car probe");
-                Ok(())
-            } else {
-                tracing::warn!("Unexpected request: {}", req.lines().next().unwrap_or(""));
-                Err(eyre!("Unexpected probe request"))
-            }
+    loop {
+        if let Some(invite) = ctrl_server.pop_invite() {
+            let addr = invite
+                .entry
+                .meta
+                .addrs
+                .first()
+                .copied()
+                .ok_or_else(|| eyre!("CarPlay invite had no AirPlay address in Bonjour record"))?;
+            tracing::info!(
+                "Got CarPlay ctrl invite; AirPlay peer at {addr}, pi={:?}",
+                invite.entry.data.pi
+            );
+            return Ok((addr, invite.entry.data.pi));
         }
-        Ok(Err(e)) => Err(eyre!("Accept error: {e}")),
-        Err(_) => Err(eyre!("Timeout waiting for car probe (15s)")),
+
+        if Instant::now() >= deadline {
+            return Err(eyre!("Timeout waiting for CarPlay ctrl invite"));
+        }
+
+        // ctrl_server.sleep() isn't optional here: pop_invite()'s underlying channel is a
+        // peek-cache that only gets filled by actually polling this EventSleeper - calling
+        // pop_invite() on its own (without ever awaiting sleep()) silently never sees
+        // invites that already arrived over TCP.
+        tokio::select! {
+            _ = announce_interval.tick() => {
+                let _ = ctrl_server.force_announce();
+            }
+            _ = ctrl_server.sleep() => {}
+        }
     }
-}
-
-async fn register_carplay_ctrl(port: u16) -> Result<()> {
-    let conn = Connection::system().await?;
-
-    // Create entry group
-    let group_path: zbus::zvariant::OwnedObjectPath = conn
-        .call_method(
-            Some("org.freedesktop.Avahi"),
-            "/",
-            Some("org.freedesktop.Avahi.Server"),
-            "EntryGroupNew",
-            &(),
-        )
-        .await?
-        .body()
-        .deserialize()?;
-
-    let name = format!("carjack-{}", std::process::id());
-    let txt_records: Vec<Vec<u8>> = vec![b"id=AA:BB:CC:DD:EE:04".to_vec()];
-
-    // Add service to group
-    let _: () = conn
-        .call_method(
-            Some("org.freedesktop.Avahi"),
-            group_path.clone(),
-            Some("org.freedesktop.Avahi.EntryGroup"),
-            "AddService",
-            &(-1i32, -1i32, 0u32, &name, "_carplay-ctrl._tcp", "", "", port, txt_records),
-        )
-        .await?
-        .body()
-        .deserialize()?;
-
-    // Commit
-    let _: () = conn
-        .call_method(
-            Some("org.freedesktop.Avahi"),
-            group_path,
-            Some("org.freedesktop.Avahi.EntryGroup"),
-            "Commit",
-            &(),
-        )
-        .await?
-        .body()
-        .deserialize()?;
-
-    Ok(())
 }

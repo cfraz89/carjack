@@ -1,235 +1,179 @@
-use eyre::{Result, eyre};
-use catplay_hap::{
-    pair_setup::{PairSetup, CARPLAY_MAGIC_PIN},
-    pair_verify::PairVerify,
-    tlv,
-    HomekitStorageFile,
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use bytes::BytesMut;
+use catplay_carplay::carplay_tx::{
+    AirPlayTransmitter, AirPlayTransmitterBootstrap, AirPlayTransmitterProxy,
 };
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use catplay_carplay::modes::{
+    EntityEnum, Resource, ResourceConstraint, ResourceController, ResourceID,
+    ResourceTransferPriority,
+};
+use catplay_carplay::screen::tx::{ScreenTransmitError, ScreenTransmitSink};
+use catplay_carplay::video::{
+    AnnexBIter, AvccConfig, AvccConfigExtended, EncodedVideoFrame, NalType, Pts,
+};
+use catplay_hap::HomekitStorageFile;
+use eyre::{Result, eyre};
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
-const AIRPLAY_PORT: u16 = 7000;
-const BT_MAC: &str = "AA:BB:CC:DD:EE:04";
+fn extract_avcc_config(data: &[u8]) -> Option<AvccConfig> {
+    let mut sps = Vec::new();
+    let mut pps = Vec::new();
 
-async fn read_rtsp_response<R: AsyncRead + Unpin>(
-    reader: &mut BufReader<R>,
-) -> Result<(String, Vec<u8>)> {
-    let mut response = String::new();
-    let mut content_length: usize = 0;
-
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            return Err(eyre!("Connection closed while reading response"));
+    for chunk in AnnexBIter::annexb(data) {
+        let chunk = chunk.ok()?;
+        if chunk.data_size == 0 {
+            continue;
         }
-        response.push_str(&line);
-        if line == "\r\n" || line == "\n" {
-            break;
-        }
-        if let Some(val) = line.strip_prefix("Content-Length:") {
-            content_length = val.trim().parse().unwrap_or(0);
+        let nal_start = chunk.prefix_start + chunk.prefix_len;
+        let nal_type = NalType::from_byte(data[nal_start]);
+        match nal_type {
+            NalType::Sps => {
+                sps.extend_from_slice(&data[chunk.prefix_start..nal_start + chunk.data_size])
+            }
+            NalType::Pps => {
+                pps.extend_from_slice(&data[chunk.prefix_start..nal_start + chunk.data_size])
+            }
+            _ => {}
         }
     }
 
-    let body = if content_length > 0 {
-        let mut b = vec![0u8; content_length];
-        reader.read_exact(&mut b).await?;
-        b
-    } else {
-        Vec::new()
-    };
-
-    Ok((response, body))
-}
-
-async fn send_request<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
-    reader: &mut BufReader<R>,
-    writer: &mut W,
-    head: &str,
-    body: &[u8],
-) -> Result<(String, Vec<u8>)> {
-    writer.write_all(head.as_bytes()).await?;
-    if !body.is_empty() {
-        writer.write_all(body).await?;
+    if sps.is_empty() {
+        return None;
     }
-    read_rtsp_response(reader).await
-}
+    let mut sps_pps = sps;
+    sps_pps.extend_from_slice(&pps);
 
-fn hex_preview(data: &[u8], max: usize) -> String {
-    let n = std::cmp::min(data.len(), max);
-    data[..n].iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-fn apple_headers(cseq: u32) -> String {
-    format!(
-        "CSeq: {}\r\n\
-         X-Apple-Device-ID: {}\r\n\
-         User-Agent: AirPlay/320.14\r\n\
-         X-Apple-ProtocolVersion: 1\r\n",
-        cseq, BT_MAC)
+    Some(AvccConfig {
+        nal_size_len: 4,
+        sps_pps,
+    })
 }
 
 pub async fn start_video_stream(
-    car_ip: std::net::IpAddr,
+    peer_addr: SocketAddr,
+    remote_homekit_id: Option<Uuid>,
     mut video_rx: mpsc::Receiver<Vec<u8>>,
 ) -> Result<()> {
-    let addr = format!("{}:{}", car_ip, AIRPLAY_PORT);
-    tracing::info!("Connecting to AirPlay server at {}", addr);
-
-    let stream = TcpStream::connect(&addr).await?;
-    tracing::info!("Connected to car AirPlay port {}", AIRPLAY_PORT);
-
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-    let mut cseq = 0u32;
-    let mut nseq = || -> String { cseq += 1; apple_headers(cseq) };
-
-    // ============== OPTIONS ==============
-    let (resp, _) = send_request(&mut reader, &mut writer,
-        &format!("OPTIONS * RTSP/1.0\r\n{}\r\n", nseq()), &[]).await?;
-    tracing::info!("OPTIONS: {}", resp.lines().next().unwrap_or(""));
-
-    // ============== TEARDOWN (reset) ==============
-    let (resp, _) = send_request(&mut reader, &mut writer,
-        &format!("TEARDOWN * RTSP/1.0\r\n{}\r\n", nseq()), &[]).await?;
-    tracing::info!("TEARDOWN: {}", resp.lines().next().unwrap_or(""));
-
-    // Create HomekitStorage with random identity
     let homekit = HomekitStorageFile::memory();
 
-    // ============== Pair-Setup ==============
-    let (ps_session, ps_m1) = PairSetup::client(CARPLAY_MAGIC_PIN);
-    let head = format!(
-        "POST /pair-setup RTSP/1.0\r\n\
-         Content-Type: application/pairing+tlv8\r\n\
-         X-Apple-HKP: 2\r\n\
-         Content-Length: {}\r\n\
-         {}\r\n",
-        ps_m1.len(), nseq());
-    let (resp, body) = send_request(&mut reader, &mut writer, &head, &ps_m1).await?;
-    tracing::warn!("/pair-setup M1: {} [b:{}b {}]",
-        resp.lines().next().unwrap_or(""), body.len(), hex_preview(&body, 48));
+    let bootstrap = AirPlayTransmitterBootstrap {
+        homekit,
+        peer_ip: peer_addr,
+        controller_features: vec![],
+        remote_homekit_id,
+    };
 
-    let (ps_session, ps_m3) = ps_session.handle(&*homekit, &body)
-        .map_err(|(e, _)| eyre!("Pair-setup M2->M3: {:?}", e))?;
-    let head = format!(
-        "POST /pair-setup RTSP/1.0\r\n\
-         Content-Type: application/pairing+tlv8\r\n\
-         X-Apple-HKP: 2\r\n\
-         Content-Length: {}\r\n\
-         {}\r\n",
-        ps_m3.len(), nseq());
-    let (resp, body) = send_request(&mut reader, &mut writer, &head, &ps_m3).await?;
-    tracing::warn!("/pair-setup M3: {} [b:{}b {}]",
-        resp.lines().next().unwrap_or(""), body.len(), hex_preview(&body, 48));
+    let tx = AirPlayTransmitterProxy::connect(bootstrap).await?;
+    tracing::info!("AirPlay bootstrap complete!");
 
-    // Check for error in M4
-    let decoded = tlv::decode(&body);
-    if let Some(err_val) = decoded.get(&0x07) {
-        tracing::error!("Car returned Error {} in M4", err_val[0]);
-        return Err(eyre!("M4 error code {}", err_val[0]));
+    // CarPlay resource arbitration: claim the main screen for us (the controller) via a
+    // ModesChanged command BEFORE setting up the screen stream. This ordering is mandatory
+    // - without it the head unit doesn't consider the phone the screen owner and tears the
+    // session down as soon as video starts arriving.
+    let mut modes = ResourceController::from_change_modes(&tx.info_cached().modes);
+    if modes.screen.entity() != EntityEnum::Controller {
+        modes.screen.take_by_controller(&Resource::take(
+            ResourceID::MainScreen,
+            ResourceTransferPriority::UserInitiated,
+            ResourceConstraint::Anytime,
+            ResourceConstraint::Anytime,
+        ));
+    }
+    tx.assert_modes(modes.serialize_to_state()).await?;
+    tracing::info!("Asserted screen modes (controller owns screen)");
+
+    let latency = Duration::from_millis(100);
+    let mut screen_guard = tx.setup_screen(latency).await?;
+
+    tx.record().await?;
+    tracing::info!("RECORD sent, streaming video");
+
+    // The encoder has been running (and buffering) since before AirPlay setup completed,
+    // so drop everything queued up to now - otherwise we'd open the stream with a burst of
+    // seconds-old frames. Steady state then only ever pushes near-live frames.
+    let mut dropped = 0;
+    while video_rx.try_recv().is_ok() {
+        dropped += 1;
+    }
+    if dropped > 0 {
+        tracing::info!("Dropped {dropped} stale buffered frames before streaming");
     }
 
-    let (ps_session, ps_m5) = ps_session.handle(&*homekit, &body)
-        .map_err(|(e, _)| eyre!("Pair-setup M4->M5: {:?}", e))?;
-    let head = format!(
-        "POST /pair-setup RTSP/1.0\r\n\
-         Content-Type: application/pairing+tlv8\r\n\
-         X-Apple-HKP: 2\r\n\
-         Content-Length: {}\r\n\
-         {}\r\n",
-        ps_m5.len(), nseq());
-    let (resp, body) = send_request(&mut reader, &mut writer, &head, &ps_m5).await?;
-    tracing::warn!("/pair-setup M5: {} [b:{}b {}]",
-        resp.lines().next().unwrap_or(""), body.len(), hex_preview(&body, 48));
+    let mut last_config: Option<AvccConfig> = None;
+    let mut sent_keyframe = false;
+    let mut frames_sent: u64 = 0;
+    let mut last_heartbeat = std::time::Instant::now();
+    const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
-    let (_, _) = ps_session.handle(&*homekit, &body)
-        .map_err(|(e, _)| eyre!("Pair-setup M6->Finished: {:?}", e))?;
-    tracing::info!("Pair-setup complete!");
-
-    // ============== Pair-Verify ==============
-    let (pv_session, pv_m1) = PairVerify::client()
-        .map_err(|_| eyre!("PairVerify::client failed"))?;
-    let head = format!(
-        "POST /pair-verify RTSP/1.0\r\n\
-         Content-Type: application/pairing+tlv8\r\n\
-         X-Apple-HKP: 2\r\n\
-         Content-Length: {}\r\n\
-         {}\r\n",
-        pv_m1.len(), nseq());
-    let (resp, body) = send_request(&mut reader, &mut writer, &head, &pv_m1).await?;
-    tracing::warn!("/pair-verify M1: {} [b:{}b]",
-        resp.lines().next().unwrap_or(""), body.len());
-
-    let (pv_session, pv_m3) = pv_session.handle(&*homekit, &body)
-        .map_err(|(e, _)| eyre!("Pair-verify M2->M3: {:?}", e))?;
-    let head = format!(
-        "POST /pair-verify RTSP/1.0\r\n\
-         Content-Type: application/pairing+tlv8\r\n\
-         X-Apple-HKP: 2\r\n\
-         Content-Length: {}\r\n\
-         {}\r\n",
-        pv_m3.len(), nseq());
-    let (resp, body) = send_request(&mut reader, &mut writer, &head, &pv_m3).await?;
-    tracing::warn!("/pair-verify M3: {} [b:{}b]",
-        resp.lines().next().unwrap_or(""), body.len());
-
-    let (_, _) = pv_session.handle(&*homekit, &body)
-        .map_err(|(e, _)| eyre!("Pair-verify M4->Finished: {:?}", e))?;
-    tracing::info!("Pair-verify complete!");
-
-    // ============== GET /info ==============
-    let (resp, body) = send_request(&mut reader, &mut writer,
-        &format!("GET /info RTSP/1.0\r\n{}\r\n", nseq()), &[]).await?;
-    tracing::warn!("/info: {} [b:{}b {}]",
-        resp.lines().next().unwrap_or(""), body.len(), hex_preview(&body, 96));
-
-    // ============== SETUP ==============
-    let (resp, body) = send_request(&mut reader, &mut writer,
-        &format!("SETUP * RTSP/1.0\r\n\
-            Transport: RTP/AVP/TCP;unicast;interleaved=0-1;mode=record\r\n\
-            {}\r\n", nseq()), &[]).await?;
-    tracing::info!("SETUP: {} [b:{}b {}]",
-        resp.lines().next().unwrap_or(""), body.len(), hex_preview(&body, 64));
-
-    // ============== RECORD ==============
-    let (resp, _) = send_request(&mut reader, &mut writer,
-        &format!("RECORD * RTSP/1.0\r\nSession: 1\r\n{}\r\n", nseq()), &[]).await?;
-    tracing::info!("RECORD: {}", resp.lines().next().unwrap_or(""));
-
-    // ============== Send video data ==============
-    tracing::info!("Sending video data");
-    let mut header = [0u8; 4];
     while let Some(data) = video_rx.recv().await {
-        let mut offset = 0;
-        while offset < data.len() {
-            let remaining = data.len() - offset;
-            let chunk_len = if remaining > 0xFFFF {
-                let search_start = std::cmp::min(offset + 12, data.len());
-                let search_end = std::cmp::min(offset + 0xFFFF, data.len());
-                match data[search_start..search_end].iter().position(|&b| b == 0x80) {
-                    Some(pos) if pos > 0 => search_start + pos - offset,
-                    _ => 0xFFFF,
+        let data_len = data.len();
+
+        // data is now one complete Annex-B access unit (reassembled in encode.rs).
+        let is_keyframe = AnnexBIter::annexb(&data).any(|chunk| {
+            let Ok(chunk) = chunk else { return false };
+            let nal_start = chunk.prefix_start + chunk.prefix_len;
+            data.get(nal_start)
+                .map(|b| matches!(NalType::from_byte(*b), NalType::IdrSlice | NalType::Sps))
+                .unwrap_or(false)
+        });
+
+        // After draining we may land mid-GOP; the stream has to open on a keyframe.
+        if !sent_keyframe && !is_keyframe {
+            continue;
+        }
+
+        if is_keyframe {
+            if let Some(avcc) = extract_avcc_config(&data) {
+                if last_config.as_ref() != Some(&avcc) {
+                    let config = AvccConfigExtended {
+                        hevc: false,
+                        avcc,
+                        video_latency: Duration::ZERO,
+                        width: 800,
+                        height: 480,
+                        respect_timestamps: true,
+                    };
+                    screen_guard.push_avcc_config(config.clone())?;
+                    last_config = Some(config.avcc);
                 }
-            } else {
-                remaining
-            };
-            if chunk_len > 0xFFFF { continue; }
-            header[0] = 0x24;
-            header[1] = 0x00;
-            header[2] = (chunk_len >> 8) as u8;
-            header[3] = (chunk_len & 0xFF) as u8;
-            if let Err(e) = writer.write_all(&header).await {
-                tracing::error!("write error: {e}");
-                return Err(e.into());
             }
-            if let Err(e) = writer.write_all(&data[offset..offset + chunk_len]).await {
-                tracing::error!("write error: {e}");
-                return Err(e.into());
+        }
+
+        let frame = EncodedVideoFrame {
+            // Present `latency` in the future, matching catplay's own transmitter usage.
+            // A bare `now` lands in the past relative to the media clock anchor, producing
+            // the negative/backwards timestamps the head unit rejects.
+            pts: Pts(std::time::Instant::now() + latency),
+            width: 800,
+            height: 480,
+            data: BytesMut::from(&data[..]),
+            config: None,
+            nal_offsets: None,
+            is_keyframe: Some(is_keyframe),
+            header_buf: BytesMut::new(),
+            chacha_tag_buf: BytesMut::new(),
+        };
+
+        if let Err((err, _)) = screen_guard.push_frame(frame).await {
+            // A closed screen socket means the car tore the session down - bail so the
+            // caller can restart the whole flow from a fresh Bluetooth connection.
+            if matches!(err, ScreenTransmitError::Closed) {
+                return Err(eyre!("Screen socket closed by accessory"));
             }
-            offset += chunk_len;
+            tracing::warn!("push_frame error: {err}");
+        } else {
+            frames_sent += 1;
+            sent_keyframe = true;
+        }
+
+        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+            tracing::info!(
+                "Streaming heartbeat: {frames_sent} frames sent, last frame {data_len} bytes, keyframe={is_keyframe}"
+            );
+            last_heartbeat = std::time::Instant::now();
         }
     }
 
