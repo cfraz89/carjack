@@ -357,19 +357,22 @@ pub struct ControlMessageSet {
 #[deku(ctx = "endian: Endian", ctx_default = "Endian::Big", endian = "endian")]
 pub struct ControlMessage {
     pub som: u16,
-    #[deku(update = "6 + self.parameters.len()")]
+    #[deku(update = "6 + self.parameters.iter().map(|p| p.total_length as usize).sum::<usize>() as u16")]
     pub total_length: u16,
     pub message_id: ControlMessageId,
-    #[deku(count = "total_length.saturating_sub(6)")]
-    // /Todo replace Vec with HashSet
+    #[deku(bytes_read = "total_length.saturating_sub(6)")]
     pub parameters: Vec<Parameter>,
 }
 
 impl ControlMessage {
     pub fn new(message_id: ControlMessageId, parameters: Vec<Parameter>) -> Self {
+        let total_length = 6 + parameters
+            .iter()
+            .map(|p| p.total_length as usize)
+            .sum::<usize>() as u16;
         ControlMessage {
             som: SOM,
-            total_length: 6 + parameters.len() as u16,
+            total_length,
             message_id,
             parameters,
         }
