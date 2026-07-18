@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 deku = "0.20.3"
 iap2-proto = { version = "0.1.0", path = "../iap2-proto" }
+tap = "1.0.1"
 tokio = { version = "1.52.3", features = ["sync"] }
 tracing = "0.1.44"
 usb = "0.3.0"

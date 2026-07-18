@@ -2,14 +2,17 @@ use deku::prelude::*;
 use iap2_proto::{
     error::Iap2Error,
     iap2::{Iap2, Stream},
-    ops::control::{
-        self, parse_control_payload, ControlMessage, ControlMessageId, GetParam, ParameterId,
+    ops::{
+        control::{
+            self, ControlMessage, ControlMessageId, ControlMessageSet, GetParam, ParameterId,
+        },
+        ea::EaFrame,
     },
-    ops::ea::EaFrame,
     packet::ControlByte,
     stream::SessionType,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tap::prelude::*;
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(DekuRead, Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,32 +95,34 @@ impl<S: Stream> CarplaySession<S> {
 
         loop {
             tokio::select! {
-                packet = self.iap2.receive_packet() => {
-                    let packet = packet?;
-                    if !packet.header.control.ack || packet.payload.is_empty() {
-                        continue;
+                    packet = self.iap2.receive_packet() => {
+                        let packet = packet?;
+                        if !packet.header.control.ack || packet.payload.is_empty() {
+                            continue;
+                        }
+                        if let Err(e) = self.dispatch_packet(packet).await {
+                            tracing::warn!("Dispatch error: {e}");
+                        }
                     }
-                    if let Err(e) = self.dispatch_packet(packet).await {
-                        tracing::warn!("Dispatch error: {e}");
-                    }
-                }
-                _ = keepalive.tick() => {
-                    // Only once the identification/auth/wifi-config handshake has
-                    // settled (ready_tx already fired) - interleaving an out-of-band
-                    // packet during that sequence confuses some accessories.
-                    if self.ready_tx.is_none() {
-                        if let Err(e) = self.send_ctrl(Vec::new()).await {
-                            tracing::warn!("Keep-alive send error: {e}");
+                    _ = keepalive.tick() => {
+                        // Only once the identification/auth/wifi-config handshake has
+                        // settled (ready_tx already fired) - interleaving an out-of-band
+                        // packet during that sequence confuses some accessories.
+                        if self.ready_tx.is_none() {
+            self.iap2
+                .send_packet(ControlByte::with_ack(), 1, Vec::new())
+                .await.tap_err(|e| tracing::warn!("Keep-alive send error: {e}"))?
                         }
                     }
                 }
-            }
         }
     }
 
     async fn do_identification(&mut self) -> Result<(), Iap2Error> {
         tracing::debug!("Sending StartIdentification");
-        let payload = control::make_start_identification();
+        let payload = ControlMessage::start_identification()
+            .to_bytes()
+            .expect("serialize ControlMessage");
         tracing::debug!("StartIdentification payload: {:?}", payload);
         let ctrl = ControlByte {
             ack: true,
@@ -135,7 +140,9 @@ impl<S: Stream> CarplaySession<S> {
         let mut challenge = [0u8; 20];
         let mut state = seed;
         for byte in challenge.iter_mut() {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *byte = (state >> 32) as u8;
         }
         challenge
@@ -165,89 +172,90 @@ impl<S: Stream> CarplaySession<S> {
     }
 
     async fn handle_control(&mut self, payload: &[u8]) -> Result<(), Iap2Error> {
-        let messages = parse_control_payload(payload);
-        for msg in messages {
+        let (_, set) = ControlMessageSet::from_bytes((payload, 0))?;
+        for msg in set.messages {
             self.handle_control_message(msg).await?;
         }
         Ok(())
     }
 
-    async fn send_ctrl(&self, payload: Vec<u8>) -> Result<(), Iap2Error> {
-        let ctrl = ControlByte {
-            ack: true,
-            ..Default::default()
-        };
-        self.iap2.send_packet(ctrl, 1, payload).await
+    async fn send_ctrl(&self, message: ControlMessage) -> Result<(), Iap2Error> {
+        let payload = message.to_bytes()?;
+        self.iap2
+            .send_packet(ControlByte::with_ack(), 1, payload)
+            .await
     }
 
     async fn handle_control_message(&mut self, msg: ControlMessage) -> Result<(), Iap2Error> {
-        let params = msg.parameters();
         tracing::debug!(
             "Control message: {:?}, {} params",
             msg.message_id,
-            params.len()
+            msg.parameters.len()
         );
 
         match msg.message_id {
             ControlMessageId::IdentificationInformation => {
-                let name = params
+                let name = msg
+                    .parameters
                     .get_param::<String>(ParameterId::DISPLAY_NAME)
                     .unwrap_or_else(|| String::from("Unknown"));
                 tracing::info!("Accessory identified: {}", name);
-                self.send_ctrl(control::make_identification_accepted()).await?;
-                self.send_ctrl(control::make_request_auth_certificate_serial()).await?;
+                self.send_ctrl(ControlMessage::identification_accepted())
+                    .await?;
+                self.send_ctrl(ControlMessage::request_auth_certificate_serial())
+                    .await?;
             }
             ControlMessageId::AccessoryAuthenticationSerialNumber => {
                 tracing::debug!("Received accessory serial number");
-                self.send_ctrl(control::make_request_auth_certificate()).await?;
+                self.send_ctrl(ControlMessage::request_auth_certificate())
+                    .await?;
             }
             ControlMessageId::AuthenticationCertificate => {
                 tracing::debug!("Received authentication certificate");
                 let challenge = Self::generate_challenge();
-                self.send_ctrl(control::make_authentication_challenge(&challenge)).await?;
+                self.send_ctrl(ControlMessage::authentication_challenge(&challenge))
+                    .await?;
             }
             ControlMessageId::AuthenticationResponse => {
                 tracing::info!("Authentication complete");
-                self.send_ctrl(control::make_authentication_succeeded()).await?;
+                self.send_ctrl(ControlMessage::authentication_succeeded())
+                    .await?;
                 // Request WiFi config first, wait for response
-                self.send_ctrl(control::make_request_accessory_wifi_config()).await?;
+                self.send_ctrl(ControlMessage::request_accessory_wifi_config())
+                    .await?;
                 self.phase = SessionPhase::WaitingForWifiConfig;
             }
             ControlMessageId::RequestAppLaunch
             | ControlMessageId::StatusExternalAccessoryProtocolSession => {
                 tracing::info!("Received EA session request");
-                self.ea_session_id = match params.get_param::<u32>(ParameterId::SESSION_IDENTIFIER)
+                self.ea_session_id = match msg
+                    .parameters
+                    .get_param::<u32>(ParameterId::SESSION_IDENTIFIER)
                 {
                     Some(v) if v <= 0xFF => v as u8,
                     _ => 2,
                 };
-                // If we already have WiFi config, signal ready now
-                if matches!(self.phase, SessionPhase::EaReady) {
-                    let payload = control::make_start_ea_session("com.apple.carplay");
-                    self.send_ctrl(payload).await?;
-                    tracing::info!("Started EA session");
-                    if let Some(tx) = self.ready_tx.take() {
-                        let _ = tx.send(());
-                    }
-                } else {
-                    let payload = control::make_start_ea_session("com.apple.carplay");
-                    self.send_ctrl(payload).await?;
-                    tracing::info!("Started EA session");
-                    self.phase = SessionPhase::EaReady;
-                    if let Some(tx) = self.ready_tx.take() {
-                        let _ = tx.send(());
-                    }
+                let payload = ControlMessage::start_ea_session("com.apple.carplay");
+                self.send_ctrl(payload).await?;
+                tracing::info!("Started EA session");
+                self.phase = SessionPhase::EaReady;
+                if let Some(tx) = self.ready_tx.take() {
+                    let _ = tx.send(());
                 }
             }
             ControlMessageId::AccessoryWiFiConfigurationInformation => {
                 tracing::debug!("Received AccessoryWiFiConfigurationInformation");
-                for p in &params {
+                for p in &msg.parameters {
                     let id = p.id.raw();
-                    tracing::info!("  WiFi param 0x{id:04x}: {} bytes: {:02x?}", p.data.len(), p.data);
+                    tracing::info!(
+                        "  WiFi param 0x{id:04x}: {} bytes: {:02x?}",
+                        p.data.len(),
+                        p.data
+                    );
                 }
-                if let Some(ssid) = params.get_param::<String>(ParameterId::SSID) {
-                    let passphrase = params.get_param::<String>(ParameterId::PASSPHRASE);
-                    let bssid = params.get_param::<String>(ParameterId::BSSID);
+                if let Some(ssid) = msg.parameters.get_param::<String>(ParameterId::SSID) {
+                    let passphrase = msg.parameters.get_param::<String>(ParameterId::PASSPHRASE);
+                    let bssid = msg.parameters.get_param::<String>(ParameterId::BSSID);
                     tracing::info!("Accessory WiFi: ssid={}", ssid);
                     if let Some(ref pw) = passphrase {
                         tracing::info!("Accessory WiFi: passphrase={}", pw);
@@ -255,11 +263,15 @@ impl<S: Stream> CarplaySession<S> {
                     if let Some(ref b) = bssid {
                         tracing::info!("Accessory WiFi: bssid={}", b);
                     }
-                    let creds = WifiCredentials { ssid, passphrase, bssid };
+                    let creds = WifiCredentials {
+                        ssid,
+                        passphrase,
+                        bssid,
+                    };
                     let _ = self.wifi_tx.try_send(creds);
                 }
                 // Now start EA session and signal ready
-                let payload = control::make_start_ea_session("com.apple.carplay");
+                let payload = ControlMessage::start_ea_session("com.apple.carplay");
                 self.send_ctrl(payload).await?;
                 tracing::info!("Started EA session");
                 self.phase = SessionPhase::EaReady;
@@ -269,11 +281,12 @@ impl<S: Stream> CarplaySession<S> {
             }
             ControlMessageId::RequestWiFiInformation => {
                 tracing::info!("Accessory requested WiFi information");
-                if let Some(ssid) = params.get_param::<String>(ParameterId::SSID) {
-                    let passphrase = params
+                if let Some(ssid) = msg.parameters.get_param::<String>(ParameterId::SSID) {
+                    let passphrase = msg
+                        .parameters
                         .get_param::<String>(ParameterId::PASSPHRASE)
                         .unwrap_or_default();
-                    let bssid = params.get_param::<String>(ParameterId::BSSID);
+                    let bssid = msg.parameters.get_param::<String>(ParameterId::BSSID);
                     let creds = WifiCredentials {
                         ssid,
                         passphrase: Some(passphrase),
@@ -281,20 +294,24 @@ impl<S: Stream> CarplaySession<S> {
                     };
                     let _ = self.wifi_tx.send(creds).await;
                 }
-                let payload = control::make_wifi_information("CarJack-WiFi", "carjack123");
+                let payload = ControlMessage::wifi_information("CarJack-WiFi", "carjack123");
                 self.send_ctrl(payload).await?;
             }
             ControlMessageId::StartNowPlayingUpdates => {
                 tracing::debug!("Accessory requested now playing updates");
-                self.send_ctrl(control::make_now_playing_update()).await?;
+                self.send_ctrl(ControlMessage::now_playing_update()).await?;
             }
             ControlMessageId::WirelessCarPlayUpdate => {
                 tracing::debug!("Received WirelessCarPlayUpdate");
-                for p in &params {
+                for p in &msg.parameters {
                     let id = p.id.raw();
-                    tracing::info!("  WirelessCarPlay param 0x{id:04x}: {:?} bytes", p.data.len());
+                    tracing::info!(
+                        "  WirelessCarPlay param 0x{id:04x}: {:?} bytes",
+                        p.data.len()
+                    );
                 }
-                self.send_ctrl(control::make_wireless_carplay_update()).await?;
+                self.send_ctrl(ControlMessage::wireless_carplay_update())
+                    .await?;
             }
             ControlMessageId::BluetoothComponentInformation => {
                 tracing::debug!("Received BluetoothComponentInformation");
@@ -325,5 +342,4 @@ impl<S: Stream> CarplaySession<S> {
         }
         Ok(())
     }
-
 }
