@@ -23,7 +23,7 @@ use libcarjack::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 
-use crate::carplay;
+use libcarjack::carplay;
 
 pub async fn wireless_carplay(
     touch_tx: mpsc::Sender<TouchEvent>,

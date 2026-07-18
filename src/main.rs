@@ -6,17 +6,16 @@ use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 
+use libcarjack::carplay_ctrl::wait_for_carplay_ctrl_probe;
+
 use crate::{
     airplay::start_video_stream,
-    carplay_ctrl::wait_for_carplay_ctrl_probe,
     portal::start_remote_desktop,
     wifi_connect::{CarWifi, connect_to_car_wifi},
     wireless::wireless_carplay,
 };
 
 mod airplay;
-mod carplay;
-mod carplay_ctrl;
 mod encode;
 mod portal;
 mod usb;
