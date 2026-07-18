@@ -9,6 +9,7 @@ pub struct CarWifi {
     #[allow(dead_code)]
     pub ssid: String,
     pub ip: IpAddr,
+    pub iface: String,
 }
 
 pub async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<CarWifi> {
@@ -36,11 +37,12 @@ async fn try_nm_connect(nm: &NetworkManager, ssid: &str, passphrase: &str) -> Re
             Ok((conn_path, active_path)) => {
                 tracing::info!("Connection created: {}, active: {}", conn_path, active_path);
                 sleep(Duration::from_secs(2)).await;
-                if let Ok(ip) = get_car_ip(&nm).await {
-                    tracing::info!("Car WiFi connected via NM, IP: {}", ip);
+                if let Ok((ip, iface)) = get_car_ip(&nm).await {
+                    tracing::info!("Car WiFi connected via NM, IP: {} on {}", ip, iface);
                     return Ok(CarWifi {
                         ssid: ssid.to_string(),
                         ip: guess_gateway(ip),
+                        iface,
                     });
                 }
                 tracing::warn!("No IP yet, will retry");
@@ -55,14 +57,14 @@ async fn try_nm_connect(nm: &NetworkManager, ssid: &str, passphrase: &str) -> Re
     Err(eyre!("Failed to connect to car WiFi after 10 attempts"))
 }
 
-async fn get_car_ip(nm: &NetworkManager) -> Result<IpAddr> {
+async fn get_car_ip(nm: &NetworkManager) -> Result<(IpAddr, String)> {
     let devices = nm.list_devices().await?;
     for dev in &devices {
         if dev.device_type == nmrs::DeviceType::Wifi && dev.state == nmrs::DeviceState::Activated {
             if let Some(ref ip_str) = dev.ip4_address {
                 if let Some(slash) = ip_str.find('/') {
                     if let Ok(ip) = ip_str[..slash].parse::<IpAddr>() {
-                        return Ok(ip);
+                        return Ok((ip, dev.interface.clone()));
                     }
                 }
             }
