@@ -1,9 +1,12 @@
+use catplay_carplay::video::{AnnexBIter, AvccConfig, NalType};
 use eyre::{Result, eyre};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use futures::StreamExt;
 use tokio::sync::mpsc;
+
+use crate::airplay::EncodedFrame;
 
 /// Run a GStreamer pipeline that H264-encodes the desktop (or a test pattern) and hands
 /// each encoded access unit to `video_tx`.
@@ -15,7 +18,7 @@ pub async fn encode_h264_to_channel(
     node_id: u32,
     width: u32,
     height: u32,
-    video_tx: mpsc::Sender<Vec<u8>>,
+    video_tx: mpsc::Sender<EncodedFrame>,
 ) -> Result<()> {
     gst::init()?;
 
@@ -63,9 +66,10 @@ pub async fn encode_h264_to_channel(
                 // 4-byte prefix - otherwise it mis-parses the keyframe into one giant NAL
                 // and the car drops the (undecodable) stream ~100ms in.
                 let au = normalize_annexb_4byte(map.as_slice());
+                let config = extract_avcc_config(&au);
                 // The callback runs on a GStreamer streaming thread (not the tokio
                 // runtime), so a blocking send is safe and backpressures the encoder.
-                match tx.blocking_send(au) {
+                match tx.blocking_send(EncodedFrame { data: au, config }) {
                     Ok(()) => Ok(gst::FlowSuccess::Ok),
                     Err(_) => Err(gst::FlowError::Eos),
                 }
@@ -107,6 +111,41 @@ pub async fn encode_h264_to_channel(
     }
 
     Ok(())
+}
+
+/// Extract SPS/PPS parameter sets from a keyframe's Annex-B access unit.
+fn extract_avcc_config(data: &[u8]) -> Option<AvccConfig> {
+    let mut sps = Vec::new();
+    let mut pps = Vec::new();
+
+    for chunk in AnnexBIter::annexb(data) {
+        let chunk = chunk.ok()?;
+        if chunk.data_size == 0 {
+            continue;
+        }
+        let nal_start = chunk.prefix_start + chunk.prefix_len;
+        let nal_type = NalType::from_byte(data[nal_start]);
+        match nal_type {
+            NalType::Sps => {
+                sps.extend_from_slice(&data[chunk.prefix_start..nal_start + chunk.data_size])
+            }
+            NalType::Pps => {
+                pps.extend_from_slice(&data[chunk.prefix_start..nal_start + chunk.data_size])
+            }
+            _ => {}
+        }
+    }
+
+    if sps.is_empty() {
+        return None;
+    }
+    let mut sps_pps = sps;
+    sps_pps.extend_from_slice(&pps);
+
+    Some(AvccConfig {
+        nal_size_len: 4,
+        sps_pps,
+    })
 }
 
 /// Rewrite every NAL in an Annex-B access unit behind a 4-byte (`00 00 00 01`) start code.
