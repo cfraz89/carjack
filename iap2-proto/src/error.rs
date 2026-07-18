@@ -27,6 +27,8 @@ pub enum Iap2Error {
     Timeout(String),
     #[error("IO Error: {0}")]
     IO(#[from] std::io::Error),
+    #[error("Deku error: {0}")]
+    Deku(#[from] deku::error::DekuError),
     #[error("Other Error")]
     Other(String),
 }

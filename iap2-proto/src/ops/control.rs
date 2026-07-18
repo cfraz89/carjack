@@ -1,10 +1,12 @@
-use deku::DekuContainerWrite;
+use std::io::Cursor;
+
+use deku::ctx::Endian;
 use deku::prelude::*;
 
 pub const SOM: u16 = 0x4040;
 
 #[derive(DekuRead, DekuWrite, Debug, Clone, Copy, PartialEq, Eq)]
-#[deku(id_type = "u16", endian = "big")]
+#[deku(id_type = "u16", ctx = "endian: Endian", endian = "endian")]
 pub enum ControlMessageId {
     #[deku(id = "0xAA00")]
     RequestAuthenticationCertificate,
@@ -197,7 +199,8 @@ pub enum ControlMessageId {
 }
 
 #[derive(DekuRead, DekuWrite, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ParameterId(#[deku(endian = "big")] pub u16);
+#[deku(ctx = "endian: Endian")]
+pub struct ParameterId(pub u16);
 
 impl ParameterId {
     pub const DISPLAY_NAME: Self = Self(0x4E01);
@@ -216,9 +219,10 @@ impl ParameterId {
     }
 }
 
-#[derive(DekuRead, DekuWrite, Debug, Clone)]
+#[derive(DekuRead, DekuWrite, Debug, Clone, PartialEq)]
+#[deku(ctx = "endian: Endian", endian = "endian")]
 pub struct Parameter {
-    #[deku(update = "4 + self.data.len() as u16", endian = "big")]
+    #[deku(update = "4 + self.data.len() as u16")]
     pub total_length: u16,
     pub id: ParameterId,
     #[deku(count = "total_length.saturating_sub(4) as usize")]
@@ -342,198 +346,117 @@ impl GetParam for [Parameter] {
     }
 }
 
-#[derive(DekuRead, DekuWrite, Debug, Clone)]
+#[derive(DekuRead, DekuWrite, Debug, Clone, PartialEq)]
+#[deku(ctx = "endian: Endian", ctx_default = "Endian::Big", endian = "endian")]
+pub struct ControlMessageSet {
+    #[deku(read_all)]
+    pub messages: Vec<ControlMessage>,
+}
+
+#[derive(DekuRead, DekuWrite, Debug, Clone, PartialEq)]
+#[deku(ctx = "endian: Endian", ctx_default = "Endian::Big", endian = "endian")]
 pub struct ControlMessage {
-    #[deku(endian = "big")]
     pub som: u16,
-    #[deku(update = "6 + self.raw_parameters.len() as u16", endian = "big")]
+    #[deku(update = "6 + self.parameters.len()")]
     pub total_length: u16,
     pub message_id: ControlMessageId,
-    #[deku(count = "total_length.saturating_sub(6) as usize")]
-    pub raw_parameters: Vec<u8>,
+    #[deku(count = "total_length.saturating_sub(6)")]
+    // /Todo replace Vec with HashSet
+    pub parameters: Vec<Parameter>,
 }
 
 impl ControlMessage {
     pub fn new(message_id: ControlMessageId, parameters: Vec<Parameter>) -> Self {
-        let mut raw_parameters = Vec::new();
-        for p in &parameters {
-            raw_parameters.extend_from_slice(
-                &<Parameter as deku::DekuContainerWrite>::to_bytes(p).unwrap_or_default(),
-            );
-        }
-        let total_len = 6u16 + raw_parameters.len() as u16;
         ControlMessage {
             som: SOM,
-            total_length: total_len,
+            total_length: 6 + parameters.len() as u16,
             message_id,
-            raw_parameters,
+            parameters,
         }
     }
 
-    pub fn parameters(&self) -> Vec<Parameter> {
-        let mut params = Vec::new();
-        let mut remaining: &[u8] = &self.raw_parameters;
-        while !remaining.is_empty() {
-            match <Parameter as deku::DekuContainerRead>::from_bytes((remaining, 0)) {
-                Ok(((new_remaining, _), param)) => {
-                    params.push(param);
-                    remaining = new_remaining;
-                }
-                Err(_) => break,
-            }
-        }
-        params
+    pub fn start_identification() -> Self {
+        Self::new(
+            ControlMessageId::StartIdentification,
+            vec![
+                Parameter::new(ParameterId::DISPLAY_NAME, "CarJack"),
+                Parameter::new(ParameterId::VERSION, 0x01020000u32),
+                Parameter::new(ParameterId::FEATURES, 0x0001u16),
+            ],
+        )
     }
 
-    pub fn find_param(&self, id: ParameterId) -> Option<Parameter> {
-        self.parameters().into_iter().find(|p| p.id == id)
+    pub fn identification_accepted() -> Self {
+        Self::new(ControlMessageId::IdentificationAccepted, vec![])
     }
 
-    pub fn param_string(&self, id: ParameterId) -> Option<String> {
-        self.find_param(id)
-            .map(|p| String::from_utf8_lossy(&p.data).to_string())
+    pub fn request_auth_certificate() -> Self {
+        Self::new(ControlMessageId::RequestAuthenticationCertificate, vec![])
     }
 
-    pub fn param_uint32(&self, id: ParameterId) -> Option<u32> {
-        self.find_param(id).and_then(|p| {
-            if p.data.len() == 4 {
-                Some(u32::from_be_bytes([
-                    p.data[0], p.data[1], p.data[2], p.data[3],
-                ]))
-            } else {
-                None
-            }
-        })
+    pub fn request_auth_certificate_serial() -> Self {
+        Self::new(
+            ControlMessageId::RequestAuthenticationCertificate,
+            vec![Parameter::new(ParameterId(0x0000), &[][..])],
+        )
     }
-}
 
-pub fn parse_control_payload(data: &[u8]) -> Vec<ControlMessage> {
-    let mut messages = Vec::new();
-    let mut remaining = data;
-    while !remaining.is_empty() {
-        match <ControlMessage as deku::DekuContainerRead>::from_bytes((remaining, 0)) {
-            Ok(((new_remaining, _), msg)) => {
-                messages.push(msg);
-                remaining = new_remaining;
-            }
-            Err(_) => break,
-        }
+    pub fn authentication_challenge(challenge: &[u8]) -> Self {
+        Self::new(
+            ControlMessageId::RequestAuthenticationChallengeResponse,
+            vec![Parameter::new(ParameterId(0x0000), challenge)],
+        )
     }
-    messages
-}
 
-pub fn build_control_payload(messages: &[ControlMessage]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    for msg in messages {
-        buf.extend_from_slice(
-            &<ControlMessage as deku::DekuContainerWrite>::to_bytes(msg).unwrap_or_default(),
-        );
+    pub fn authentication_succeeded() -> Self {
+        Self::new(ControlMessageId::AuthenticationSucceeded, vec![])
     }
-    buf
-}
 
-pub fn make_start_identification() -> Vec<u8> {
-    ControlMessage::new(
-        ControlMessageId::StartIdentification,
-        vec![
-            Parameter::new(ParameterId::DISPLAY_NAME, "CarJack"),
-            Parameter::new(ParameterId::VERSION, 0x01020000u32),
-            Parameter::new(ParameterId::FEATURES, 0x0001u16),
-        ],
-    )
-    .to_bytes()
-    .expect("ControlMessage serialization")
-}
+    pub fn wireless_carplay_update() -> Self {
+        Self::new(
+            ControlMessageId::WirelessCarPlayUpdate,
+            vec![
+                Parameter::new(ParameterId(0x0001), 0x00000001u32),
+                Parameter::new(ParameterId(0x0002), 0x01u8),
+            ],
+        )
+    }
 
-pub fn make_identification_accepted() -> Vec<u8> {
-    ControlMessage::new(ControlMessageId::IdentificationAccepted, vec![])
-        .to_bytes()
-        .expect("ControlMessage serialization")
-}
+    pub fn now_playing_update() -> Self {
+        Self::new(ControlMessageId::NowPlayingUpdate, vec![])
+    }
 
-pub fn make_request_auth_certificate() -> Vec<u8> {
-    ControlMessage::new(ControlMessageId::RequestAuthenticationCertificate, vec![])
-        .to_bytes()
-        .expect("ControlMessage serialization")
-}
+    pub fn request_accessory_wifi_config() -> Self {
+        Self::new(
+            ControlMessageId::RequestAccessoryWiFiConfigurationInformation,
+            vec![],
+        )
+    }
 
-pub fn make_request_auth_certificate_serial() -> Vec<u8> {
-    ControlMessage::new(
-        ControlMessageId::RequestAuthenticationCertificate,
-        vec![Parameter::new(ParameterId(0x0000), &[][..])],
-    )
-    .to_bytes()
-    .expect("ControlMessage serialization")
-}
+    pub fn wifi_information(ssid: &str, passphrase: &str) -> Self {
+        Self::new(
+            ControlMessageId::WiFiInformation,
+            vec![
+                Parameter::new(ParameterId::SSID, ssid),
+                Parameter::new(ParameterId::PASSPHRASE, passphrase),
+            ],
+        )
+    }
 
-pub fn make_authentication_challenge(challenge: &[u8]) -> Vec<u8> {
-    ControlMessage::new(
-        ControlMessageId::RequestAuthenticationChallengeResponse,
-        vec![Parameter::new(ParameterId(0x0000), challenge)],
-    )
-    .to_bytes()
-    .expect("ControlMessage serialization")
-}
+    pub fn start_ea_session(protocol: &str) -> Self {
+        Self::new(
+            ControlMessageId::StartExternalAccessoryProtocolSession,
+            vec![Parameter::new(ParameterId::PROTOCOL_NAME, protocol)],
+        )
+    }
 
-pub fn make_authentication_succeeded() -> Vec<u8> {
-    ControlMessage::new(ControlMessageId::AuthenticationSucceeded, vec![])
-        .to_bytes()
-        .expect("ControlMessage serialization")
-}
-
-pub fn make_wireless_carplay_update() -> Vec<u8> {
-    ControlMessage::new(
-        ControlMessageId::WirelessCarPlayUpdate,
-        vec![
-            Parameter::new(ParameterId(0x0001), 0x00000001u32),
-            Parameter::new(ParameterId(0x0002), 0x01u8),
-        ],
-    )
-    .to_bytes()
-    .expect("ControlMessage serialization")
-}
-
-pub fn make_now_playing_update() -> Vec<u8> {
-    ControlMessage::new(ControlMessageId::NowPlayingUpdate, vec![])
-        .to_bytes()
-        .expect("ControlMessage serialization")
-}
-
-pub fn make_request_accessory_wifi_config() -> Vec<u8> {
-    ControlMessage::new(ControlMessageId::RequestAccessoryWiFiConfigurationInformation, vec![])
-        .to_bytes()
-        .expect("ControlMessage serialization")
-}
-
-pub fn make_wifi_information(ssid: &str, passphrase: &str) -> Vec<u8> {
-    ControlMessage::new(
-        ControlMessageId::WiFiInformation,
-        vec![
-            Parameter::new(ParameterId::SSID, ssid),
-            Parameter::new(ParameterId::PASSPHRASE, passphrase),
-        ],
-    )
-    .to_bytes()
-    .expect("ControlMessage serialization")
-}
-
-pub fn make_start_ea_session(protocol: &str) -> Vec<u8> {
-    ControlMessage::new(
-        ControlMessageId::StartExternalAccessoryProtocolSession,
-        vec![Parameter::new(ParameterId::PROTOCOL_NAME, protocol)],
-    )
-    .to_bytes()
-    .expect("ControlMessage serialization")
-}
-
-pub fn make_ea_session_status(session_id: u8, status: u8) -> Vec<u8> {
-    ControlMessage::new(
-        ControlMessageId::StatusExternalAccessoryProtocolSession,
-        vec![
-            Parameter::new(ParameterId::SESSION_IDENTIFIER, session_id as u16),
-            Parameter::new(ParameterId::STATUS, status),
-        ],
-    )
-    .to_bytes()
-    .expect("ControlMessage serialization")
+    pub fn ea_session_status(session_id: u8, status: u8) -> Self {
+        Self::new(
+            ControlMessageId::StatusExternalAccessoryProtocolSession,
+            vec![
+                Parameter::new(ParameterId::SESSION_IDENTIFIER, session_id as u16),
+                Parameter::new(ParameterId::STATUS, status),
+            ],
+        )
+    }
 }
