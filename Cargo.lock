@@ -401,6 +401,7 @@ dependencies = [
  "tap",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "usb-gadget",

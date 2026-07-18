@@ -28,6 +28,7 @@ iap2-proto = { version = "0.1.0", path = "iap2-proto" }
 libcarjack = { path = "libcarjack" }
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = "0.1.18"
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 usb-gadget = "1.2.0"

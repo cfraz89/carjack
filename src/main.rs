@@ -3,13 +3,12 @@ use std::time::Duration;
 use eyre::{Result, eyre};
 use libcarjack::carplay_session::{TouchEvent, WifiCredentials};
 use tokio::sync::mpsc;
-use tokio::task::AbortHandle;
+use tokio_util::task::AbortOnDropHandle;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 
 use crate::{
     airplay::start_video_stream,
     carplay_ctrl::wait_for_carplay_ctrl_probe,
-    encode::encode_h264_to_channel,
     portal::start_remote_desktop,
     wifi_connect::{CarWifi, connect_to_car_wifi},
     wireless::wireless_carplay,
@@ -23,17 +22,6 @@ mod portal;
 mod usb;
 mod wifi_connect;
 mod wireless;
-
-/// Aborts a spawned task on drop. A dropped `JoinHandle` merely detaches the task, so we
-/// need this to guarantee the CarPlay/Bluetooth task (and its BlueZ resources) is torn down
-/// before a session restart begins a fresh Bluetooth connection.
-struct TaskAbort(AbortHandle);
-
-impl Drop for TaskAbort {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
 
 #[tokio::main()]
 async fn main() -> Result<()> {
@@ -69,8 +57,6 @@ async fn run_session() -> Result<()> {
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let (bt_mac_tx, bt_mac_rx) = tokio::sync::oneshot::channel::<String>();
 
-    let (airplay_video_tx, airplay_video_rx) = mpsc::channel::<Vec<u8>>(64);
-
     tracing::info!("Starting CarPlay session");
 
     // Run the CarPlay/iAP2 Bluetooth session as its own task so the runtime keeps polling
@@ -78,8 +64,12 @@ async fn run_session() -> Result<()> {
     // WiFi connect and AirPlay setup - if it only advanced when awaited in the loops below,
     // it would be starved for ~10s during screen-sharing setup and the car would reset the
     // Bluetooth link, tearing down CarPlay right as streaming starts.
-    let mut carplay_handle = tokio::spawn(wireless_carplay(touch_tx, wifi_tx, ready_tx, bt_mac_tx));
-    let _abort = TaskAbort(carplay_handle.abort_handle());
+    // AbortOnDropHandle guarantees the task (and its BlueZ resources) is torn down when this
+    // function returns - e.g. before a session restart - rather than detached like a plain
+    // JoinHandle.
+    let mut carplay_handle = AbortOnDropHandle::new(tokio::spawn(wireless_carplay(
+        touch_tx, wifi_tx, ready_tx, bt_mac_tx,
+    )));
 
     let mut wifi_handle: Option<tokio::task::JoinHandle<Result<CarWifi>>> = None;
     let mut ready_rx = Some(ready_rx);
@@ -137,12 +127,10 @@ async fn run_session() -> Result<()> {
         }
     };
 
-    // Phase 3: start AirPlay video streaming over WiFi + remote desktop
-    let airplay = start_video_stream(peer_addr, remote_homekit_id, airplay_video_rx);
-    tokio::pin!(airplay);
-
-    // CARPLAY_TEST_VIDEO skips the screen-share portal (which otherwise prompts for
-    // permission on every run) and feeds the AirPlay pipeline a GStreamer test pattern.
+    // Phase 3: set up the desktop capture, then start AirPlay streaming. The screen-share
+    // portal must run first so the AirPlay side knows the pipewire node to encode.
+    // CARPLAY_TEST_VIDEO skips the portal (which otherwise prompts for permission each run)
+    // and feeds a GStreamer test pattern instead.
     let rd_stream = if std::env::var("CARPLAY_TEST_VIDEO").is_ok() {
         tracing::info!("CARPLAY_TEST_VIDEO set: using test video source, skipping screen-share portal");
         None
@@ -151,8 +139,10 @@ async fn run_session() -> Result<()> {
     };
     let node_id = rd_stream.as_ref().map(|s| s.node_id()).unwrap_or(0);
 
-    let encode = encode_h264_to_channel(node_id, airplay_video_tx);
-    tokio::pin!(encode);
+    // start_video_stream owns the H264 encoder internally so it can size it to the car's
+    // display resolution (learned from AirPlay /info).
+    let airplay = start_video_stream(peer_addr, remote_homekit_id, node_id);
+    tokio::pin!(airplay);
 
     // If the car later drops Bluetooth on its own, that's not fatal - keep streaming.
     let mut carplay_done = false;
@@ -170,10 +160,6 @@ async fn run_session() -> Result<()> {
             result = &mut airplay => {
                 // Propagate so the caller restarts the whole flow (e.g. car closed the
                 // screen socket).
-                result?;
-                return Ok(());
-            }
-            result = &mut encode => {
                 result?;
                 return Ok(());
             }
