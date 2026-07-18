@@ -1,5 +1,9 @@
 [workspace]
-members = ["iap2-proto"]
+resolver = "3"
+members = [
+    "iap2-proto",
+    "libcarjack",
+]
 
 [workspace.package]
 edition = "2024"
@@ -10,6 +14,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+nmrs = "3.4.0"
 ashpd = {version = "0.13.10", features = ["remote_desktop", "screencast"]  }
 backon = "1.6.0"
 bluer = { version = "0.17.4", features = ["full", "rfcomm"] }
@@ -18,11 +23,26 @@ deku = "0.20.3"
 uuid = "1.23.3"
 eyre = "0.6.12"
 futures = "0.3.32"
-gst = { package = "gstreamer", version = "0.25.2" }
+
 iap2-proto = { version = "0.1.0", path = "iap2-proto" }
 libcarjack = { path = "libcarjack" }
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = "0.1.18"
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 usb-gadget = "1.2.0"
+zbus = { version = "5.17.0", features = ["tokio"] }
+tap = "1.0.1"
+ring = "0.17"
+# Pinned to a fork/branch carrying an unmerged fix for a strict /info plist
+# parse failure (audio_output_formats must be optional - real head units omit
+# it for input-only audio entries like Siri). Revert to catplay-labs/catplay
+# once https://github.com/catplay-labs/catplay/pull/new/fix/audio-output-formats-optional
+# (or equivalent) lands upstream.
+catplay_hap = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/audio-output-formats-optional", default-features=false, features = ["std"] }
+catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/audio-output-formats-optional", default-features = false, features = ["tx"]}
+catplay_util = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/audio-output-formats-optional" }
+bytes = "1.12.1"
+gstreamer = "0.24"
+gstreamer-app = "0.24"

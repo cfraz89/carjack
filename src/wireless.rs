@@ -12,31 +12,44 @@ use bluer::{
     rfcomm::{self, Role},
 };
 use eyre::{Result, eyre};
-use iap2_proto::{config::LinkConfig, iap2::Iap2};
+use iap2_proto::{config::LinkConfig, error::Iap2Error, iap2::Iap2};
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
+    carplay_session::{TouchEvent, WifiCredentials},
     uuid::{
         CARPLAY_ACCESSORY_UUID, CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID, IAP2_UUID,
     },
 };
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 
-pub async fn wireless_carplay() -> Result<()> {
+use crate::carplay;
+
+pub async fn wireless_carplay(
+    touch_tx: mpsc::Sender<TouchEvent>,
+    wifi_tx: mpsc::Sender<WifiCredentials>,
+    ready_tx: oneshot::Sender<()>,
+    bt_mac_tx: oneshot::Sender<String>,
+) -> Result<()> {
     let session = Session::new().await?;
     let headless_agent = Agent::default();
     let _agent = session.register_agent(headless_agent).await?;
     let adapter = session.default_adapter().await?;
     adapter.set_alias(String::from("carjack")).await?;
     adapter.set_powered(true).await?;
+    // Reuse this adapter's address rather than opening a second concurrent bluer::Session
+    // later just to look it up - that stepped on BlueZ's handling of the RFCOMM profile
+    // this session already owns and reset the connection.
+    let _ = bt_mac_tx.send(adapter.address().await?.to_string());
     let _advertisement_handle = publish_advertisement(&adapter).await?;
 
     let iap_accessory_handle = session
         .register_profile(rfcomm::Profile {
             uuid: IAP_ACCESSORY_UUID,
             name: Some(String::from("Wireless iAP")),
-            auto_connect: Some(true),
-            // channel: Some(rfcomm_channel),
             role: Some(Role::Client),
+            //Make sure we don't auto connect, otherwise it will connect before we're ready to accept a connection
+            auto_connect: Some(false),
             ..Default::default()
         })
         .await?;
@@ -44,58 +57,82 @@ pub async fn wireless_carplay() -> Result<()> {
         .register_profile(rfcomm::Profile {
             uuid: IAP_DEVICE_UUID,
             name: Some(String::from("Wireless iAP")),
-            //This is important, at least on my test device. Even though we dont connect through this profile,
-            // the test device detects our machine as an android phone without the channel set to 1,
-            // ie the channel its using on the accessory profile.
             role: Some(Role::Server),
             channel: Some(1),
             ..Default::default()
         })
         .await?;
+
     let device = pair_available_accessory(&adapter).await?;
-    // let mut iap2_handle = session
-    //     .register_profile(rfcomm::Profile {
-    //         name: Some(String::from("Wireless iAP v2")),
-    //         uuid: IAP2_UUID,
-    //         channel: Some(rfcomm_channel),
-    //         ..Default::default()
-    //     })
-    //     .await?;
-    //Need this on just to add the carplay uuid to eir data
-    // let carplay_handle = session
-    //     .register_profile(rfcomm::Profile {
-    //         name: Some(String::from("Carplay")),
-    //         uuid: CARPLAY_DEVICE_UUID,
-    //         ..Default::default()
-    //     })
-    //     .await?;
     if device.is_connected().await? {
         tracing::info!("Already connected");
         device.disconnect().await?;
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    //} else {
-    tracing::info!("Connecting...");
-    device.connect().await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    //};
 
     tracing::debug!("Waiting for iAP2 connection requests");
-
     let mut profiles = iap_accessory_handle.merge(iap_device_handle);
-    while let Some(rq) = profiles.next().await {
-        let stream = rq.accept()?;
-        tracing::debug!("Establishing iAP2 link");
-        let iap2 = Iap2::start(stream, LinkConfig::default()).await?;
-        tracing::debug!("iAP2 link established");
-        let mut packet_stream = iap2.packet_stream.lock().await;
-        while let Some(result) = packet_stream.next().await {
-            match result {
-                Ok(packet) => tracing::debug!(?packet, "Received packet"),
-                Err(e) => tracing::warn!(?e, "Error reading packet"),
+    let acceptance = tokio::spawn(async move {
+        match profiles.next().await {
+            Some(rq) => {
+                tracing::info!("Got connect request");
+                let stream = rq.accept().map_err(|e| std::io::Error::from(e))?;
+                Ok((stream, profiles))
+            }
+            None => Err(Iap2Error::ChannelClosed),
+        }
+    });
+
+    // Connect out to the accessory's iAP profile - this outgoing accessory-role stream is
+    // the one the accessory drives the iAP2 session over. Retry persistently: right after a
+    // reboot BlueZ reports ProfileUnavailable until the accessory's SDP record resolves, and
+    // that can take many seconds. Each attempt is time-boxed so a wedged BlueZ call can't
+    // stall the session. "already-connected" means the RFCOMM link is already up (the
+    // acceptance task above has, or will get, the stream) - treat it as success.
+    const CONNECT_ATTEMPTS: u32 = 40;
+    let mut connected = false;
+    for attempt in 0..CONNECT_ATTEMPTS {
+        match tokio::time::timeout(
+            Duration::from_secs(3),
+            device.connect_profile(&IAP_ACCESSORY_UUID),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                connected = true;
+                break;
+            }
+            Ok(Err(e)) => {
+                if e.to_string().contains("already-connected") {
+                    tracing::info!("Accessory profile already connected, proceeding");
+                    connected = true;
+                    break;
+                }
+                tracing::warn!(?e, attempt, "connect_profile failed, retrying");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(_) => {
+                tracing::warn!(attempt, "connect_profile timed out, retrying");
             }
         }
-        tracing::debug!("iAP lifecycle ended");
     }
+    if !connected {
+        // Fall through anyway - the accessory may still have connected inbound, in which
+        // case the acceptance task below already holds the stream; otherwise it times out.
+        tracing::warn!("connect_profile never confirmed; awaiting inbound connection anyway");
+    }
+
+    let (stream, _profiles) = match tokio::time::timeout(Duration::from_secs(30), acceptance).await {
+        Ok(joined) => joined??,
+        Err(_) => return Err(eyre!("Timed out waiting for accessory Bluetooth connection")),
+    };
+    tracing::debug!("Establishing iAP2 link");
+
+    let iap2 = Iap2::start(stream, LinkConfig::default()).await?;
+
+    tracing::debug!("iAP2 link established");
+    carplay::run_carplay_session(iap2, touch_tx, wifi_tx, ready_tx).await?;
+    tracing::debug!("iAP lifecycle ended");
     Ok(())
 }
 
@@ -111,7 +148,20 @@ async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::Advertis
     Ok(handle)
 }
 
+// #[zbus::proxy(
+//     interface = "org.bluez.Adapter1",
+//     default_service = "org.bluez",
+//     default_path = "/org/bluez/hci0"
+// )]
+// trait Bluez {
+//     async fn stop_discovery(&self) -> zbus::Result<()>;
+// }
+
 async fn pair_available_accessory(adapter: &Adapter) -> Result<Device> {
+    //This ensures we aren't already discovering when we start the process
+    // let connection = zbus::Connection::system().await?;
+    // let proxy = BluezProxy::new(&connection).await?;
+    // proxy.stop_discovery().await?;
     adapter
         .set_discovery_filter(DiscoveryFilter {
             discoverable: true,
@@ -122,53 +172,49 @@ async fn pair_available_accessory(adapter: &Adapter) -> Result<Device> {
         })
         .await?;
 
-    let mut device_events = adapter.discover_devices_with_changes().await?;
-    // pin_mut!(device_events);
-    while let Some(DeviceAdded(addr)) = device_events.next().await {
+    // An already-paired/connected accessory (e.g. it auto-reconnected from a prior session)
+    // never fires a fresh DeviceAdded event, so check the devices BlueZ already knows first.
+    for addr in adapter.device_addresses().await? {
         let device = adapter.device(addr)?;
-        let alias = device.alias().await?;
-        let rssi = device.rssi().await?;
-        tracing::info!(alias, rssi, "Device added");
-        if (rssi.is_some() || device.is_connected().await?)
-        //If we cant match specific name, allow connection attempt, since we already matched carplay uuid in discovery filter
-            && matches_carplay_device(&device).await.unwrap_or(true)
-        {
-            tracing::info!(
-                name = device.alias().await?,
-                address = ?device.address(),
-                rssi = device.rssi().await?,
-                "Attempting connection",
-            );
-            if !device.is_paired().await? {
-                device.pair().await?;
-            }
-            device.set_trusted(false).await?;
+        if is_candidate_accessory(&device).await && try_prepare_accessory(&device).await {
+            return Ok(device);
+        }
+    }
+
+    let mut device_events = adapter.discover_devices_with_changes().await?;
+    while let Some(event) = device_events.next().await {
+        let DeviceAdded(addr) = event else { continue };
+        let device = adapter.device(addr)?;
+        if is_candidate_accessory(&device).await && try_prepare_accessory(&device).await {
             return Ok(device);
         }
     }
     Err(eyre!("No more device events"))
 }
 
-//If we have an env with CARPLAY_DEVICE_NAME, only match that, otherwise attempt anything with the carplay uuid
-// async fn matches_carplay_device(device: &Device) -> Result<bool> {
-//     match std::env::var("CARPLAY_DEVICE_NAME") {
-//         Ok(carplay_device_name) => {
-//             let alias = device.alias().await?;
-//             let matches_carplay_alias = alias.eq_ignore_ascii_case(&carplay_device_name);
-//             Ok(matches_carplay_alias)
-//         }
-//         Err(_) => {
-//             let matches_carplay_uuid = device
-//                 .uuids()
-//                 .await?
-//                 .unwrap_or_default()
-//                 .contains(&CARPLAY_ACCESSORY_UUID);
-//             Ok(matches_carplay_uuid)
-//         }
-//     }
-// }
+/// Whether a device looks like our target CarPlay accessory (reachable and name-matching).
+async fn is_candidate_accessory(device: &Device) -> bool {
+    let reachable = device.rssi().await.ok().flatten().is_some()
+        || device.is_connected().await.unwrap_or(false);
+    reachable && matches_carplay_device(device).await.unwrap_or(true)
+}
+
+/// Log, pair (if needed) and trust the accessory. Returns whether it's ready to use.
+async fn try_prepare_accessory(device: &Device) -> bool {
+    let alias = device.alias().await.unwrap_or_default();
+    let rssi = device.rssi().await.ok().flatten();
+    tracing::info!(name = alias, address = ?device.address(), rssi, "Attempting connection");
+
+    if !device.is_paired().await.unwrap_or(false) {
+        if let Err(e) = device.pair().await {
+            tracing::warn!(?e, "Pairing failed, trying to proceed anyway");
+        }
+    }
+    let _ = device.set_trusted(true).await;
+    true
+}
 
 async fn matches_carplay_device(device: &Device) -> Result<bool> {
     let carplay_device_name = std::env::var("CARPLAY_DEVICE_NAME")?;
-    return Ok(device.alias().await? == carplay_device_name);
+    Ok(device.alias().await? == carplay_device_name)
 }
