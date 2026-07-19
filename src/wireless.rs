@@ -15,7 +15,7 @@ use eyre::{Result, eyre};
 use iap2_proto::{config::LinkConfig, error::Iap2Error, iap2::Iap2};
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
-    carplay_session::{TouchEvent, WifiCredentials},
+    carplay_session::WifiCredentials,
     uuid::{
         CARPLAY_ACCESSORY_UUID, CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID, IAP2_UUID,
     },
@@ -26,7 +26,6 @@ use tokio_stream::StreamExt;
 use libcarjack::carplay;
 
 pub async fn wireless_carplay(
-    touch_tx: mpsc::Sender<TouchEvent>,
     wifi_tx: mpsc::Sender<WifiCredentials>,
     ready_tx: oneshot::Sender<()>,
     bt_mac_tx: oneshot::Sender<String>,
@@ -131,7 +130,7 @@ pub async fn wireless_carplay(
     let iap2 = Iap2::start(stream, LinkConfig::default()).await?;
 
     tracing::debug!("iAP2 link established");
-    carplay::run_carplay_session(iap2, touch_tx, wifi_tx, ready_tx).await?;
+    carplay::run_carplay_session(iap2, wifi_tx, ready_tx).await?;
     tracing::debug!("iAP lifecycle ended");
     Ok(())
 }

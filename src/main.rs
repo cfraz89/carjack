@@ -144,7 +144,7 @@ async fn run_session() -> Result<()> {
     // function returns - e.g. before a session restart - rather than detached like a plain
     // JoinHandle.
     let mut carplay_handle = AbortOnDropHandle::new(tokio::spawn(wireless_carplay(
-        touch_tx, wifi_tx, ready_tx, bt_mac_tx,
+        wifi_tx, ready_tx, bt_mac_tx,
     )));
 
     let mut wifi_handle: Option<tokio::task::JoinHandle<Result<CarWifi>>> = None;
@@ -212,7 +212,7 @@ async fn run_session() -> Result<()> {
     spawn_desktop_apps(&compositor.socket_name);
     let frame_rx = compositor.subscribe_frames();
 
-    let airplay = start_video_stream(conn, frame_rx);
+    let airplay = start_video_stream(conn, frame_rx, touch_tx);
     tokio::pin!(airplay);
 
     // If the car later drops Bluetooth on its own, that's not fatal - keep streaming.
