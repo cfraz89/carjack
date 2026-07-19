@@ -275,6 +275,7 @@ impl State {
 
     fn inject_touch(&mut self, event: TouchEvent) {
         let Some(touch) = self.seat.get_touch() else {
+            tracing::warn!("inject_touch: seat has no touch handle");
             return;
         };
         let loc = Point::<f64, Logical>::from((event.x, event.y));
@@ -284,6 +285,7 @@ impl State {
         match event.event_type {
             TouchEventType::Down => {
                 let focus = self.surface_under(loc);
+                tracing::debug!("inject_touch DOWN slot={} ({},{}) focus={}", event.slot, event.x, event.y, focus.is_some());
                 touch.down(self, focus, &DownEvent { slot, location: loc, serial, time });
                 touch.frame(self);
             }

@@ -19,6 +19,8 @@ use eyre::{Result, eyre};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::carplay_session::{TouchEvent, TouchEventType};
+
 /// A single encoded H264 access unit with optional AVCC configuration
 /// (present on keyframes, extracted by the encoder).
 pub struct EncodedFrame {
@@ -65,6 +67,7 @@ pub async fn connect_airplay(
 pub async fn run_video_stream(
     conn: AirPlayConnection,
     mut video_rx: mpsc::Receiver<EncodedFrame>,
+    touch_tx: mpsc::Sender<TouchEvent>,
 ) -> Result<()> {
     let AirPlayConnection { tx, width, height, .. } = conn;
 
@@ -92,6 +95,7 @@ pub async fn run_video_stream(
     let _cmd_guard = abort_on_drop(tokio::spawn(handle_car_commands(
         tx.clone(),
         modes,
+        touch_tx,
     )));
 
     let latency = Duration::from_millis(100);
@@ -173,8 +177,15 @@ pub async fn run_video_stream(
 
 /// Answer the CarPlay control commands the car sends over the AirPlay event channel.
 /// With no real iPhone to proxy to (we stream a desktop), the car just needs each command
-/// acknowledged: ChangeModes gets a mode-state response, everything else an OK.
-async fn handle_car_commands(tx: AirPlayTransmitterProxyRef, mut modes: ResourceController) {
+/// acknowledged: ChangeModes gets a mode-state response, everything else an OK. Touch comes
+/// here too, as `HidSendReport` touchscreen reports, which we decode and forward to the
+/// compositor.
+async fn handle_car_commands(
+    tx: AirPlayTransmitterProxyRef,
+    mut modes: ResourceController,
+    touch_tx: mpsc::Sender<TouchEvent>,
+) {
+    let mut touching = false;
     while let Some(mut cmd) = tx.pop_command().await {
         tracing::debug!("Car command: {:?}", cmd.command().get_type());
         match cmd.command() {
@@ -184,10 +195,39 @@ async fn handle_car_commands(tx: AirPlayTransmitterProxyRef, mut modes: Resource
                     cmd.respond_err();
                 }
             }
+            Command::HidSendReport(r) => {
+                if let Some(event) = parse_touch_report(r.hid_report.as_ref(), &mut touching) {
+                    let _ = touch_tx.try_send(event);
+                }
+                cmd.respond_ok();
+            }
             _ => cmd.respond_ok(),
         }
     }
     tracing::debug!("Car command handler ended");
+}
+
+/// Decode a CarPlay touchscreen HID report into a touch event. Observed format (12 bytes):
+/// `[reportId=0, tip, Xlo, Xhi, Ylo, Yhi, const=1, 0, 0, 0, 0, 0]` - a single contact whose
+/// `tip` switch (byte 1) is 1 while touching, and whose X/Y (little-endian u16) are in the
+/// car's display-pixel space. Our compositor renders at exactly that resolution, so the
+/// coordinates pass through unscaled. `touching` tracks the contact across reports so we can
+/// emit Down/Motion/Up. Non-touch reports (e.g. 1-byte button reports) are ignored.
+fn parse_touch_report(bytes: &[u8], touching: &mut bool) -> Option<TouchEvent> {
+    if bytes.len() < 6 {
+        return None;
+    }
+    let tip = bytes[1] != 0;
+    let x = u16::from_le_bytes([bytes[2], bytes[3]]) as f64;
+    let y = u16::from_le_bytes([bytes[4], bytes[5]]) as f64;
+    let event_type = match (*touching, tip) {
+        (false, true) => TouchEventType::Down,
+        (true, true) => TouchEventType::Motion,
+        (true, false) => TouchEventType::Up,
+        (false, false) => return None,
+    };
+    *touching = tip;
+    Some(TouchEvent { event_type, slot: 0, x, y })
 }
 
 /// Abort a spawned task when the guard is dropped.
@@ -199,4 +239,40 @@ fn abort_on_drop(handle: tokio::task::JoinHandle<()>) -> impl Drop {
         }
     }
     Guard(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Real reports captured from the head unit (`HID report (12 bytes)` log lines): the parser
+    // must turn a stream of them into a well-formed Down -> Motion* -> Up gesture with the
+    // right coordinates.
+    #[test]
+    fn touch_report_gesture() {
+        let mut touching = false;
+
+        // First contact -> Down at (0x018a, 0x00cd) = (394, 205).
+        let down = parse_touch_report(&[0, 1, 0x8a, 0x01, 0xcd, 0x00, 1, 0, 0, 0, 0, 0], &mut touching)
+            .expect("down");
+        assert!(matches!(down.event_type, TouchEventType::Down));
+        assert_eq!((down.x, down.y), (394.0, 205.0));
+        assert!(touching);
+
+        // Still touching, moved -> Motion at (0x020f, 0x0114) = (527, 276).
+        let mv = parse_touch_report(&[0, 1, 0x0f, 0x02, 0x14, 0x01, 1, 0, 0, 0, 0, 0], &mut touching)
+            .expect("motion");
+        assert!(matches!(mv.event_type, TouchEventType::Motion));
+        assert_eq!((mv.x, mv.y), (527.0, 276.0));
+
+        // tip=0 -> Up (a real lift-off report).
+        let up = parse_touch_report(&[0, 0, 0xe9, 0x02, 0xba, 0x01, 1, 0, 0, 0, 0, 0], &mut touching)
+            .expect("up");
+        assert!(matches!(up.event_type, TouchEventType::Up));
+        assert!(!touching);
+
+        // No contact while not touching, and short (non-touch button) reports -> ignored.
+        assert!(parse_touch_report(&[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0], &mut touching).is_none());
+        assert!(parse_touch_report(&[0x01], &mut touching).is_none());
+    }
 }

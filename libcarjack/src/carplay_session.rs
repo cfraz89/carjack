@@ -4,7 +4,7 @@ use iap2_proto::{
     iap2::{Iap2, Stream},
     ops::{
         control::{
-            self, ControlMessage, ControlMessageId, ControlMessageSet, GetParam, ParameterId,
+            ControlMessage, ControlMessageId, ControlMessageSet, GetParam, ParameterId,
         },
         ea::EaFrame,
     },
@@ -58,28 +58,23 @@ enum SessionPhase {
 
 pub struct CarplaySession<S: Stream> {
     pub iap2: Iap2<S>,
-    pub touch_tx: mpsc::Sender<TouchEvent>,
     pub wifi_tx: mpsc::Sender<WifiCredentials>,
     phase: SessionPhase,
     ea_session_id: u8,
-    ea_transfer_id: u16,
     ready_tx: Option<oneshot::Sender<()>>,
 }
 
 impl<S: Stream> CarplaySession<S> {
     pub fn new(
         iap2: Iap2<S>,
-        touch_tx: mpsc::Sender<TouchEvent>,
         wifi_tx: mpsc::Sender<WifiCredentials>,
         ready_tx: oneshot::Sender<()>,
     ) -> Self {
         CarplaySession {
             iap2,
-            touch_tx,
             wifi_tx,
             phase: SessionPhase::Auth,
             ea_session_id: 0,
-            ea_transfer_id: 0,
             ready_tx: Some(ready_tx),
         }
     }
@@ -334,14 +329,10 @@ impl<S: Stream> CarplaySession<S> {
     }
 
     async fn handle_ea(&mut self, payload: &[u8]) -> Result<(), Iap2Error> {
-        if let Ok((frame, _)) = EaFrame::from_bytes(payload) {
-            self.ea_transfer_id = frame.transfer_id;
-            if !frame.data.is_empty() {
-                if let Ok((_, event)) = TouchEvent::from_bytes((&frame.data[..], 0)) {
-                    let _ = self.touch_tx.send(event).await;
-                }
-            }
-        }
+        // Receive EA (External Accessory) session frames. Touch used to be decoded here, but it
+        // actually arrives over the AirPlay HID channel (see libcarjack::airplay), so these
+        // frames are currently just parsed and acknowledged.
+        let _ = EaFrame::from_bytes(payload);
         Ok(())
     }
 }

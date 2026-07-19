@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use eyre::{Result, eyre};
+use libcarjack::carplay_session::TouchEvent;
 use tokio::sync::{mpsc, watch};
 use tokio_util::task::AbortOnDropHandle;
 
@@ -9,10 +10,12 @@ pub use libcarjack::airplay::{AirPlayConnection, EncodedFrame};
 use crate::compositor::CapturedFrame;
 
 /// Stream the compositor's `frame_rx` frames to the car over an already-connected AirPlay
-/// session (`conn`), encoding to H264 sized to the car's display.
+/// session (`conn`), encoding to H264 sized to the car's display. Touch reports the car sends
+/// back over the AirPlay event channel are decoded and forwarded to `touch_tx`.
 pub async fn start_video_stream(
     conn: AirPlayConnection,
     frame_rx: watch::Receiver<Option<Arc<CapturedFrame>>>,
+    touch_tx: mpsc::Sender<TouchEvent>,
 ) -> Result<()> {
     let (video_tx, video_rx) = mpsc::channel::<EncodedFrame>(64);
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(crate::encode::encode_h264_to_channel(
@@ -34,6 +37,6 @@ pub async fn start_video_stream(
                 Err(e) => Err(eyre!("video encoder task panicked: {e}")),
             }
         }
-        result = libcarjack::airplay::run_video_stream(conn, video_rx) => result,
+        result = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx) => result,
     }
 }
