@@ -10,7 +10,7 @@ use libcarjack::carplay_ctrl::wait_for_carplay_ctrl_probe;
 
 use crate::{
     airplay::start_video_stream,
-    portal::start_remote_desktop,
+    encode::VideoSource,
     wifi_connect::{CarWifi, connect_to_car_wifi},
     wireless::wireless_carplay,
 };
@@ -19,8 +19,48 @@ mod airplay;
 mod encode;
 mod portal;
 mod usb;
+mod wayland_capture;
 mod wifi_connect;
 mod wireless;
+
+/// Screen capture + touch input, backed by whichever mechanism the compositor supports.
+enum RemoteDesktop {
+    /// Direct Wayland protocol capture/input - no consent dialog, works on wlroots
+    /// compositors (sway, cage) and KWin.
+    Wayland(wayland_capture::WaylandCapture),
+    /// xdg-desktop-portal RemoteDesktop/ScreenCast - the only option on GNOME/Mutter, but
+    /// needs a user present to answer the consent dialog each run (unless a persisted
+    /// restore token is wired up separately).
+    Portal(portal::RemoteDesktopStream),
+}
+
+impl RemoteDesktop {
+    async fn send_touch(&self, event: &TouchEvent) -> Result<()> {
+        match self {
+            RemoteDesktop::Wayland(w) => w.send_touch(event),
+            RemoteDesktop::Portal(p) => p.send_touch(event).await,
+        }
+    }
+
+    fn video_source(&self) -> VideoSource {
+        match self {
+            RemoteDesktop::Wayland(w) => VideoSource::Wayland(w.subscribe_frames()),
+            RemoteDesktop::Portal(p) => VideoSource::Pipewire(p.node_id()),
+        }
+    }
+}
+
+/// Prefer capturing directly via compositor Wayland protocols (no consent dialog needed -
+/// essential on a headless embedded device with nobody present to click "allow"). Falls
+/// back to xdg-desktop-portal when the compositor doesn't implement them (e.g. GNOME).
+async fn start_remote_desktop() -> Result<RemoteDesktop> {
+    if let Some(capture) = wayland_capture::WaylandCapture::try_start().await {
+        tracing::info!("Using direct Wayland protocol capture (no portal/consent dialog needed)");
+        return Ok(RemoteDesktop::Wayland(capture));
+    }
+    tracing::info!("Wayland capture protocol unavailable, falling back to xdg-desktop-portal");
+    Ok(RemoteDesktop::Portal(portal::start_remote_desktop().await?))
+}
 
 #[tokio::main()]
 async fn main() -> Result<()> {
@@ -126,21 +166,14 @@ async fn run_session() -> Result<()> {
         }
     };
 
-    // Phase 3: set up the desktop capture, then start AirPlay streaming. The screen-share
-    // portal must run first so the AirPlay side knows the pipewire node to encode.
-    // CARPLAY_TEST_VIDEO skips the portal (which otherwise prompts for permission each run)
-    // and feeds a GStreamer test pattern instead.
-    let rd_stream = if std::env::var("CARPLAY_TEST_VIDEO").is_ok() {
-        tracing::info!("CARPLAY_TEST_VIDEO set: using test video source, skipping screen-share portal");
-        None
-    } else {
-        Some(start_remote_desktop().await?)
-    };
-    let node_id = rd_stream.as_ref().map(|s| s.node_id()).unwrap_or(0);
+    // Phase 3: set up the desktop capture, then start AirPlay streaming. Capture must run
+    // first so the AirPlay side knows the video source to encode.
+    let rd_stream = start_remote_desktop().await?;
+    let video_source = rd_stream.video_source();
 
     // start_video_stream owns the H264 encoder internally so it can size it to the car's
     // display resolution (learned from AirPlay /info).
-    let airplay = start_video_stream(peer_addr, remote_homekit_id, node_id);
+    let airplay = start_video_stream(peer_addr, remote_homekit_id, video_source);
     tokio::pin!(airplay);
 
     // If the car later drops Bluetooth on its own, that's not fatal - keep streaming.
@@ -164,11 +197,7 @@ async fn run_session() -> Result<()> {
             }
             touch = touch_rx.recv(), if !carplay_done => {
                 match touch {
-                    Some(event) => {
-                        if let Some(rd) = &rd_stream {
-                            rd.send_touch(&event).await?;
-                        }
-                    }
+                    Some(event) => rd_stream.send_touch(&event).await?,
                     None => carplay_done = true,
                 }
             }
