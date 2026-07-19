@@ -10,56 +10,36 @@ use libcarjack::carplay_ctrl::wait_for_carplay_ctrl_probe;
 
 use crate::{
     airplay::start_video_stream,
-    encode::VideoSource,
+    compositor::Compositor,
     wifi_connect::{CarWifi, connect_to_car_wifi},
     wireless::wireless_carplay,
 };
 
 mod airplay;
+mod compositor;
 mod encode;
-mod portal;
 mod usb;
-mod wayland_capture;
 mod wifi_connect;
 mod wireless;
 
-/// Screen capture + touch input, backed by whichever mechanism the compositor supports.
-enum RemoteDesktop {
-    /// Direct Wayland protocol capture/input - no consent dialog, works on wlroots
-    /// compositors (sway, cage) and KWin.
-    Wayland(wayland_capture::WaylandCapture),
-    /// xdg-desktop-portal RemoteDesktop/ScreenCast - the only option on GNOME/Mutter, but
-    /// needs a user present to answer the consent dialog each run (unless a persisted
-    /// restore token is wired up separately).
-    Portal(portal::RemoteDesktopStream),
-}
-
-impl RemoteDesktop {
-    async fn send_touch(&self, event: &TouchEvent) -> Result<()> {
-        match self {
-            RemoteDesktop::Wayland(w) => w.send_touch(event),
-            RemoteDesktop::Portal(p) => p.send_touch(event).await,
-        }
+/// Launch the desktop app(s) to stream, pointed at our internal compositor's Wayland socket.
+/// `CARJACK_DESKTOP_CMD` is run via `sh -c` (e.g. a launcher or a single kiosk app); if unset,
+/// nothing is launched and the compositor streams a black screen until a client connects.
+fn spawn_desktop_apps(socket_name: &std::ffi::OsStr) {
+    let Ok(cmd) = std::env::var("CARJACK_DESKTOP_CMD") else {
+        tracing::warn!("CARJACK_DESKTOP_CMD not set - no desktop app launched, streaming black");
+        return;
+    };
+    tracing::info!("Launching desktop app: {cmd}");
+    match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd)
+        .env("WAYLAND_DISPLAY", socket_name)
+        .spawn()
+    {
+        Ok(_) => {}
+        Err(e) => tracing::warn!("failed to launch desktop app '{cmd}': {e}"),
     }
-
-    fn video_source(&self) -> VideoSource {
-        match self {
-            RemoteDesktop::Wayland(w) => VideoSource::Wayland(w.subscribe_frames()),
-            RemoteDesktop::Portal(p) => VideoSource::Pipewire(p.node_id()),
-        }
-    }
-}
-
-/// Prefer capturing directly via compositor Wayland protocols (no consent dialog needed -
-/// essential on a headless embedded device with nobody present to click "allow"). Falls
-/// back to xdg-desktop-portal when the compositor doesn't implement them (e.g. GNOME).
-async fn start_remote_desktop() -> Result<RemoteDesktop> {
-    if let Some(capture) = wayland_capture::WaylandCapture::try_start().await {
-        tracing::info!("Using direct Wayland protocol capture (no portal/consent dialog needed)");
-        return Ok(RemoteDesktop::Wayland(capture));
-    }
-    tracing::info!("Wayland capture protocol unavailable, falling back to xdg-desktop-portal");
-    Ok(RemoteDesktop::Portal(portal::start_remote_desktop().await?))
 }
 
 #[tokio::main()]
@@ -72,6 +52,12 @@ async fn main() -> Result<()> {
                 .from_env_lossy(),
         )
         .init();
+
+    // Temporary standalone validation hook for the internal-compositor build-out: start the
+    // compositor, run a client against it, and confirm frames come out with client content.
+    if std::env::var("CARJACK_TEST_COMPOSITOR").is_ok() {
+        return test_compositor().await;
+    }
 
     // Each session runs the full flow (Bluetooth -> WiFi -> AirPlay). If it fails - most
     // importantly when the car tears down the screen socket - restart from a fresh Bluetooth
@@ -87,6 +73,53 @@ async fn main() -> Result<()> {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
+    }
+}
+
+/// Standalone validation of the internal compositor: bring it up, run a fullscreen client that
+/// paints the screen white, and confirm the composited frames actually contain the client's
+/// output (not just the black clear).
+async fn test_compositor() -> Result<()> {
+    let comp = compositor::Compositor::start(1280, 720)?;
+    tracing::info!("compositor started, socket={:?}", comp.socket_name);
+
+    // Use the configured desktop app if set (so this validates the real CARJACK_DESKTOP_CMD),
+    // otherwise a foot that fills the screen white so a rendered frame is unmistakably non-black.
+    let cmd = std::env::var("CARJACK_DESKTOP_CMD")
+        .unwrap_or_else(|_| "foot -e sh -c 'printf \\033[47m\\033[2J; sleep 60'".to_string());
+    tracing::info!("test client: {cmd}");
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd)
+        .env("WAYLAND_DISPLAY", &comp.socket_name)
+        .spawn()
+        .map_err(|e| eyre!("spawn test client: {e}"))?;
+
+    let mut rx = comp.subscribe_frames();
+    let mut checked = 0;
+    let mut max_brightness = 0u64;
+    while checked < 90 {
+        if rx.changed().await.is_err() {
+            break;
+        }
+        let Some(frame) = rx.borrow_and_update().clone() else {
+            continue;
+        };
+        checked += 1;
+        // Average luma over a sample of pixels.
+        let sum: u64 = frame.data.iter().step_by(997).map(|&b| b as u64).sum();
+        max_brightness = max_brightness.max(sum);
+        if checked % 30 == 1 {
+            tracing::info!("frame #{checked}: {}x{} {} bytes, sample-sum={sum}", frame.width, frame.height, frame.data.len());
+        }
+    }
+    let _ = child.kill();
+
+    if max_brightness > 10_000 {
+        tracing::info!("compositor OK: client content reached the frame stream (max sample-sum={max_brightness})");
+        Ok(())
+    } else {
+        Err(eyre!("frames stayed black - client never rendered into the compositor (max sample-sum={max_brightness})"))
     }
 }
 
@@ -166,14 +199,16 @@ async fn run_session() -> Result<()> {
         }
     };
 
-    // Phase 3: set up the desktop capture, then start AirPlay streaming. Capture must run
-    // first so the AirPlay side knows the video source to encode.
-    let rd_stream = start_remote_desktop().await?;
-    let video_source = rd_stream.video_source();
+    // Phase 3: connect AirPlay to learn the car's display size, then launch our internal
+    // compositor sized to it, point the desktop app(s) at it, and stream its composited
+    // frames. Learning the resolution first lets the compositor render at exactly the car's
+    // size (no scaling) - and owning the compositor is what makes the desktop appear at all.
+    let conn = libcarjack::airplay::connect_airplay(peer_addr, remote_homekit_id).await?;
+    let compositor = Compositor::start(conn.width, conn.height)?;
+    spawn_desktop_apps(&compositor.socket_name);
+    let frame_rx = compositor.subscribe_frames();
 
-    // start_video_stream owns the H264 encoder internally so it can size it to the car's
-    // display resolution (learned from AirPlay /info).
-    let airplay = start_video_stream(peer_addr, remote_homekit_id, video_source);
+    let airplay = start_video_stream(conn, frame_rx);
     tokio::pin!(airplay);
 
     // If the car later drops Bluetooth on its own, that's not fatal - keep streaming.
@@ -197,7 +232,7 @@ async fn run_session() -> Result<()> {
             }
             touch = touch_rx.recv(), if !carplay_done => {
                 match touch {
-                    Some(event) => rd_stream.send_touch(&event).await?,
+                    Some(event) => compositor.send_touch(&event)?,
                     None => carplay_done = true,
                 }
             }
