@@ -1,2 +1,2 @@
-sudo dnf install gstreamer1-devel pipewire-gstreamer dbus-devel
+sudo dnf install gstreamer1-devel gstreamer1-plugins-base-devel pipewire-gstreamer dbus-devel mesa-libgbm-devel libdrm-devel
 turn Experimental = true on /etc/bluetooth/main.conf
