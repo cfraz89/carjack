@@ -98,7 +98,11 @@ async fn test_compositor() -> Result<()> {
     let mut rx = comp.subscribe_frames();
     let mut checked = 0;
     let mut max_brightness = 0u64;
-    while checked < 90 {
+    // ~30fps, so frames ≈ seconds*30. GPU clients like Waydroid take a while to boot.
+    let budget: u64 = std::env::var("CARJACK_TEST_FRAMES").ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(90);
+    while checked < budget {
         if rx.changed().await.is_err() {
             break;
         }

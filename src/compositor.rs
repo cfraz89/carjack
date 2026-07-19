@@ -28,7 +28,7 @@ use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::backend::renderer::{Bind, ExportMem};
+use smithay::backend::renderer::{Bind, ExportMem, ImportDma};
 use smithay::desktop::{PopupManager, Space, Window, WindowSurfaceType};
 use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
 use smithay::input::{Seat, SeatHandler, SeatState};
@@ -46,6 +46,7 @@ use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState, get_parent, is_sync_subsurface,
 };
+use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
@@ -58,8 +59,8 @@ use smithay::wayland::shell::xdg::{
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::socket::ListeningSocketSource;
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat,
+    delegate_shm, delegate_xdg_shell,
 };
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 
@@ -191,9 +192,12 @@ struct State {
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
     shm_state: ShmState,
-    // Held to keep the (xdg-)output global alive for the session; not otherwise read.
+    dmabuf_state: DmabufState,
+    // Held to keep the (xdg-)output/dmabuf globals alive for the session; not otherwise read.
     #[allow(dead_code)]
     output_manager_state: OutputManagerState,
+    #[allow(dead_code)]
+    dmabuf_global: DmabufGlobal,
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
 
@@ -337,6 +341,13 @@ fn run(
     let data_device_state = DataDeviceState::new::<State>(&dh);
     let popups = PopupManager::default();
 
+    // Advertise zwp_linux_dmabuf_v1 with the renderer's supported formats so GPU-accelerated
+    // clients (Waydroid, browsers, games) can share their rendered frames as dmabufs - without
+    // this they only have wl_shm and Waydroid in particular can't render at all.
+    let mut dmabuf_state = DmabufState::new();
+    let dmabuf_formats: Vec<_> = renderer.dmabuf_formats().into_iter().collect();
+    let dmabuf_global = dmabuf_state.create_global::<State>(&dh, dmabuf_formats);
+
     let mut seat = seat_state.new_wl_seat(&dh, "carplay");
     seat.add_keyboard(Default::default(), 200, 25)
         .map_err(|e| eyre!("add keyboard: {e}"))?;
@@ -421,7 +432,9 @@ fn run(
         compositor_state,
         xdg_shell_state,
         shm_state,
+        dmabuf_state,
         output_manager_state,
+        dmabuf_global,
         seat_state,
         data_device_state,
         renderer,
@@ -554,12 +567,34 @@ impl ServerDndGrabHandler for State {}
 
 impl OutputHandler for State {}
 
+impl DmabufHandler for State {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        // Validate by importing into our renderer; the render loop re-uses this same import
+        // when compositing the client's surface.
+        if self.renderer.import_dmabuf(&dmabuf, None).is_ok() {
+            let _ = notifier.successful::<State>();
+        } else {
+            notifier.failed();
+        }
+    }
+}
+
 delegate_compositor!(State);
 delegate_shm!(State);
 delegate_xdg_shell!(State);
 delegate_seat!(State);
 delegate_data_device!(State);
 delegate_output!(State);
+delegate_dmabuf!(State);
 
 #[derive(Default)]
 struct ClientState {
