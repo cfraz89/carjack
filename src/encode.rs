@@ -10,11 +10,10 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::airplay::EncodedFrame;
-use crate::wayland_capture::CapturedFrame;
+use crate::compositor::CapturedFrame;
 
-/// Zero-copy `AsRef<[u8]>` view of a captured frame's pixels, so re-pushing the same frame
-/// (which the repeater does 30x/sec for static content) is just an `Arc` refcount bump rather
-/// than a full memcpy of the frame each tick.
+/// Zero-copy `AsRef<[u8]>` view of a frame's pixels, so re-pushing the same frame (the repeater
+/// does 30x/sec) is just an `Arc` refcount bump rather than a full memcpy each tick.
 struct FrameData(Arc<CapturedFrame>);
 
 impl AsRef<[u8]> for FrameData {
@@ -23,23 +22,14 @@ impl AsRef<[u8]> for FrameData {
     }
 }
 
-/// Where the desktop pixels come from.
-pub enum VideoSource {
-    /// A PipeWire node handed to us by the xdg-desktop-portal RemoteDesktop/ScreenCast flow.
-    Pipewire(u32),
-    /// Frames captured directly via `ext-image-copy-capture-v1` (see `wayland_capture.rs`),
-    /// published as they arrive - latest frame wins if the encoder falls behind.
-    Wayland(watch::Receiver<Option<Arc<CapturedFrame>>>),
-}
-
-/// Run a GStreamer pipeline that H264-encodes the desktop and hands each encoded access unit
-/// to `video_tx`.
+/// Run a GStreamer pipeline that H264-encodes the composited desktop frames (from the internal
+/// compositor, via `frame_rx`) and hands each encoded access unit to `video_tx`.
 ///
 /// Uses an in-process `appsink` rather than piping `gst-launch` through an fd: the sink
 /// delivers one `alignment=au` buffer per callback, so each message on the channel is
 /// already exactly one complete access unit - no byte-stream reframing needed.
 pub async fn encode_h264_to_channel(
-    source: VideoSource,
+    frame_rx: watch::Receiver<Option<Arc<CapturedFrame>>>,
     width: u32,
     height: u32,
     video_tx: mpsc::Sender<EncodedFrame>,
@@ -55,99 +45,39 @@ pub async fn encode_h264_to_channel(
             .map_err(|_| eyre!("failed to create {label} ({name})"))
     };
 
-    let src_resolution = gst::Caps::builder("video/x-raw")
-        .field("width", width as i32)
-        .field("height", height as i32)
-        .field("framerate", gst::Fraction::new(30, 1))
-        .build();
+    // appsrc fed by the compositor's frame stream. do-timestamp stamps each pushed buffer with
+    // the pipeline running-time (buffers arrive with no PTS, and videorate needs timestamps).
+    let src = gst::ElementFactory::make("appsrc")
+        .name("source")
+        .build()
+        .map_err(|_| eyre!("failed to create source (appsrc)"))?
+        .downcast::<gst_app::AppSrc>()
+        .map_err(|_| eyre!("'source' is not an appsrc"))?;
+    src.set_property("is-live", true);
+    src.set_property_from_str("format", "time");
+    src.set_property("do-timestamp", true);
+    pipeline.add(&src).map_err(|_| eyre!("add source"))?;
+    let wayland_feed = Some((src.clone(), frame_rx));
+    let src_tail: gst::Element = src.upcast();
 
-    // Only populated for VideoSource::Wayland - used below to spawn the task that feeds
-    // captured frames into the pipeline.
-    let mut wayland_feed: Option<(gst_app::AppSrc, watch::Receiver<Option<Arc<CapturedFrame>>>)> =
-        None;
-
-    let src_tail: gst::Element = match source {
-        VideoSource::Pipewire(node_id) => {
-            let src = mk("pipewiresrc", "source")?;
-            src.set_property_from_str("path", &node_id.to_string());
-
-            let scale = mk("videoscale", "videoscale")?;
-            let rate = mk("videorate", "videorate")?;
-
-            pipeline.add(&src).map_err(|_| eyre!("add source"))?;
-            pipeline.add(&scale).map_err(|_| eyre!("add scale"))?;
-            pipeline.add(&rate).map_err(|_| eyre!("add rate"))?;
-            src.link(&scale).map_err(|_| eyre!("link src-scale"))?;
-            scale.link(&rate).map_err(|_| eyre!("link scale-rate"))?;
-            rate.upcast()
-        }
-        VideoSource::Wayland(frame_rx) => {
-            let src = gst::ElementFactory::make("appsrc")
-                .name("source")
-                .build()
-                .map_err(|_| eyre!("failed to create source (appsrc)"))?
-                .downcast::<gst_app::AppSrc>()
-                .map_err(|_| eyre!("'source' is not an appsrc"))?;
-            src.set_property("is-live", true);
-            src.set_property_from_str("format", "time");
-            // We push buffers with no PTS. Without this, videorate (which needs timestamps)
-            // stalls and no frame ever reaches the encoder - the working pipewiresrc path
-            // gets proper PTS from the pipewire clock, which is why it "just worked".
-            // do-timestamp stamps each buffer with the pipeline running-time as it arrives,
-            // exactly like a live capture source.
-            src.set_property("do-timestamp", true);
-
-            let scale = mk("videoscale", "videoscale")?;
-            let rate = mk("videorate", "videorate")?;
-
-            pipeline.add(&src).map_err(|_| eyre!("add source"))?;
-            pipeline.add(&scale).map_err(|_| eyre!("add scale"))?;
-            pipeline.add(&rate).map_err(|_| eyre!("add rate"))?;
-            src.link(&scale).map_err(|_| eyre!("link src-scale"))?;
-            scale.link(&rate).map_err(|_| eyre!("link scale-rate"))?;
-
-            wayland_feed = Some((src.clone(), frame_rx));
-            rate.upcast()
-        }
-    };
+    // src_tail (raw video) -> [scale + RGB->NV12 convert + H264 encode] -> `encoder`, built by
+    // whichever backend the hardware supports. Returns the H264-producing element.
+    let encoder = build_encode_chain(&pipeline, &src_tail, width, height)?;
 
     let output_caps = gst::Caps::builder("video/x-h264")
         .field("stream-format", "byte-stream")
         .field("alignment", "au")
         .build();
 
-    // gop-size caps the keyframe interval. After RECORD we drop buffered frames and open
-    // the stream on the next keyframe, so this bounds startup latency - the car tears the
-    // session down if it gets no video for ~1s. gop-size=6 => a keyframe every ~200ms.
-    let enc_desc = std::env::var("CARPLAY_ENCODER")
-        .unwrap_or_else(|_| String::from("nvh264enc gop-size=6"));
-    let (enc_name, enc_props) = parse_encoder_string(&enc_desc)?;
-    let encoder = gst::ElementFactory::make(&enc_name)
-        .name("encoder")
-        .build()
-        .map_err(|_| eyre!("failed to create encoder '{enc_name}'"))?;
-    for (key, val) in &enc_props {
-        encoder.set_property_from_str(key, val);
-    }
-
-    let videoconvert = mk("videoconvert", "videoconvert")?;
     let h264parse = mk("h264parse", "h264parse")?;
     h264parse.set_property("config-interval", -1i32);
 
     let appsink = mk("appsink", "sink")?;
     appsink.set_property("sync", false);
 
-    pipeline.add(&videoconvert).map_err(|_| eyre!("add vconvert"))?;
-    pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
     pipeline.add(&h264parse).map_err(|_| eyre!("add h264parse"))?;
     pipeline.add(&appsink).map_err(|_| eyre!("add appsink"))?;
 
-    src_tail
-        .link_filtered(&videoconvert, &src_resolution)
-        .map_err(|_| eyre!("link src-vconvert"))?;
-    videoconvert
-        .link(&encoder)
-        .map_err(|_| eyre!("link vconvert-encoder"))?;
     encoder
         .link(&h264parse)
         .map_err(|_| eyre!("link encoder-parse"))?;
@@ -245,6 +175,143 @@ pub async fn encode_h264_to_channel(
     }
 
     Ok(())
+}
+
+/// A hardware zero-copy encode backend: a dmabuf-capable post-processor (does RGB->NV12 +
+/// resize to the car's resolution on the GPU) feeding a hardware H264 encoder. Selected only
+/// when *both* its elements are available (probed at runtime via `ElementFactory::find`), so a
+/// machine without the driver silently falls back to software - the same auto-negotiation the
+/// working `pipewiresrc` path got for free.
+///
+/// Adding a platform = one row here. Keep the highest-value/most-specific backends first.
+struct HwBackend {
+    /// Value for `CARPLAY_ENCODE_BACKEND` to force this backend, and what gets logged.
+    name: &'static str,
+    /// dmabuf-importing convert+scale element (M2M): RGB->NV12 + resize, on-GPU, zero-copy.
+    postproc: &'static str,
+    /// hardware H264 encoder consuming the post-processor's output.
+    encoder: &'static str,
+    /// (property, value) that caps the keyframe interval to ~6 frames. The car tears the
+    /// session down after ~1s without a keyframe, so this bounds startup/recovery latency.
+    /// Property name differs per encoder; validate against the real element when enabling.
+    keyframe_prop: (&'static str, &'static str),
+}
+
+/// Probed in order; first whose `postproc` + `encoder` both exist wins. Entries are validated
+/// per-platform as the hardware becomes testable (VA-API on Intel/AMD dev machines, v4l2 on the
+/// Qualcomm target).
+///
+/// NOTE: full zero-copy additionally needs the compositor to forward its rendered dmabuf fd
+/// (instead of the CPU readback in compositor.rs) and to render on the *same* GPU as the
+/// encoder. Until then these give hardware encode of the already-composited frames, and only
+/// auto-select where the elements exist.
+const HW_BACKENDS: &[HwBackend] = &[
+    // Qualcomm / embedded (the deployment target). Untested off-device; keyframe control on
+    // v4l2 stateful encoders is usually via extra-controls, so this is a best guess to revisit.
+    HwBackend {
+        name: "v4l2",
+        postproc: "v4l2convert",
+        encoder: "v4l2h264enc",
+        keyframe_prop: ("", ""),
+    },
+    // Intel / AMD VA-API.
+    HwBackend {
+        name: "vaapi",
+        postproc: "vapostproc",
+        encoder: "vah264enc",
+        keyframe_prop: ("key-int-max", "6"),
+    },
+];
+
+fn element_available(name: &str) -> bool {
+    gst::ElementFactory::find(name).is_some()
+}
+
+/// Pick the hardware backend to use: an explicit `CARPLAY_ENCODE_BACKEND` override
+/// (`software` forces the fallback), else the first available `HW_BACKENDS` entry, else none
+/// (software).
+fn select_hw_backend() -> Option<&'static HwBackend> {
+    match std::env::var("CARPLAY_ENCODE_BACKEND").ok().as_deref() {
+        Some("software") => None,
+        Some(forced) => HW_BACKENDS
+            .iter()
+            .find(|b| b.name == forced)
+            .or_else(|| {
+                tracing::warn!("CARPLAY_ENCODE_BACKEND={forced} unknown, using software");
+                None
+            }),
+        None => HW_BACKENDS
+            .iter()
+            .find(|b| element_available(b.postproc) && element_available(b.encoder)),
+    }
+}
+
+/// Build `src_tail` (raw video) -> scale + RGB->NV12 convert + H264 encode, returning the
+/// element whose output is H264. Uses a hardware backend if one is available/forced, otherwise
+/// the software chain (videoscale ! videorate ! videoconvert ! `CARPLAY_ENCODER`).
+fn build_encode_chain(
+    pipeline: &gst::Pipeline,
+    src_tail: &gst::Element,
+    width: u32,
+    height: u32,
+) -> Result<gst::Element> {
+    let mk = |name: &str, label: &str| {
+        gst::ElementFactory::make(name)
+            .name(label)
+            .build()
+            .map_err(|_| eyre!("failed to create {label} ({name})"))
+    };
+    // Enforces the car's exact display size (head units reject a mismatched stream) and 30fps.
+    let target_caps = gst::Caps::builder("video/x-raw")
+        .field("width", width as i32)
+        .field("height", height as i32)
+        .field("framerate", gst::Fraction::new(30, 1))
+        .build();
+
+    if let Some(b) = select_hw_backend() {
+        tracing::info!("Encode backend: hardware '{}' ({} ! {})", b.name, b.postproc, b.encoder);
+        let postproc = mk(b.postproc, "postproc")?;
+        let encoder = mk(b.encoder, "encoder")?;
+        if !b.keyframe_prop.0.is_empty() {
+            encoder.set_property_from_str(b.keyframe_prop.0, b.keyframe_prop.1);
+        }
+        pipeline.add(&postproc).map_err(|_| eyre!("add postproc"))?;
+        pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
+        src_tail.link(&postproc).map_err(|_| eyre!("link src-postproc"))?;
+        postproc
+            .link_filtered(&encoder, &target_caps)
+            .map_err(|_| eyre!("link postproc-encoder"))?;
+        return Ok(encoder);
+    }
+
+    tracing::info!("Encode backend: software (videoscale ! videorate ! videoconvert ! encoder)");
+    // gop-size caps the keyframe interval (see keyframe_prop above for why).
+    let enc_desc = std::env::var("CARPLAY_ENCODER")
+        .unwrap_or_else(|_| String::from("nvh264enc gop-size=6"));
+    let (enc_name, enc_props) = parse_encoder_string(&enc_desc)?;
+    let encoder = gst::ElementFactory::make(&enc_name)
+        .name("encoder")
+        .build()
+        .map_err(|_| eyre!("failed to create encoder '{enc_name}'"))?;
+    for (key, val) in &enc_props {
+        encoder.set_property_from_str(key, val);
+    }
+    let scale = mk("videoscale", "videoscale")?;
+    let rate = mk("videorate", "videorate")?;
+    let convert = mk("videoconvert", "videoconvert")?;
+
+    pipeline.add(&scale).map_err(|_| eyre!("add scale"))?;
+    pipeline.add(&rate).map_err(|_| eyre!("add rate"))?;
+    pipeline.add(&convert).map_err(|_| eyre!("add convert"))?;
+    pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
+
+    src_tail.link(&scale).map_err(|_| eyre!("link src-scale"))?;
+    scale.link(&rate).map_err(|_| eyre!("link scale-rate"))?;
+    rate.link(&convert).map_err(|_| eyre!("link rate-convert"))?;
+    convert
+        .link_filtered(&encoder, &target_caps)
+        .map_err(|_| eyre!("link convert-encoder"))?;
+    Ok(encoder)
 }
 
 /// Split an encoder description like `"nvh264enc gop-size=6"` into

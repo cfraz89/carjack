@@ -15,7 +15,6 @@ edition.workspace = true
 
 [dependencies]
 nmrs = "3.4.0"
-ashpd = {version = "0.13.10", features = ["remote_desktop", "screencast"]  }
 backon = "1.6.0"
 bluer = { version = "0.17.4", features = ["full", "rfcomm"] }
 color-eyre = "0.6.5"
@@ -46,10 +45,4 @@ catplay_util = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/a
 bytes = "1.12.1"
 gstreamer = "0.24"
 gstreamer-app = "0.24"
-wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client", "staging"] }
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-rustix = { version = "1", features = ["fs", "mm"] }
-memmap2 = "0.9"
-gbm = { version = "0.18", default-features = false, features = ["drm-support"] }
-drm = "0.14"
+smithay = { version = "0.7.0", default-features = false, features = ["backend_egl", "backend_gbm", "renderer_gl", "wayland_frontend", "desktop"] }

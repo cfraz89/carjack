@@ -1,21 +1,22 @@
-use std::net::SocketAddr;
+use std::sync::Arc;
 
 use eyre::{Result, eyre};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::task::AbortOnDropHandle;
-use uuid::Uuid;
 
-pub use libcarjack::airplay::EncodedFrame;
+pub use libcarjack::airplay::{AirPlayConnection, EncodedFrame};
 
+use crate::compositor::CapturedFrame;
+
+/// Stream the compositor's `frame_rx` frames to the car over an already-connected AirPlay
+/// session (`conn`), encoding to H264 sized to the car's display.
 pub async fn start_video_stream(
-    peer_addr: SocketAddr,
-    remote_homekit_id: Option<Uuid>,
-    video_source: crate::encode::VideoSource,
+    conn: AirPlayConnection,
+    frame_rx: watch::Receiver<Option<Arc<CapturedFrame>>>,
 ) -> Result<()> {
-    let conn = libcarjack::airplay::connect_airplay(peer_addr, remote_homekit_id).await?;
     let (video_tx, video_rx) = mpsc::channel::<EncodedFrame>(64);
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(crate::encode::encode_h264_to_channel(
-        video_source,
+        frame_rx,
         conn.width,
         conn.height,
         video_tx,

@@ -18,19 +18,22 @@ To build and run the project, you will need to use the relevant just commands,
 which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 
 - just build - builds project
-- just run - builds and runs inside a nested sway session (see below). Requires
-  `sway` on PATH - on the primary dev machine that means running it from
-  inside the toolbox (`sway` is not installed on the host), e.g.
-  `toolbox run just run`.
+- just run - builds in the toolbox, then runs carjack on the **host** (it needs
+  native host access to the GPU/DRM, NetworkManager and BlueZ, and runs its own
+  internal Smithay compositor headless on the DRM render node - no external
+  compositor). Only the build is in the toolbox. Set `CARJACK_DESKTOP_CMD`
+  (e.g. in `.env`) to a **host-installed** desktop app to stream into the
+  compositor (quote values with spaces; leave unset to stream black).
 - just test-run [timeout] - **use this instead of `just run`/bare `cargo run`
   for any live/manual testing.** carjack drives the real host NetworkManager
   and BlueZ over D-Bus - including from inside toolbox, which shares the
   host's D-Bus session - so an unguarded run can disconnect the dev machine's
   actual WiFi or leave stray processes behind if killed mid-run (this has
   happened). `test-run` caps the run to `timeout` seconds (default 60), then
-  force-kills any leftover carjack/sway processes and restores whatever
-  NetworkManager connection was active before the run, no matter how it
-  ended.
+  force-kills any leftover carjack processes and restores whatever
+  NetworkManager connection was active before the run, no matter how it ended.
+- To exercise the compositor standalone without a car: `CARJACK_TEST_COMPOSITOR=1`
+  brings it up, runs a client, and checks frames contain client content.
 
 ## CarPlay / iAP2 protocol notes
 
@@ -63,50 +66,57 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   here - check that for where things stand, and update it rather than
   duplicating its content into this file.
 
-## Screen capture & input
+## Internal compositor (`src/compositor.rs`)
 
-`src/wayland_capture.rs` talks directly to the compositor via
-`ext-image-copy-capture-v1` (capture) and `wlr-virtual-pointer-unstable-v1`
-(touch, emulated as pointer clicks/drags - there's no standalone "virtual
-touch" Wayland protocol). This needs no consent dialog, which matters on a
-headless embedded device with nobody present to click "allow". It only works
-on compositors that implement these protocols (wlroots-based ones - sway,
-cage - and KWin); GNOME/Mutter implements neither by design, so `src/main.rs`
-falls back to the xdg-desktop-portal path in `src/portal.rs` (which prompts
-for permission each run) whenever the Wayland globals aren't present.
-`xdg-desktop-portal-wlr` has never implemented the RemoteDesktop portal at
-all, so the portal fallback's touch injection only actually works under
-GNOME/KDE, not sway/cage - that's an upstream limitation, not something
-fixable from carjack.
+carjack runs its **own** minimal headless Wayland compositor (Smithay 0.7,
+GlesRenderer) rather than capturing from an external one. This is the core of
+the screen/input architecture. The old approach (`ext-image-copy-capture-v1`
+capture + `wlr-virtual-pointer` touch + xdg-desktop-portal fallback, in the now
+deleted `wayland_capture.rs`/`portal.rs`) is gone - do not resurrect it.
 
-Capture prefers DMA-BUF (GBM-allocated, **Linear modifier only**) over SHM
-when the compositor offers it - that avoids the compositor's own GPU readback
-copy, which is the meaningful zero-copy win. Only Linear is requested even when
-the compositor offers more: tested live, handing GBM the full modifier list
-picked a tiled/compressed layout unreadable outside the GPU's own pipeline.
+Why own the compositor: (1) render at the car's *exact* resolution (learned
+from AirPlay `/info` before the compositor starts) so no scaling is needed;
+(2) choose the render GPU via the DRM render node (`CARJACK_RENDER_NODE`,
+default `/dev/dri/renderD128`) - capture and encode GPU must match for
+zero-copy; (3) get frames straight from the render loop; (4) inject touch
+directly into a real `wl_touch` seat, which is **multitouch-capable** (the old
+virtual-pointer path was single-pointer only - no gestures).
 
-Do NOT try to hand the dmabuf fd straight to GStreamer as `memory:DMABuf`
-`GstMemory` (with or without `format=DMA_DRM` caps) - it was tried and reverted.
-`videoscale`/`videorate`/`videoconvert` in this build reject `memory:DMABuf`
-buffers outright ("transform could not transform ... in anything we support" /
-not-negotiated); a real fd-to-encoder zero-copy path needs DRM/VA-aware elements
-(vapostproc/glupload/v4l2) the software pipeline doesn't have. So the captured
-frame gets one CPU copy (mmap -> `Vec`) into a plain `CapturedFrame`; the
-per-push side is still zero-copy (an `Arc` refcount bump, `encode::FrameData`).
+How it works: the compositor runs its calloop event loop on a dedicated thread
+(GLES/EGL is thread-bound/`!Send`). On a **30fps timer** it composites connected
+clients into a Linear dmabuf via `render_output`, reads it back to a
+`CapturedFrame` (`Vec<u8>`, BGRx) with `ExportMem::copy_framebuffer`, and
+publishes it on a `watch` channel that `encode.rs` consumes. Rendering on our
+own timer (not on client damage) means a static desktop still emits frames -
+the car tears the session down after ~1s without video, and this is what keeps
+it fed (no separate repeater needed on the capture side, though the encode
+feeder still re-pushes latest at 30fps). Clients are mapped fullscreen at the
+output size (single-app kiosk). `main.rs` launches the app to stream via
+`CARJACK_DESKTOP_CMD` (run through `sh -c`, `WAYLAND_DISPLAY` pointed at the
+compositor's socket). Dropping the `Compositor` handle stops the loop and joins
+the thread - important because the session flow restarts on failure.
 
-**Critical (this cost a long debugging session):** `ext-image-copy-capture`
-only produces a new frame when the output actually changes (damage). A static
-desktop yields exactly ONE frame and then capture blocks. But the car tears the
-session down if it gets no video for ~1s. So `encode.rs` runs a **repeater**: a
-30fps timer that re-pushes the *latest* captured frame into the appsrc
-regardless of whether a new one arrived. Never revert to a "push only when a new
-frame arrives" feeder - it looks fine on an animated desktop and silently dies
-on a static one. (This is also why the working `pipewiresrc` path "just worked":
-pipewiresrc provides its own clock/timestamps and steady buffer flow.) The
-appsrc also needs `do-timestamp=true` - buffers are pushed with no PTS, and
-without it videorate stalls and nothing reaches the encoder.
+The frame currently takes one CPU copy (GPU readback to `Vec`) because the
+software GStreamer encode path can't consume dmabuf directly (see the encode
+notes below). Full GPU zero-copy (forward the compositor's dmabuf fd straight to
+a hardware encoder on the same GPU) is the remaining optimization, gated on the
+capability-probed hardware backends in `encode.rs`.
 
-Touch coordinates (`TouchEvent.x`/`.y`) are passed straight through as pixel
-coordinates in the captured/output space, unscaled - the same assumption the
-portal path already made. This hasn't been validated against a real car head
-unit's actual touch coordinate range/scale.
+### encode.rs gotchas (still apply)
+- Do NOT hand a dmabuf to `videoscale`/`videorate`/`videoconvert` as
+  `memory:DMABuf` (with or without `format=DMA_DRM`) - they reject it outright
+  (not-negotiated). A real fd-to-encoder zero-copy path needs DRM/VA-aware
+  elements (vapostproc/v4l2/glupload) - that's what `HW_BACKENDS` is for.
+- The appsrc needs `do-timestamp=true`: buffers are pushed with no PTS and
+  without it `videorate` stalls and nothing reaches the encoder.
+
+### Unverified
+- **Frame orientation**: GL renders bottom-up; `copy_framebuffer` readback
+  orientation hasn't been checked against content with a clear top/bottom. If
+  the car shows an upside-down image it's a one-line output-transform fix.
+- **Touch**: multitouch is correct by construction (CarPlay per-finger slot ->
+  `wl_touch` slot) but not yet validated end-to-end against a real client/car.
+  Coordinates (`TouchEvent.x`/`.y`) are passed through as output-space pixels,
+  unscaled - unverified against the car's actual touch range. `inject_touch`
+  calls `frame()` per event; batching simultaneous points under one frame would
+  be crisper if the car bursts multi-point updates.
