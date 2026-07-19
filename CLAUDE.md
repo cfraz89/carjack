@@ -96,6 +96,16 @@ output size (single-app kiosk). `main.rs` launches the app to stream via
 compositor's socket). Dropping the `Compositor` handle stops the loop and joins
 the thread - important because the session flow restarts on failure.
 
+Globals advertised: `wl_compositor`/`wl_subcompositor`, `wl_shm`, `xdg_wm_base`,
+`wl_seat`, `wl_output`+`xdg_output`, `wl_data_device_manager`, and
+**`zwp_linux_dmabuf_v1`** (formats from the GlesRenderer). The dmabuf global is
+required for GPU-accelerated clients - Waydroid in particular renders Android on
+the GPU and can't display at all without it (`DmabufHandler::dmabuf_imported`
+validates by importing into the renderer). Note: Waydroid needs
+`CARJACK_DESKTOP_CMD="waydroid show-full-ui"` (bare `waydroid` just prints help)
+and takes ~20-30s to boot Android (black until then; not a teardown - the
+compositor keeps emitting frames throughout).
+
 The frame currently takes one CPU copy (GPU readback to `Vec`) because the
 software GStreamer encode path can't consume dmabuf directly (see the encode
 notes below). Full GPU zero-copy (forward the compositor's dmabuf fd straight to
