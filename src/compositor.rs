@@ -322,11 +322,32 @@ fn run(
     let gbm = GbmDevice::new(device_fd).map_err(|e| eyre!("create GbmDevice: {e}"))?;
     let renderer = make_renderer(&gbm)?;
 
+    // Allocate the render target with a modifier the GPU can actually render *into*. NVIDIA
+    // can't render into a Linear dmabuf ("EGLImage not supported") but can into its own tiled
+    // modifiers; Intel handles both. GL readback (copy_framebuffer) works regardless of the
+    // modifier, so this only broadens hardware support. Fall back to Linear if the driver
+    // advertises no renderable modifiers for the format.
+    let render_modifiers: Vec<smithay::backend::allocator::Modifier> = renderer
+        .egl_context()
+        .dmabuf_render_formats()
+        .iter()
+        .filter(|f| f.code == Fourcc::Argb8888)
+        .map(|f| f.modifier)
+        .collect();
+    tracing::info!(
+        "compositor: {} renderable Argb8888 modifier(s) on this GPU",
+        render_modifiers.len()
+    );
+    let mut allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING);
+    let modifiers: &[smithay::backend::allocator::Modifier] = if render_modifiers.is_empty() {
+        &[smithay::backend::allocator::Modifier::Linear]
+    } else {
+        &render_modifiers
+    };
     // One reused render target: we read it back to system memory synchronously each frame
     // before rendering again, so there's no aliasing and a pool isn't needed.
-    let mut allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING);
     let gbm_buffer = allocator
-        .create_buffer(width, height, Fourcc::Argb8888, &[smithay::backend::allocator::Modifier::Linear])
+        .create_buffer(width, height, Fourcc::Argb8888, modifiers)
         .map_err(|e| eyre!("allocate render buffer: {e}"))?;
     let render_dmabuf = gbm_buffer.export().map_err(|e| eyre!("export dmabuf: {e}"))?;
 
