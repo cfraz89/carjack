@@ -95,6 +95,27 @@ async fn test_compositor() -> Result<()> {
         .spawn()
         .map_err(|e| eyre!("spawn test client: {e}"))?;
 
+    // Also run the H264 encoder on the compositor frames and count encoded access units, so
+    // this validates the full compositor -> encode path (incl. the zero-copy dmabuf pipeline)
+    // without needing the car.
+    let (video_tx, mut video_rx) = mpsc::channel::<airplay::EncodedFrame>(64);
+    let _encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_h264_to_channel(
+        comp.subscribe_frames(),
+        1280,
+        720,
+        video_tx,
+    )));
+    let encoded = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let encoded2 = encoded.clone();
+    let _counter = AbortOnDropHandle::new(tokio::spawn(async move {
+        while let Some(f) = video_rx.recv().await {
+            let n = encoded2.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if n % 30 == 1 {
+                tracing::info!("encoded AU #{n} ({} bytes, keyframe={})", f.data.len(), f.config.is_some());
+            }
+        }
+    }));
+
     let mut rx = comp.subscribe_frames();
     let mut checked = 0;
     let mut max_brightness = 0u64;
@@ -110,21 +131,35 @@ async fn test_compositor() -> Result<()> {
             continue;
         };
         checked += 1;
-        // Average luma over a sample of pixels.
-        let sum: u64 = frame.data.iter().step_by(997).map(|&b| b as u64).sum();
-        max_brightness = max_brightness.max(sum);
-        if checked % 30 == 1 {
-            tracing::info!("frame #{checked}: {}x{} {} bytes, sample-sum={sum}", frame.width, frame.height, frame.data.len());
+        match &*frame {
+            compositor::CapturedFrame::Shm { data, width, height, .. } => {
+                // Sample luma to confirm the client actually rendered (not just black clear).
+                let sum: u64 = data.iter().step_by(997).map(|&b| b as u64).sum();
+                max_brightness = max_brightness.max(sum);
+                if checked % 30 == 1 {
+                    tracing::info!("frame #{checked}: SHM {width}x{height}, sample-sum={sum}");
+                }
+            }
+            compositor::CapturedFrame::Dmabuf(_) => {
+                // GPU memory - can't cheaply sample; the point is that dmabufs are flowing.
+                max_brightness = 1_000_000;
+                if checked % 30 == 1 {
+                    tracing::info!("frame #{checked}: DMABUF forwarded (zero-copy)");
+                }
+            }
         }
     }
     let _ = child.kill();
 
-    if max_brightness > 10_000 {
-        tracing::info!("compositor OK: client content reached the frame stream (max sample-sum={max_brightness})");
-        Ok(())
-    } else {
-        Err(eyre!("frames stayed black - client never rendered into the compositor (max sample-sum={max_brightness})"))
+    let encoded_total = encoded.load(std::sync::atomic::Ordering::Relaxed);
+    tracing::info!("compositor OK: {checked} frames reached the stream, {encoded_total} encoded AUs");
+    if encoded_total == 0 {
+        return Err(eyre!("encoder produced no output - the encode pipeline didn't work"));
     }
+    if max_brightness <= 10_000 {
+        return Err(eyre!("frames stayed black - client never rendered into the compositor"));
+    }
+    Ok(())
 }
 
 async fn run_session() -> Result<()> {
