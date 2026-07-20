@@ -32,8 +32,11 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   happened). `test-run` caps the run to `timeout` seconds (default 60), then
   force-kills any leftover carjack processes and restores whatever
   NetworkManager connection was active before the run, no matter how it ended.
-- To exercise the compositor standalone without a car: `CARJACK_TEST_COMPOSITOR=1`
-  brings it up, runs a client, and checks frames contain client content.
+- To exercise the compositor standalone without a car: `just test compositor`
+  (the `tests/compositor.rs` integration test) brings it up, runs a client, and
+  checks the composited frames contain client content and drive the encode path.
+  `CARJACK_DESKTOP_CMD` overrides the test client; `CARJACK_TEST_FRAMES` caps the
+  frames sampled. It needs host GPU/DRM at runtime.
 
 ## CarPlay / iAP2 protocol notes
 
