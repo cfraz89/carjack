@@ -252,6 +252,10 @@ async fn run_session() -> Result<()> {
 
     // If the car later drops Bluetooth on its own, that's not fatal - keep streaming.
     let mut carplay_done = false;
+    // touch_tx lives on the AirPlay/HID side (see start_video_stream), not on carplay_handle,
+    // so it's tracked separately - gating it on carplay_done (as before) meant a BT drop
+    // silently killed touch for the rest of the session even though it kept working fine.
+    let mut touch_done = false;
 
     loop {
         tokio::select! {
@@ -269,10 +273,10 @@ async fn run_session() -> Result<()> {
                 result?;
                 return Ok(());
             }
-            touch = touch_rx.recv(), if !carplay_done => {
+            touch = touch_rx.recv(), if !touch_done => {
                 match touch {
                     Some(event) => compositor.send_touch(&event)?,
-                    None => carplay_done = true,
+                    None => touch_done = true,
                 }
             }
         }
