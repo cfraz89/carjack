@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+use std::os::unix::process::CommandExt;
 use std::time::Duration;
 
 use eyre::{Result, eyre};
@@ -8,7 +10,10 @@ use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 
 use libcarjack::carplay_ctrl::wait_for_carplay_ctrl_probe;
 
-use carjack::{compositor::Compositor, encode};
+use carjack::compositor::Compositor;
+use carjack::config::{Cli, Config};
+use carjack::encode::{self, EncodeBackend};
+use clap::Parser;
 
 use crate::{
     wifi_connect::{CarWifi, connect_to_car_wifi},
@@ -19,23 +24,66 @@ mod usb;
 mod wifi_connect;
 mod wireless;
 
-/// Launch the desktop app(s) to stream, pointed at our internal compositor's Wayland socket.
-/// `CARJACK_DESKTOP_CMD` is run via `sh -c` (e.g. a launcher or a single kiosk app); if unset,
-/// nothing is launched and the compositor streams a black screen until a client connects.
-fn spawn_desktop_apps(socket_name: &std::ffi::OsStr) {
-    let Ok(cmd) = std::env::var("CARJACK_DESKTOP_CMD") else {
-        tracing::warn!("CARJACK_DESKTOP_CMD not set - no desktop app launched, streaming black");
-        return;
-    };
-    tracing::info!("Launching desktop app: {cmd}");
-    match std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd)
-        .env("WAYLAND_DISPLAY", socket_name)
-        .spawn()
-    {
-        Ok(_) => {}
-        Err(e) => tracing::warn!("failed to launch desktop app '{cmd}': {e}"),
+/// The desktop app streamed into the compositor. Owns the child process so it's killed on exit
+/// (Drop) and can be relaunched on a resize (for apps that fix their resolution at boot).
+struct DesktopApp {
+    command: String,
+    socket: OsString,
+    child: Option<std::process::Child>,
+}
+
+impl DesktopApp {
+    fn new(command: String, socket: OsString) -> Self {
+        DesktopApp {
+            command,
+            socket,
+            child: None,
+        }
+    }
+
+    /// (Re)launch the app: kill any running instance first, then spawn a fresh one pointed at the
+    /// compositor socket.
+    fn launch(&mut self) {
+        self.kill();
+        tracing::info!("Launching desktop app: {0}", self.command);
+        // `exec` so the child *is* the app (not an intermediate `sh`), and its own process group
+        // so `kill` reaches the whole tree.
+        match std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("exec {0}", self.command))
+            .env("WAYLAND_DISPLAY", &self.socket)
+            .process_group(0)
+            .spawn()
+        {
+            Ok(child) => self.child = Some(child),
+            Err(e) => tracing::warn!("failed to launch desktop app '{0}': {e}", self.command),
+        }
+    }
+
+    /// Whether the app is currently running (spawned and not yet exited).
+    fn is_running(&mut self) -> bool {
+        match &mut self.child {
+            // `try_wait` -> Ok(None) means still running; Ok(Some(_))/Err means it exited.
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+
+    /// Kill the running app (its whole process group) and reap it.
+    fn kill(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        // SIGKILL the process group (negative pid); the child leads its own group.
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        let _ = child.kill(); // fallback if the group signal missed the leader
+        let _ = child.wait();
+    }
+}
+
+impl Drop for DesktopApp {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -50,24 +98,82 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    let config = Config::load(&Cli::parse())?;
+
+    // Resolve which GPU to render + encode on, then decide the encode backend (this is where
+    // zerocopy=auto falls back to software, or zerocopy=true errors out).
+    let render_node = carjack::config::resolve_render_node(&config.graphics.drm_device)?;
+    let backend = encode::resolve_backend(config.graphics.zerocopy, &render_node)?;
+    tracing::info!(
+        "Render node: {render_node}, encode backend: {}",
+        backend.describe()
+    );
+
+    // Start the internal compositor at the configured default size. It persists across session
+    // restarts and is reconfigured to the car's resolution once AirPlay reports it.
+    let compositor = Compositor::start(
+        render_node,
+        backend.is_zero_copy(),
+        config.display.width,
+        config.display.height,
+        config.display.fps,
+    )?;
+    let mut app = DesktopApp::new(
+        config.desktop_command().to_owned(),
+        compositor.socket_name.clone(),
+    );
+    // A resizable app launches now (up front, so slow apps like Waydroid boot during the BT/WiFi
+    // phase and resize themselves when the car's size arrives). A non-resizable app (can't
+    // live-resize) is held back until we know the resolution - launched after the first
+    // reconfigure in `run_session`.
+    if config.app.resizable {
+        app.launch();
+    }
+
     // Each session runs the full flow (Bluetooth -> WiFi -> AirPlay). If it fails - most
     // importantly when the car tears down the screen socket - restart from a fresh Bluetooth
-    // connection rather than exiting.
-    loop {
-        match run_session().await {
-            Ok(()) => {
-                tracing::info!("Session ended cleanly, exiting");
-                return Ok(());
+    // connection rather than exiting. Ctrl-C breaks out and cleans up (compositor thread joined,
+    // app killed) via the drops below.
+    let exit = loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("Ctrl-C received, shutting down");
+                break Ok(());
             }
-            Err(e) => {
-                tracing::warn!("Session failed, restarting from Bluetooth: {e}");
-                tokio::time::sleep(Duration::from_secs(2)).await;
+            result = run_session(&compositor, &backend, &config, &mut app) => {
+                match result {
+                    Ok(()) => {
+                        tracing::info!("Session ended cleanly, exiting");
+                        break Ok(());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Session failed, restarting from Bluetooth: {e}");
+                        // Cancellable backoff so Ctrl-C during the retry wait still exits promptly.
+                        tokio::select! {
+                            _ = tokio::signal::ctrl_c() => {
+                                tracing::info!("Ctrl-C received, shutting down");
+                                break Ok(());
+                            }
+                            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                        }
+                    }
+                }
             }
         }
-    }
+    };
+
+    // Deterministic cleanup (Drop would also handle these, but do it before returning).
+    app.kill();
+    drop(compositor);
+    exit
 }
 
-async fn run_session() -> Result<()> {
+async fn run_session(
+    compositor: &Compositor,
+    backend: &EncodeBackend,
+    config: &Config,
+    app: &mut DesktopApp,
+) -> Result<()> {
     let (touch_tx, mut touch_rx) = mpsc::channel::<TouchEvent>(64);
     let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCredentials>(4);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
@@ -83,9 +189,8 @@ async fn run_session() -> Result<()> {
     // AbortOnDropHandle guarantees the task (and its BlueZ resources) is torn down when this
     // function returns - e.g. before a session restart - rather than detached like a plain
     // JoinHandle.
-    let mut carplay_handle = AbortOnDropHandle::new(tokio::spawn(wireless_carplay(
-        wifi_tx, ready_tx, bt_mac_tx,
-    )));
+    let mut carplay_handle =
+        AbortOnDropHandle::new(tokio::spawn(wireless_carplay(wifi_tx, ready_tx, bt_mac_tx)));
 
     let mut wifi_handle: Option<tokio::task::JoinHandle<Result<CarWifi>>> = None;
     let mut ready_rx = Some(ready_rx);
@@ -135,21 +240,29 @@ async fn run_session() -> Result<()> {
 
     // Advertise _carplay-ctrl._tcp via mDNS, wait for the car's GET /ctrl-int/1/connect,
     // and use its matching _airplay._tcp Bonjour record for the real peer address + HomeKit id.
-    let (peer_addr, remote_homekit_id) = match wait_for_carplay_ctrl_probe(&car_wifi.iface, &bt_mac).await {
-        Ok(result) => result,
-        Err(e) => {
-            tracing::warn!("CarPlay Ctrl probe failed, falling back to guessed gateway: {e}");
-            (std::net::SocketAddr::new(car_wifi.ip, 7000), None)
-        }
-    };
+    let (peer_addr, remote_homekit_id) =
+        match wait_for_carplay_ctrl_probe(&car_wifi.iface, &bt_mac).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::warn!("CarPlay Ctrl probe failed, falling back to guessed gateway: {e}");
+                (std::net::SocketAddr::new(car_wifi.ip, 7000), None)
+            }
+        };
 
-    // Phase 3: connect AirPlay to learn the car's display size, then launch our internal
-    // compositor sized to it, point the desktop app(s) at it, and stream its composited
-    // frames. Learning the resolution first lets the compositor render at exactly the car's
-    // size (no scaling) - and owning the compositor is what makes the desktop appear at all.
+    // Phase 3: connect AirPlay to learn the car's display size + refresh, then reconfigure the
+    // already-running compositor (and its client) to exactly match - so it renders at the car's
+    // size and rate, no scaling needed downstream. The compositor + desktop app were started at
+    // launch, so the app is already up; this just resizes it.
     let conn = libcarjack::airplay::connect_airplay(peer_addr, remote_homekit_id).await?;
-    let compositor = Compositor::start(conn.width, conn.height)?;
-    spawn_desktop_apps(&compositor.socket_name);
+    let resized = compositor.reconfigure(conn.width, conn.height, conn.max_fps)?;
+    // A resizable app is already running and resizes itself - leave it. A non-resizable app is
+    // (re)launched here at the now-known resolution: on the first session it wasn't started yet;
+    // on a reconnect it's only relaunched if the size actually changed (else it's still running
+    // at the right size).
+    if !config.app.resizable && (resized || !app.is_running()) {
+        tracing::info!("launching desktop app at {}x{}", conn.width, conn.height);
+        app.launch();
+    }
     let frame_rx = compositor.subscribe_frames();
 
     // Encode the compositor's frames to H264 on its own task (so it keeps buffering through
@@ -160,6 +273,7 @@ async fn run_session() -> Result<()> {
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_h264_to_channel(
         frame_rx,
         video_tx,
+        backend.clone(),
     )));
     let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx);
     tokio::pin!(video);

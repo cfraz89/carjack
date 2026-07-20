@@ -11,15 +11,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use carjack::compositor::{CapturedFrame, Compositor};
-use carjack::encode::encode_h264_to_channel;
+use carjack::config::{Cli, Config};
+use carjack::encode::{encode_h264_to_channel, resolve_backend, EncodeBackend};
+use clap::Parser;
 use eyre::{eyre, Result};
 use libcarjack::airplay::EncodedFrame;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
+/// Resolve the render node + encode backend the same way `main` does (from config/env), so the
+/// test exercises the real selection path. Returns (node, backend).
+fn resolve_gpu() -> Result<(String, EncodeBackend)> {
+    // Empty CLI: config comes from defaults + CARJACK_* env vars (see the test's env).
+    let cfg = Config::load(&Cli::parse_from(["carjack"]))?;
+    let node = carjack::config::resolve_render_node(&cfg.graphics.drm_device)?;
+    let backend = resolve_backend(cfg.graphics.zerocopy, &node)?;
+    Ok((node, backend))
+}
+
 #[tokio::test]
 async fn compositor_frames_contain_client_content() -> Result<()> {
-    let comp = Compositor::start(1280, 720)?;
+    let (node, backend) = resolve_gpu()?;
+    let comp = Compositor::start(node, backend.is_zero_copy(), 1280, 720, 30)?;
     tracing::info!("compositor started, socket={:?}", comp.socket_name);
 
     // Use the configured desktop app if set (so this validates the real CARJACK_DESKTOP_CMD),
@@ -41,6 +54,7 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
     let _encoder = AbortOnDropHandle::new(tokio::spawn(encode_h264_to_channel(
         comp.subscribe_frames(),
         video_tx,
+        backend.clone(),
     )));
     let encoded = Arc::new(AtomicU64::new(0));
     let encoded2 = encoded.clone();
@@ -99,4 +113,46 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
     assert!(encoded_total > 0, "encoder produced no output - the encode pipeline didn't work");
     assert!(max_brightness > 10_000, "frames stayed black - client never rendered into the compositor");
     Ok(())
+}
+
+/// The car's real display size/refresh arrive after startup, so the compositor starts at a
+/// default and is reconfigured. Verify a live `reconfigure` actually switches the frame stream to
+/// the new dimensions (no client needed - the compositor renders at the output size regardless).
+#[tokio::test]
+async fn reconfigure_switches_frame_size() -> Result<()> {
+    let (node, backend) = resolve_gpu()?;
+    let comp = Compositor::start(node, backend.is_zero_copy(), 1280, 720, 30)?;
+    let mut rx = comp.subscribe_frames();
+
+    // First frame should be at the start size.
+    let start = wait_for_frame_size(&mut rx).await?;
+    assert_eq!(start, (1280, 720), "initial frame was not at the start size");
+
+    // Reconfigure to a different size + refresh; frames must switch to it.
+    comp.reconfigure(800, 480, 60)?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "frames never switched to the reconfigured size"
+        );
+        if wait_for_frame_size(&mut rx).await? == (800, 480) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Await the next published frame and return its pixel dimensions (works for both the SHM
+/// readback and the zero-copy dmabuf frame variants).
+async fn wait_for_frame_size(
+    rx: &mut tokio::sync::watch::Receiver<Option<Arc<CapturedFrame>>>,
+) -> Result<(u32, u32)> {
+    use smithay::backend::allocator::Buffer as _;
+    rx.changed().await?;
+    let frame = rx.borrow_and_update().clone().ok_or_else(|| eyre!("frame was None"))?;
+    Ok(match &*frame {
+        CapturedFrame::Shm { width, height, .. } => (*width, *height),
+        CapturedFrame::Dmabuf(d) => (d.width(), d.height()),
+    })
 }

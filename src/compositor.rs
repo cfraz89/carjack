@@ -91,6 +91,19 @@ struct Ready {
     loop_signal: LoopSignal,
 }
 
+/// A request to re-size/re-time the running compositor. Sent from the session thread once the
+/// car's real display parameters are known; `ack` reports success/failure back to the caller so
+/// [`Compositor::reconfigure`] can block until the new mode is live.
+struct ReconfigureRequest {
+    width: u32,
+    height: u32,
+    /// Refresh rate in fps; `0` (car didn't report one) falls back to the default.
+    fps: u32,
+    /// Reports back `Ok(true)` if the mode actually changed, `Ok(false)` if it was already at
+    /// these parameters, or the failure.
+    ack: std::sync::mpsc::Sender<std::result::Result<bool, String>>,
+}
+
 /// Handle to a running internal compositor. Owns the frame stream and the touch input channel;
 /// the compositor itself runs on its own thread. Dropping it stops that thread (important: the
 /// session flow restarts on failure, so a leaked compositor per restart would pile up).
@@ -99,16 +112,28 @@ pub struct Compositor {
     pub socket_name: OsString,
     frame_rx: tokio::sync::watch::Receiver<Option<Arc<CapturedFrame>>>,
     touch_tx: calloop::channel::Sender<TouchEvent>,
+    control_tx: calloop::channel::Sender<ReconfigureRequest>,
     loop_signal: LoopSignal,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Compositor {
-    /// Start a headless compositor rendering at `width`x`height` on the configured GPU render
-    /// node. Blocks until the compositor is up and its socket is listening.
-    pub fn start(width: u32, height: u32) -> Result<Compositor> {
+    /// Start a headless compositor rendering at `width`x`height` @ `fps` on `render_node`.
+    /// `zero_copy` selects whether it forwards its rendered dmabuf (for a same-GPU hardware
+    /// encoder) or reads frames back to system memory (software encode) - it must match the
+    /// resolved encode backend. Blocks until the compositor is up and its socket is listening. The
+    /// size/rate are a starting point - call [`reconfigure`](Self::reconfigure) once the car's
+    /// real display parameters are known.
+    pub fn start(
+        render_node: String,
+        zero_copy: bool,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<Compositor> {
         let (frame_tx, frame_rx) = tokio::sync::watch::channel(None);
         let (touch_tx, touch_rx) = calloop::channel::channel::<TouchEvent>();
+        let (control_tx, control_rx) = calloop::channel::channel::<ReconfigureRequest>();
         // Setup runs on the compositor thread; it reports readiness (or a setup error) back
         // here so `start` can return a ready-to-use handle.
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<Ready>>();
@@ -116,7 +141,10 @@ impl Compositor {
         let thread = std::thread::Builder::new()
             .name("carjack-compositor".into())
             .spawn(move || {
-                if let Err(e) = run(width, height, frame_tx, touch_rx, &ready_tx) {
+                if let Err(e) = run(
+                    render_node, zero_copy, width, height, fps, frame_tx, touch_rx, control_rx,
+                    &ready_tx,
+                ) {
                     let _ = ready_tx.send(Err(e));
                 }
             })
@@ -130,6 +158,7 @@ impl Compositor {
             socket_name: ready.socket_name,
             frame_rx,
             touch_tx,
+            control_tx,
             loop_signal: ready.loop_signal,
             thread: Some(thread),
         })
@@ -143,6 +172,20 @@ impl Compositor {
         self.touch_tx
             .send(event.clone())
             .map_err(|e| eyre!("send touch to compositor: {e}"))
+    }
+
+    /// Re-size and re-time the running compositor to the car's real display parameters. Blocks
+    /// until the compositor thread has applied the new mode (or reports the failure). Returns
+    /// whether the mode actually changed (`false` = it was already at these parameters).
+    pub fn reconfigure(&self, width: u32, height: u32, fps: u32) -> Result<bool> {
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        self.control_tx
+            .send(ReconfigureRequest { width, height, fps, ack: ack_tx })
+            .map_err(|e| eyre!("send reconfigure to compositor: {e}"))?;
+        ack_rx
+            .recv()
+            .map_err(|_| eyre!("compositor thread exited before reconfigure ack"))?
+            .map_err(|e| eyre!("compositor reconfigure failed: {e}"))
     }
 }
 
@@ -158,15 +201,13 @@ impl Drop for Compositor {
     }
 }
 
-/// Open the DRM render node to render on. Defaults to the first render node; overridable so we
-/// can pin the compositor to the same GPU as the encoder (the zero-copy requirement).
-fn open_render_node() -> Result<std::fs::File> {
-    let path =
-        std::env::var("CARJACK_RENDER_NODE").unwrap_or_else(|_| "/dev/dri/renderD128".to_string());
+/// Open the DRM render node to render on. Must be the same GPU as the encoder (the zero-copy
+/// requirement); the concrete node is resolved from config in `main` and passed in.
+fn open_render_node(path: &str) -> Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&path)
+        .open(path)
         .map_err(|e| eyre!("open render node {path}: {e}"))
 }
 
@@ -217,6 +258,13 @@ struct State {
     zero_copy: bool,
     damage_tracker: OutputDamageTracker,
     frame_tx: tokio::sync::watch::Sender<Option<Arc<CapturedFrame>>>,
+    /// Kept so `reconfigure` can re-allocate the render pool at a new size (with the same
+    /// modifiers chosen for this GPU at startup).
+    allocator: GbmAllocator<DrmDeviceFd>,
+    modifiers: Vec<smithay::backend::allocator::Modifier>,
+    /// Current render-timer period (derived from the car's refresh rate); read by the timer each
+    /// tick so `reconfigure` can change the framerate live.
+    frame_interval: Duration,
 }
 
 impl State {
@@ -295,6 +343,62 @@ impl State {
         let _ = self.display_handle.flush_clients();
     }
 
+    /// Re-size/re-time the compositor to the car's real display parameters (learned from AirPlay
+    /// after startup). Reallocates the render pool at the new size, updates the output mode + the
+    /// render-timer period, and reconfigures mapped clients to the new fullscreen size. Runs on
+    /// the compositor thread. Returns the error as a `String` so it can cross the ack channel.
+    fn reconfigure(&mut self, width: u32, height: u32, fps: u32) -> std::result::Result<bool, String> {
+        let fps = if fps == 0 { TARGET_FPS as u32 } else { fps };
+        let frame_interval = Duration::from_micros(1_000_000 / fps as u64);
+        if self.width == width as i32 && self.height == height as i32 && self.frame_interval == frame_interval {
+            return Ok(false); // already at these parameters
+        }
+        tracing::info!("compositor: reconfiguring to {width}x{height} @ {fps}fps");
+
+        // Reallocate the render pool at the new size (same count + modifiers as at startup). Do
+        // this first so a failure leaves the old pool/mode untouched.
+        let pool_size = self.render_pool.len();
+        let mut new_pool = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            let buffer = self
+                .allocator
+                .create_buffer(width, height, Fourcc::Argb8888, &self.modifiers)
+                .map_err(|e| format!("allocate render buffer: {e}"))?;
+            new_pool.push(buffer.export().map_err(|e| format!("export dmabuf: {e}"))?);
+        }
+        self.render_pool = new_pool;
+        self.pool_idx = 0;
+        self.width = width as i32;
+        self.height = height as i32;
+        self.frame_interval = frame_interval;
+
+        // Update the output mode (size + refresh) and rebuild the size-specific damage tracker.
+        let mode = Mode { size: (width as i32, height as i32).into(), refresh: fps as i32 * 1000 };
+        self.output
+            .change_current_state(Some(mode), Some(Transform::Normal), None, Some((0, 0).into()));
+        self.output.set_preferred(mode);
+        self.damage_tracker = OutputDamageTracker::from_output(&self.output);
+
+        // Reconfigure every mapped client to the new fullscreen size.
+        let size = (self.width, self.height);
+        for window in self.space.elements() {
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|s| {
+                    s.size = Some(size.into());
+                    s.states.set(xdg_toplevel::State::Fullscreen);
+                    s.states.set(xdg_toplevel::State::Activated);
+                });
+                toplevel.send_configure();
+            }
+        }
+
+        // Publish a frame at the new size immediately so a subscriber that connects right after
+        // this returns (the encoder does) latches its caps onto the new dimensions, not a stale
+        // pre-resize frame still sitting in the watch channel.
+        self.render_and_publish();
+        Ok(true)
+    }
+
     fn inject_touch(&mut self, event: TouchEvent) {
         let Some(touch) = self.seat.get_touch() else {
             tracing::warn!("inject_touch: seat has no touch handle");
@@ -332,14 +436,20 @@ impl State {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
+    render_node: String,
+    zero_copy: bool,
     width: u32,
     height: u32,
+    fps: u32,
     frame_tx: tokio::sync::watch::Sender<Option<Arc<CapturedFrame>>>,
     touch_rx: calloop::channel::Channel<TouchEvent>,
+    control_rx: calloop::channel::Channel<ReconfigureRequest>,
     ready_tx: &std::sync::mpsc::Sender<Result<Ready>>,
 ) -> Result<()> {
-    let file = open_render_node()?;
+    let fps = fps.max(1);
+    let file = open_render_node(&render_node)?;
     let device_fd = DrmDeviceFd::new(smithay::utils::DeviceFd::from(OwnedFd::from(file)));
     let gbm = GbmDevice::new(device_fd).map_err(|e| eyre!("create GbmDevice: {e}"))?;
     let renderer = make_renderer(&gbm)?;
@@ -361,20 +471,20 @@ fn run(
         render_modifiers.len()
     );
     let mut allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING);
-    let modifiers: &[smithay::backend::allocator::Modifier] = if render_modifiers.is_empty() {
-        &[smithay::backend::allocator::Modifier::Linear]
+    // Kept (owned) so `reconfigure` can re-allocate the pool at a new size later.
+    let modifiers: Vec<smithay::backend::allocator::Modifier> = if render_modifiers.is_empty() {
+        vec![smithay::backend::allocator::Modifier::Linear]
     } else {
-        &render_modifiers
+        render_modifiers
     };
     // Zero-copy mode forwards each rendered dmabuf to the encoder, which holds it until
     // consumed - so we cycle through a small pool. The CPU-readback path reuses a single buffer
     // (readback is synchronous, no aliasing).
-    let zero_copy = std::env::var("CARJACK_ZEROCOPY").is_ok();
     let pool_size = if zero_copy { 4 } else { 1 };
     let mut render_pool = Vec::with_capacity(pool_size);
     for _ in 0..pool_size {
         let gbm_buffer = allocator
-            .create_buffer(width, height, Fourcc::Argb8888, modifiers)
+            .create_buffer(width, height, Fourcc::Argb8888, &modifiers)
             .map_err(|e| eyre!("allocate render buffer: {e}"))?;
         render_pool.push(gbm_buffer.export().map_err(|e| eyre!("export dmabuf: {e}"))?);
     }
@@ -417,7 +527,7 @@ fn run(
         },
     );
     let _output_global = output.create_global::<State>(&dh);
-    let mode = Mode { size: (width as i32, height as i32).into(), refresh: (TARGET_FPS as i32) * 1000 };
+    let mode = Mode { size: (width as i32, height as i32).into(), refresh: fps as i32 * 1000 };
     output.change_current_state(Some(mode), Some(Transform::Normal), None, Some((0, 0).into()));
     output.set_preferred(mode);
 
@@ -463,11 +573,35 @@ fn run(
         })
         .map_err(|e| eyre!("insert touch source: {e}"))?;
 
-    let frame_interval = Duration::from_micros(1_000_000 / TARGET_FPS);
+    // Reconfigure requests (resolution/refresh learned from AirPlay after startup).
+    loop_handle
+        .insert_source(control_rx, |event, _, state: &mut State| {
+            if let calloop::channel::Event::Msg(req) = event {
+                let res = state.reconfigure(req.width, req.height, req.fps);
+                if let Err(ref e) = res {
+                    tracing::warn!("compositor: reconfigure failed: {e}");
+                }
+                let _ = req.ack.send(res);
+            }
+        })
+        .map_err(|e| eyre!("insert control source: {e}"))?;
+
+    // Render on an *absolute* schedule: rearm to the next fixed deadline rather than
+    // "now + interval". A relative rearm would add each frame's render time to the period, so the
+    // effective rate would sag below target and jitter with load - a stutter source. Advancing a
+    // fixed deadline keeps a steady cadence (resyncing only if we genuinely fall a frame behind).
+    // The interval is re-read from `state.frame_interval` so `reconfigure` can change it live.
+    let frame_interval = Duration::from_micros(1_000_000 / fps as u64);
+    let mut next_deadline = std::time::Instant::now() + frame_interval;
     loop_handle
         .insert_source(Timer::from_duration(frame_interval), move |_, _, state: &mut State| {
             state.render_and_publish();
-            TimeoutAction::ToDuration(frame_interval)
+            let now = std::time::Instant::now();
+            next_deadline += state.frame_interval;
+            if next_deadline <= now {
+                next_deadline = now + state.frame_interval;
+            }
+            TimeoutAction::ToInstant(next_deadline)
         })
         .map_err(|e| eyre!("insert render timer: {e}"))?;
 
@@ -495,6 +629,9 @@ fn run(
         zero_copy,
         damage_tracker,
         frame_tx,
+        allocator,
+        modifiers,
+        frame_interval,
     };
 
     tracing::info!(

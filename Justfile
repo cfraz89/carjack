@@ -1,18 +1,10 @@
 set dotenv-load
 mod armbian
 
-# Environment variables to forward when running inside a toolbox (toolbox run may not
-# pass through arbitrary env vars from .env by default).
-_run_rust_log := env('RUST_LOG', '')
-_run_desktop_cmd := env('CARJACK_DESKTOP_CMD', '')
-_run_zerocopy := env('CARJACK_ZEROCOPY', '')
-_run_render_node := env('CARJACK_RENDER_NODE', '')
-run_env := f'RUST_LOG="{{_run_rust_log}}" CARJACK_DESKTOP_CMD="{{_run_desktop_cmd}}" CARJACK_ZEROCOPY="{{_run_zerocopy}}" CARJACK_RENDER_NODE="{{_run_render_node}}"'
-
 toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }
-toolbox_run := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_RUN', '') == 'true' { 'toolbox run env ' + run_env + ' ' } else { '' }
+toolbox_run := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_RUN', '') == 'true' { f'toolbox run env RUST_LOG="{{env('RUST_LOG', '')}}" ' } else { '' }
 
-run $GST_DEBUG="*:2" RUST_LOG="info,catplay_hap=error,catplay_carplay=error,catplay_util=error": build
+run $GST_DEBUG="*:2": build
     {{toolbox_run}} cargo run < /dev/null
 
 #Run the app until timeout, then kill it and restore the original wifi connection

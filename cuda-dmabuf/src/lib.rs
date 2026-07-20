@@ -15,6 +15,7 @@ use std::ffi::c_void;
 use std::fs::File;
 use std::os::fd::{AsRawFd, RawFd};
 use std::ptr;
+use std::sync::{Arc, Mutex};
 
 use eyre::{Result, eyre};
 use gstreamer as gst;
@@ -46,24 +47,95 @@ pub struct CudaImporter {
     /// `GstCudaContext*` (owned ref) — shared with `nvh264enc` via [`gst_context`](Self::gst_context)
     /// so the wrapped memory and the encoder live on the same CUDA context.
     gst_cuda_ctx: *mut c_void,
+    /// Reused pitched device buffers, so `import` doesn't `cuMemAlloc`/`cuMemFree` every frame.
+    pool: Arc<CudaPool>,
 }
 
 unsafe impl Send for CudaImporter {}
+// SAFETY: `import` uses per-call CUDA context push/pop, so it's safe to call through a shared
+// reference. carjack shares one importer across encode sessions (behind an `Arc`) but only ever
+// drives it from one encode task at a time - sessions don't overlap.
+unsafe impl Sync for CudaImporter {}
 
-struct NotifyData {
+/// A free-list of pitched CUDA device buffers (`cuMemAlloc`'d), keyed by size. The de-tile in
+/// `import` allocates one per frame; without pooling that's a `cuMemAlloc`+`cuMemFree` per frame
+/// (30/s), whose latency spikes show up as video jitter. Buffers return here when GStreamer frees
+/// the wrapped memory (see `free_devptr`) and are handed straight back out.
+struct CudaPool {
+    /// The shared `GstCudaContext*`, needed to make the context current when actually freeing.
     gst_ctx: *mut c_void,
-    devptr: u64,
+    free: Mutex<Vec<Pooled>>,
 }
 
-/// GDestroyNotify for the wrapped GstCudaMemory: free the pitched CUDA buffer, making its
-/// context current first (this may run on nvh264enc's streaming thread).
+#[derive(Clone, Copy)]
+struct Pooled {
+    devptr: u64,
+    size: usize,
+}
+
+// SAFETY: the only shared state is the mutex-guarded free-list; the raw `gst_ctx` is only used
+// under CUDA's context push/pop, which is thread-safe.
+unsafe impl Send for CudaPool {}
+unsafe impl Sync for CudaPool {}
+
+impl CudaPool {
+    /// Get a device buffer of exactly `size` bytes - reusing a pooled one or allocating a fresh
+    /// one. Must be called with the CUDA context already current (it is, inside `import`); any
+    /// pooled buffers left at a *different* size (stale after a resolution change) are freed here.
+    fn acquire(&self, size: usize) -> Result<u64> {
+        let mut free = self.free.lock().unwrap();
+        if let Some(pos) = free.iter().position(|b| b.size == size) {
+            return Ok(free.swap_remove(pos).devptr);
+        }
+        // No match: drop any stale-size buffers (context is current) so the pool doesn't grow
+        // across resolution changes, then allocate.
+        for b in free.drain(..) {
+            unsafe { ffi::cuMemFree_v2(b.devptr) };
+        }
+        let mut devptr: u64 = 0;
+        let r = unsafe { ffi::cuMemAlloc_v2(&mut devptr, size) };
+        if r != 0 {
+            return Err(eyre!("cuMemAlloc({size}) failed: {}", ffi::cu_error_str(r)));
+        }
+        Ok(devptr)
+    }
+
+    /// Return a buffer to the pool. Called from the GstCudaMemory free callback (possibly on
+    /// nvh264enc's thread); just stashes it - no CUDA call, so no context juggling needed.
+    fn release(&self, devptr: u64, size: usize) {
+        self.free.lock().unwrap().push(Pooled { devptr, size });
+    }
+}
+
+impl Drop for CudaPool {
+    fn drop(&mut self) {
+        // All wrapped buffers hold an `Arc<CudaPool>`, so by the time this runs every buffer has
+        // been returned to the free-list - actually free them now (context made current first).
+        let free = self.free.get_mut().unwrap();
+        if free.is_empty() {
+            return;
+        }
+        unsafe {
+            ffi::gst_cuda_context_push(self.gst_ctx);
+            for b in free.drain(..) {
+                ffi::cuMemFree_v2(b.devptr);
+            }
+            ffi::gst_cuda_context_pop(ptr::null_mut());
+        }
+    }
+}
+
+struct NotifyData {
+    pool: Arc<CudaPool>,
+    devptr: u64,
+    size: usize,
+}
+
+/// GDestroyNotify for the wrapped GstCudaMemory: return the pitched buffer to the pool for reuse
+/// (this may run on nvh264enc's streaming thread).
 extern "C" fn free_devptr(data: *mut c_void) {
     let d = unsafe { Box::from_raw(data as *mut NotifyData) };
-    unsafe {
-        ffi::gst_cuda_context_push(d.gst_ctx);
-        ffi::cuMemFree_v2(d.devptr);
-        ffi::gst_cuda_context_pop(ptr::null_mut());
-    }
+    d.pool.release(d.devptr, d.size);
 }
 
 impl CudaImporter {
@@ -110,7 +182,8 @@ impl CudaImporter {
         }
         tracing::info!("cuda-dmabuf: importer ready");
 
-        Ok(CudaImporter { _drm: drm, egl_display, egl_ext, gst_cuda_ctx })
+        let pool = Arc::new(CudaPool { gst_ctx: gst_cuda_ctx, free: Mutex::new(Vec::new()) });
+        Ok(CudaImporter { _drm: drm, egl_display, egl_ext, gst_cuda_ctx, pool })
     }
 
     /// `GstContext` to set on the encode pipeline so `nvh264enc` adopts our CUDA context (the one
@@ -193,11 +266,8 @@ impl CudaImporter {
         let pitch = info.stride()[0] as usize;
         let size = pitch * plane.height as usize;
 
-        let mut devptr: u64 = 0;
-        let r = unsafe { ffi::cuMemAlloc_v2(&mut devptr, size) };
-        if r != 0 {
-            return Err(eyre!("cuMemAlloc({size}) failed: {}", ffi::cu_error_str(r)));
-        }
+        // Reuse a pooled pitched buffer if one's free (the context is current here).
+        let devptr = self.pool.acquire(size)?;
 
         let copy = ffi::CudaMemcpy2D {
             src_memory_type: if frame.frame_type == ffi::CU_EGL_FRAME_TYPE_ARRAY {
@@ -217,13 +287,14 @@ impl CudaImporter {
         };
         let r = unsafe { ffi::cuMemcpy2D_v2(&copy) };
         if r != 0 {
-            unsafe { ffi::cuMemFree_v2(devptr) };
+            self.pool.release(devptr, size);
             return Err(eyre!("cuMemcpy2D failed: {}", ffi::cu_error_str(r)));
         }
 
         // 4. Wrap the pitched buffer as GstCudaMemory on our shared context.
-        let notify = Box::new(NotifyData { gst_ctx: self.gst_cuda_ctx, devptr });
+        let notify = Box::new(NotifyData { pool: self.pool.clone(), devptr, size });
         let info_ptr: *const gst_video::ffi::GstVideoInfo = info.to_glib_none().0;
+        let notify_ptr = Box::into_raw(notify);
         let mem = unsafe {
             ffi::gst_cuda_allocator_alloc_wrapped(
                 ptr::null_mut(),
@@ -231,12 +302,15 @@ impl CudaImporter {
                 ptr::null_mut(),
                 info_ptr as *const c_void,
                 devptr,
-                Box::into_raw(notify) as *mut c_void,
+                notify_ptr as *mut c_void,
                 Some(free_devptr),
             )
         };
         if mem.is_null() {
-            unsafe { ffi::cuMemFree_v2(devptr) };
+            // `notify` wasn't handed over, so free_devptr won't run - reclaim it and return the
+            // buffer to the pool ourselves.
+            drop(unsafe { Box::from_raw(notify_ptr) });
+            self.pool.release(devptr, size);
             return Err(eyre!("gst_cuda_allocator_alloc_wrapped failed"));
         }
         let mem = unsafe { gst::Memory::from_glib_full(mem as *mut gst::ffi::GstMemory) };

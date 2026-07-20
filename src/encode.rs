@@ -17,6 +17,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 use libcarjack::airplay::EncodedFrame;
 use crate::compositor::CapturedFrame;
+use crate::config::ZeroCopyMode;
 
 /// Zero-copy `AsRef<[u8]>` view of an SHM frame's pixels, so re-pushing the same frame (the
 /// repeater does 30x/sec) is just an `Arc` refcount bump rather than a full memcpy each tick.
@@ -41,8 +42,91 @@ enum FrameFeeder {
     /// (DMA_DRM), imported directly by the postproc element (`vapostproc` / `v4l2convert`).
     DmaDrm(DmaBufAllocator),
     /// NVIDIA zero-copy: each dmabuf imported into `GstCudaMemory` via CUDA/EGL interop, pushed
-    /// as `video/x-raw(memory:CUDAMemory)` straight into `nvh264enc` (which does RGB->NV12).
-    Cuda(cuda_dmabuf::CudaImporter),
+    /// as `video/x-raw(memory:CUDAMemory)` straight into `nvh264enc` (which does RGB->NV12). The
+    /// importer (its CUDA context) is created once at startup and shared across encode sessions.
+    Cuda(Arc<cuda_dmabuf::CudaImporter>),
+}
+
+/// The resolved encode backend, decided once at startup ([`resolve_backend`]) and reused for
+/// every session's encoder. Cloneable so each session's encode task gets its own handle (the CUDA
+/// importer is shared behind an `Arc`).
+#[derive(Clone)]
+pub struct EncodeBackend {
+    kind: BackendKind,
+}
+
+#[derive(Clone)]
+enum BackendKind {
+    Cuda(Arc<cuda_dmabuf::CudaImporter>),
+    Dmabuf(&'static HwBackend),
+    Software,
+}
+
+impl EncodeBackend {
+    /// Whether this backend consumes the compositor's dmabuf directly (so the compositor must
+    /// forward dmabufs); false means the software path consuming CPU-read-back frames.
+    pub fn is_zero_copy(&self) -> bool {
+        !matches!(self.kind, BackendKind::Software)
+    }
+
+    /// Short human-readable name of the selected backend, for logging.
+    pub fn describe(&self) -> String {
+        match &self.kind {
+            BackendKind::Cuda(_) => "zero-copy NVIDIA CUDA".into(),
+            BackendKind::Dmabuf(b) => format!("zero-copy hardware '{}'", b.name),
+            BackendKind::Software => "software".into(),
+        }
+    }
+}
+
+/// Decide the encode backend once, at startup, honouring the configured [`ZeroCopyMode`]:
+/// - `Off` -> software.
+/// - `Force` -> a zero-copy backend or an error (never silently downgrades).
+/// - `Auto` -> a zero-copy backend if one comes up, else software with a warning.
+///
+/// `render_node` is the GPU the compositor renders on; a zero-copy backend must live on the same
+/// GPU (the CUDA importer opens exactly this node).
+pub fn resolve_backend(mode: ZeroCopyMode, render_node: &str) -> Result<EncodeBackend> {
+    let _ = gst::init();
+    match mode {
+        ZeroCopyMode::Off => Ok(EncodeBackend { kind: BackendKind::Software }),
+        ZeroCopyMode::Force => match try_zero_copy(render_node) {
+            Some(kind) => Ok(EncodeBackend { kind }),
+            None => Err(eyre!(
+                "zerocopy=true but no zero-copy backend is available on {render_node} \
+                 (need nvh264enc, or vapostproc+vah264enc, or v4l2convert+v4l2h264enc)"
+            )),
+        },
+        ZeroCopyMode::Auto => match try_zero_copy(render_node) {
+            Some(kind) => Ok(EncodeBackend { kind }),
+            None => {
+                tracing::warn!(
+                    "zerocopy=auto: no zero-copy backend available on {render_node}, \
+                     falling back to SOFTWARE encode"
+                );
+                Ok(EncodeBackend { kind: BackendKind::Software })
+            }
+        },
+    }
+}
+
+/// Try to construct a zero-copy backend for `render_node`. Honours an explicit
+/// `CARPLAY_ENCODE_BACKEND` (`cuda`/`vaapi`/`v4l2`) override, else probes NVIDIA (CUDA) first,
+/// then the dmabuf-importing HW backends. Returns `None` if none are usable.
+fn try_zero_copy(render_node: &str) -> Option<BackendKind> {
+    let forced = std::env::var("CARPLAY_ENCODE_BACKEND").ok();
+    let want = |name: &str| forced.as_deref().is_none_or(|f| f.eq_ignore_ascii_case(name));
+
+    if want("cuda") && element_available("nvh264enc") {
+        match cuda_dmabuf::CudaImporter::new(render_node) {
+            Ok(imp) => return Some(BackendKind::Cuda(Arc::new(imp))),
+            Err(e) => tracing::warn!("NVIDIA/CUDA zero-copy unavailable on {render_node}: {e}"),
+        }
+    }
+    HW_BACKENDS
+        .iter()
+        .find(|b| want(b.name) && element_available(b.postproc) && element_available(b.encoder))
+        .map(BackendKind::Dmabuf)
 }
 
 /// Run a GStreamer pipeline that H264-encodes the composited desktop frames (from the internal
@@ -54,6 +138,7 @@ enum FrameFeeder {
 pub async fn encode_h264_to_channel(
     frame_rx: watch::Receiver<Option<Arc<CapturedFrame>>>,
     video_tx: mpsc::Sender<EncodedFrame>,
+    backend: EncodeBackend,
 ) -> Result<()> {
     gst::init()?;
 
@@ -79,12 +164,11 @@ pub async fn encode_h264_to_channel(
     src.set_property("do-timestamp", true);
     pipeline.add(&src).map_err(|_| eyre!("add source"))?;
 
-    // Pick the encode backend. Zero-copy (CARJACK_ZEROCOPY) forwards the compositor's rendered
-    // dmabuf straight into a same-GPU hardware encoder; otherwise the software chain encodes the
-    // CPU-read-back frames. The compositor reads the same flag, so the frame variant (Dmabuf vs
-    // Shm) always matches the pipeline the feeder pushes into.
-    let zero_copy = std::env::var("CARJACK_ZEROCOPY").is_ok();
-    let (encoder, feeder) = build_backend(&pipeline, &src, zero_copy)?;
+    // Build the pipeline for the backend chosen at startup. The compositor was started in a
+    // matching mode (dmabuf for zero-copy, CPU-readback SHM for software), so the frame variant
+    // the feeder receives always matches what this pipeline's first element can consume.
+    let (encoder, feeder) = build_backend(&pipeline, &src, &backend)?;
+    tracing::info!("Encode backend: {}", backend.describe());
 
     let output_caps = gst::Caps::builder("video/x-h264")
         .field("stream-format", "byte-stream")
@@ -139,25 +223,25 @@ pub async fn encode_h264_to_channel(
     pipeline.set_state(gst::State::Playing)?;
     let _guard = StopGuard(pipeline.clone());
 
-    // Feed the encoder at a steady 30fps by re-pushing the latest captured frame on a timer,
-    // rather than only when a new frame arrives. This is essential: the compositor only
-    // produces a new capture frame when the desktop actually changes (damage), so a static
-    // screen yields no new frames - but the car tears the session down if it gets no video
-    // for ~1s. Re-pushing the latest frame keeps a continuous stream (mostly tiny P-frames
-    // when static); a real new frame just replaces what we re-push. The `watch` channel is
-    // latest-wins, so if capture outpaces us we simply skip older frames.
+    // Feed the encoder directly off the compositor's frame production: push each frame as it's
+    // published, rather than re-sampling the latest on a *separate* timer. The compositor renders
+    // on its own steady timer even for a static screen (so there's always a fresh frame ~every
+    // frame-period, and the car never sees a >1s gap), which means a second timer here only
+    // *beats* against it - the two clocks drift and periodically double/drop a frame, which is
+    // exactly the stutter. Driving off `changed()` inherits the compositor's smooth cadence.
     //
-    // Because the feeder sets a steady 30fps cadence and the compositor already renders at the
-    // car's exact resolution, no `videorate`/`videoscale` is needed downstream.
+    // The `watch` channel is latest-wins, so if the compositor ever outpaces the encoder we just
+    // skip intermediate frames rather than backing up. No `videorate`/`videoscale` downstream -
+    // the compositor already renders at the car's exact resolution and rate.
     let _frame_feeder = AbortOnDropHandle::new(tokio::spawn(async move {
         let appsrc = src;
         let mut frame_rx = frame_rx;
         let mut caps_set = false;
         let mut warned_mismatch = false;
-        let mut ticker = tokio::time::interval(std::time::Duration::from_micros(1_000_000 / 30));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            ticker.tick().await;
+            if frame_rx.changed().await.is_err() {
+                break; // compositor gone
+            }
             let Some(frame) = frame_rx.borrow_and_update().clone() else {
                 continue;
             };
@@ -295,88 +379,32 @@ fn element_available(name: &str) -> bool {
     gst::ElementFactory::find(name).is_some()
 }
 
-/// The DRM render node the compositor rendered on - the dmabuf lives on this GPU, so the CUDA
-/// importer must open the same one (matches `compositor::open_render_node`).
-fn render_node() -> String {
-    std::env::var("CARJACK_RENDER_NODE").unwrap_or_else(|_| "/dev/dri/renderD128".to_string())
-}
-
-/// Build the encode chain onto `pipeline` (from the `appsrc`) and return the encoder element
-/// (whose src pad is H264) plus the [`FrameFeeder`] describing how to push frames into it.
+/// Build the encode chain onto `pipeline` (from the `appsrc`) for the resolved backend, and
+/// return the encoder element (whose src pad is H264) plus the [`FrameFeeder`] describing how to
+/// push frames into it.
 fn build_backend(
     pipeline: &gst::Pipeline,
     src: &gst_app::AppSrc,
-    zero_copy: bool,
+    backend: &EncodeBackend,
 ) -> Result<(gst::Element, FrameFeeder)> {
     let src_tail: gst::Element = src.clone().upcast();
-    if !zero_copy {
-        return Ok((build_software_chain(pipeline, &src_tail)?, FrameFeeder::Shm));
-    }
-
-    // Zero-copy: NVIDIA (CUDA importer) first, then the dmabuf-importing HW backends.
-    match select_zerocopy_backend()? {
-        ZeroCopy::Cuda(importer) => {
+    match &backend.kind {
+        BackendKind::Software => {
+            Ok((build_software_chain(pipeline, &src_tail)?, FrameFeeder::Shm))
+        }
+        BackendKind::Cuda(importer) => {
             // Share our CUDA context with nvh264enc so the imported GstCudaMemory and the encoder
             // live on the same context. Must be set before the encoder is added to the bin (the
             // bin propagates its contexts to children as they're added).
             pipeline.set_context(&importer.gst_context());
             let encoder = build_cuda_chain(pipeline, &src_tail)?;
-            Ok((encoder, FrameFeeder::Cuda(importer)))
+            Ok((encoder, FrameFeeder::Cuda(importer.clone())))
         }
-        ZeroCopy::Dmabuf(backend) => {
-            let encoder = build_dmabuf_hw_chain(pipeline, &src_tail, backend)?;
+        BackendKind::Dmabuf(b) => {
+            let encoder = build_dmabuf_hw_chain(pipeline, &src_tail, b)?;
             Ok((encoder, FrameFeeder::DmaDrm(DmaBufAllocator::new())))
         }
     }
-}
-
-enum ZeroCopy {
-    Cuda(cuda_dmabuf::CudaImporter),
-    Dmabuf(&'static HwBackend),
-}
-
-/// Choose the zero-copy backend: an explicit `CARPLAY_ENCODE_BACKEND` override
-/// (`cuda`/`vaapi`/`v4l2`) if set, else auto-probe NVIDIA (CUDA) then the `HW_BACKENDS`.
-fn select_zerocopy_backend() -> Result<ZeroCopy> {
-    let cuda = || -> Result<ZeroCopy> {
-        let node = render_node();
-        cuda_dmabuf::CudaImporter::new(&node)
-            .map(ZeroCopy::Cuda)
-            .map_err(|e| eyre!("CUDA importer on {node}: {e}"))
-    };
-    let hw = |name: &str| -> Option<ZeroCopy> {
-        HW_BACKENDS.iter().find(|b| b.name == name).map(ZeroCopy::Dmabuf)
-    };
-
-    match std::env::var("CARPLAY_ENCODE_BACKEND").ok().as_deref() {
-        Some("cuda") => return cuda(),
-        Some("vaapi") => {
-            return hw("vaapi").ok_or_else(|| eyre!("vaapi backend not in HW_BACKENDS"));
-        }
-        Some("v4l2") => {
-            return hw("v4l2").ok_or_else(|| eyre!("v4l2 backend not in HW_BACKENDS"));
-        }
-        Some(other) => tracing::warn!("CARPLAY_ENCODE_BACKEND={other} unknown, auto-detecting"),
-        None => {}
-    }
-
-    // Auto: NVIDIA if nvh264enc exists and the importer comes up; else first available HW backend.
-    if element_available("nvh264enc") {
-        match cuda() {
-            Ok(zc) => return Ok(zc),
-            Err(e) => tracing::warn!("NVIDIA zero-copy unavailable, trying VA-API/v4l2: {e}"),
-        }
-    }
-    HW_BACKENDS
-        .iter()
-        .find(|b| element_available(b.postproc) && element_available(b.encoder))
-        .map(ZeroCopy::Dmabuf)
-        .ok_or_else(|| {
-            eyre!(
-                "CARJACK_ZEROCOPY set but no zero-copy backend available \
-                 (need nvh264enc, or vapostproc+vah264enc, or v4l2convert+v4l2h264enc)"
-            )
-        })
 }
 
 /// NVIDIA: `appsrc(CUDAMemory) ! nvh264enc`. The importer already produced GstCudaMemory buffers
