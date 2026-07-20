@@ -99,6 +99,11 @@ impl CudaImporter {
         }
         tracing::info!("cuda-dmabuf: EGL {major}.{minor} on {render_node}");
 
+        // Load libgstcuda's CUDA driver vtable before creating a context - it's normally loaded
+        // by the nvcodec plugin's init, which hasn't run yet at this point.
+        if unsafe { ffi::gst_cuda_load_library() } == 0 {
+            return Err(eyre!("gst_cuda_load_library failed (no CUDA driver?)"));
+        }
         let gst_cuda_ctx = unsafe { ffi::gst_cuda_context_new(0) };
         if gst_cuda_ctx.is_null() {
             return Err(eyre!("gst_cuda_context_new(0) failed"));

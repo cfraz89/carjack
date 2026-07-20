@@ -1,4 +1,4 @@
-use std::os::fd::AsFd;
+use std::os::fd::{AsRawFd, AsFd};
 use std::sync::Arc;
 
 use catplay_carplay::video::{AnnexBIter, AvccConfig, NalType};
@@ -31,6 +31,20 @@ impl AsRef<[u8]> for FrameData {
     }
 }
 
+/// How the appsrc feeder turns each `CapturedFrame` into a `gst::Buffer` (and what caps it
+/// announces on the appsrc). Chosen together with the encode chain by [`build_backend`], so the
+/// buffer kind always matches what the first pipeline element can consume.
+enum FrameFeeder {
+    /// Software path: system-memory BGRx pushed as plain `video/x-raw`.
+    Shm,
+    /// VA-API / v4l2 zero-copy: the compositor's dmabuf pushed as `video/x-raw(memory:DMABuf)`
+    /// (DMA_DRM), imported directly by the postproc element (`vapostproc` / `v4l2convert`).
+    DmaDrm(DmaBufAllocator),
+    /// NVIDIA zero-copy: each dmabuf imported into `GstCudaMemory` via CUDA/EGL interop, pushed
+    /// as `video/x-raw(memory:CUDAMemory)` straight into `nvh264enc` (which does RGB->NV12).
+    Cuda(cuda_dmabuf::CudaImporter),
+}
+
 /// Run a GStreamer pipeline that H264-encodes the composited desktop frames (from the internal
 /// compositor, via `frame_rx`) and hands each encoded access unit to `video_tx`.
 ///
@@ -39,8 +53,6 @@ impl AsRef<[u8]> for FrameData {
 /// already exactly one complete access unit - no byte-stream reframing needed.
 pub async fn encode_h264_to_channel(
     frame_rx: watch::Receiver<Option<Arc<CapturedFrame>>>,
-    width: u32,
-    height: u32,
     video_tx: mpsc::Sender<EncodedFrame>,
 ) -> Result<()> {
     gst::init()?;
@@ -55,7 +67,7 @@ pub async fn encode_h264_to_channel(
     };
 
     // appsrc fed by the compositor's frame stream. do-timestamp stamps each pushed buffer with
-    // the pipeline running-time (buffers arrive with no PTS, and videorate needs timestamps).
+    // the pipeline running-time (buffers arrive with no PTS, and the encoder needs timestamps).
     let src = gst::ElementFactory::make("appsrc")
         .name("source")
         .build()
@@ -67,18 +79,12 @@ pub async fn encode_h264_to_channel(
     src.set_property("do-timestamp", true);
     pipeline.add(&src).map_err(|_| eyre!("add source"))?;
 
-    // Zero-copy: the compositor forwards its rendered dmabuf and we import it straight into the
-    // GPU encoder (glupload -> nvh264enc), no CPU copy. Otherwise the software chain encodes the
-    // CPU-read-back frames. The compositor and encoder read the same CARJACK_ZEROCOPY flag so
-    // the frame variant (Dmabuf vs Shm) always matches the pipeline.
+    // Pick the encode backend. Zero-copy (CARJACK_ZEROCOPY) forwards the compositor's rendered
+    // dmabuf straight into a same-GPU hardware encoder; otherwise the software chain encodes the
+    // CPU-read-back frames. The compositor reads the same flag, so the frame variant (Dmabuf vs
+    // Shm) always matches the pipeline the feeder pushes into.
     let zero_copy = std::env::var("CARJACK_ZEROCOPY").is_ok();
-    let src_tail: gst::Element = src.clone().upcast();
-    let encoder = if zero_copy {
-        build_zerocopy_chain(&pipeline, &src_tail)?
-    } else {
-        build_encode_chain(&pipeline, &src_tail, width, height)?
-    };
-    let wayland_feed = Some((src, frame_rx));
+    let (encoder, feeder) = build_backend(&pipeline, &src, zero_copy)?;
 
     let output_caps = gst::Caps::builder("video/x-h264")
         .field("stream-format", "byte-stream")
@@ -140,58 +146,85 @@ pub async fn encode_h264_to_channel(
     // for ~1s. Re-pushing the latest frame keeps a continuous stream (mostly tiny P-frames
     // when static); a real new frame just replaces what we re-push. The `watch` channel is
     // latest-wins, so if capture outpaces us we simply skip older frames.
-    let _frame_feeder = wayland_feed.map(|(appsrc, frame_rx)| {
-        AbortOnDropHandle::new(tokio::spawn(async move {
-            let dmabuf_allocator = DmaBufAllocator::new();
-            let mut caps_set = false;
-            let mut ticker = tokio::time::interval(std::time::Duration::from_micros(1_000_000 / 30));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                let Some(frame) = frame_rx.borrow().clone() else {
-                    continue;
-                };
-                let buffer = match &*frame {
-                    CapturedFrame::Shm { width, height, gst_format, .. } => {
-                        if !caps_set {
-                            appsrc.set_caps(Some(
-                                &gst::Caps::builder("video/x-raw")
-                                    .field("format", *gst_format)
-                                    .field("width", *width as i32)
-                                    .field("height", *height as i32)
-                                    .field("framerate", gst::Fraction::new(30, 1))
-                                    .build(),
-                            ));
-                            caps_set = true;
-                        }
-                        gst::Buffer::from_slice(FrameData(frame.clone()))
+    //
+    // Because the feeder sets a steady 30fps cadence and the compositor already renders at the
+    // car's exact resolution, no `videorate`/`videoscale` is needed downstream.
+    let _frame_feeder = AbortOnDropHandle::new(tokio::spawn(async move {
+        let appsrc = src;
+        let mut frame_rx = frame_rx;
+        let mut caps_set = false;
+        let mut warned_mismatch = false;
+        let mut ticker = tokio::time::interval(std::time::Duration::from_micros(1_000_000 / 30));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let Some(frame) = frame_rx.borrow_and_update().clone() else {
+                continue;
+            };
+            let buffer = match (&feeder, &*frame) {
+                (FrameFeeder::Shm, CapturedFrame::Shm { width, height, gst_format, .. }) => {
+                    if !caps_set {
+                        appsrc.set_caps(Some(
+                            &gst::Caps::builder("video/x-raw")
+                                .field("format", *gst_format)
+                                .field("width", *width as i32)
+                                .field("height", *height as i32)
+                                .field("framerate", gst::Fraction::new(30, 1))
+                                .build(),
+                        ));
+                        caps_set = true;
                     }
-                    CapturedFrame::Dmabuf(dmabuf) => {
-                        if !caps_set {
-                            match dmabuf_caps(dmabuf) {
-                                Ok(caps) => appsrc.set_caps(Some(&caps)),
-                                Err(e) => {
-                                    tracing::warn!("dmabuf caps failed: {e}");
-                                    continue;
-                                }
-                            }
-                            caps_set = true;
-                        }
-                        match wrap_dmabuf(&dmabuf_allocator, dmabuf) {
-                            Ok(buf) => buf,
+                    gst::Buffer::from_slice(FrameData(frame.clone()))
+                }
+                (FrameFeeder::DmaDrm(allocator), CapturedFrame::Dmabuf(dmabuf)) => {
+                    if !caps_set {
+                        match dmabuf_caps(dmabuf) {
+                            Ok(caps) => appsrc.set_caps(Some(&caps)),
                             Err(e) => {
-                                tracing::warn!("wrap dmabuf failed: {e}");
+                                tracing::warn!("dmabuf caps failed: {e}");
                                 continue;
                             }
                         }
+                        caps_set = true;
                     }
-                };
-                if appsrc.push_buffer(buffer).is_err() {
-                    break;
+                    match wrap_dmabuf(allocator, dmabuf) {
+                        Ok(buf) => buf,
+                        Err(e) => {
+                            tracing::warn!("wrap dmabuf failed: {e}");
+                            continue;
+                        }
+                    }
                 }
+                (FrameFeeder::Cuda(importer), CapturedFrame::Dmabuf(dmabuf)) => {
+                    if !caps_set {
+                        appsrc.set_caps(Some(&cuda_caps(dmabuf)));
+                        caps_set = true;
+                    }
+                    let Some(plane) = first_plane(dmabuf) else {
+                        tracing::warn!("dmabuf has no plane 0");
+                        continue;
+                    };
+                    match importer.import(&plane) {
+                        Ok(buf) => buf,
+                        Err(e) => {
+                            tracing::warn!("cuda import failed: {e}");
+                            continue;
+                        }
+                    }
+                }
+                _ => {
+                    if !warned_mismatch {
+                        tracing::warn!("frame variant does not match the selected encode backend");
+                        warned_mismatch = true;
+                    }
+                    continue;
+                }
+            };
+            if appsrc.push_buffer(buffer).is_err() {
+                break;
             }
-        }))
-    });
+        }
+    }));
 
     let bus = pipeline
         .bus()
@@ -217,16 +250,139 @@ pub async fn encode_h264_to_channel(
     Ok(())
 }
 
-/// Zero-copy encode chain: `glupload` imports the compositor's dmabuf as a GL texture (via
-/// EGLImage, zero-copy) and `nvh264enc` consumes it through GL-CUDA interop (also zero-copy),
-/// converting RGB->NV12 internally. No scale/rate/convert - the compositor already renders at
-/// the car's resolution and 30fps. Requires the compositor to render on the same GPU as the
-/// encoder (CARJACK_RENDER_NODE) so the dmabuf is GPU-local.
-fn build_zerocopy_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Result<gst::Element> {
-    let glupload = gst::ElementFactory::make("glupload")
-        .name("glupload")
-        .build()
-        .map_err(|_| eyre!("failed to create glupload"))?;
+/// A GPU-side zero-copy encode backend: a dmabuf-importing post-processor (RGB->NV12 on the GPU,
+/// no CPU copy) feeding a hardware H264 encoder. Selected only when *both* its elements exist
+/// (probed via `ElementFactory::find`), so a machine without the driver falls through to the
+/// next backend / software. NVIDIA is *not* here - it needs the `cuda-dmabuf` importer because
+/// its block-linear surfaces can't be imported by `glupload`/`vapostproc`.
+///
+/// Adding a platform = one row here. Keep the highest-value/most-specific backends first.
+struct HwBackend {
+    /// Value for `CARPLAY_ENCODE_BACKEND` to force this backend, and what gets logged.
+    name: &'static str,
+    /// dmabuf-importing convert+scale element (M2M): RGB->NV12 on-GPU, zero-copy.
+    postproc: &'static str,
+    /// hardware H264 encoder consuming the post-processor's (NV12, GPU-memory) output.
+    encoder: &'static str,
+    /// (property, value) that caps the keyframe interval to ~6 frames. The car tears the
+    /// session down after ~1s without a keyframe, so this bounds startup/recovery latency.
+    /// Property name differs per encoder; empty = leave the encoder default.
+    keyframe_prop: (&'static str, &'static str),
+}
+
+/// Probed in order; first whose `postproc` + `encoder` both exist wins.
+const HW_BACKENDS: &[HwBackend] = &[
+    // Qualcomm / embedded (the deployment target). v4l2 stateful encoders import DMABuf via
+    // V4L2_MEMORY_DMABUF; keyframe control is usually via extra-controls, so leave it default
+    // here and revisit against the real device.
+    HwBackend {
+        name: "v4l2",
+        postproc: "v4l2convert",
+        encoder: "v4l2h264enc",
+        keyframe_prop: ("", ""),
+    },
+    // Intel / AMD VA-API. vapostproc imports the DMA_DRM dmabuf and outputs NV12 in VAMemory,
+    // which vah264enc consumes on the same GPU - fully zero-copy.
+    HwBackend {
+        name: "vaapi",
+        postproc: "vapostproc",
+        encoder: "vah264enc",
+        keyframe_prop: ("key-int-max", "6"),
+    },
+];
+
+fn element_available(name: &str) -> bool {
+    gst::ElementFactory::find(name).is_some()
+}
+
+/// The DRM render node the compositor rendered on - the dmabuf lives on this GPU, so the CUDA
+/// importer must open the same one (matches `compositor::open_render_node`).
+fn render_node() -> String {
+    std::env::var("CARJACK_RENDER_NODE").unwrap_or_else(|_| "/dev/dri/renderD128".to_string())
+}
+
+/// Build the encode chain onto `pipeline` (from the `appsrc`) and return the encoder element
+/// (whose src pad is H264) plus the [`FrameFeeder`] describing how to push frames into it.
+fn build_backend(
+    pipeline: &gst::Pipeline,
+    src: &gst_app::AppSrc,
+    zero_copy: bool,
+) -> Result<(gst::Element, FrameFeeder)> {
+    let src_tail: gst::Element = src.clone().upcast();
+    if !zero_copy {
+        return Ok((build_software_chain(pipeline, &src_tail)?, FrameFeeder::Shm));
+    }
+
+    // Zero-copy: NVIDIA (CUDA importer) first, then the dmabuf-importing HW backends.
+    match select_zerocopy_backend()? {
+        ZeroCopy::Cuda(importer) => {
+            // Share our CUDA context with nvh264enc so the imported GstCudaMemory and the encoder
+            // live on the same context. Must be set before the encoder is added to the bin (the
+            // bin propagates its contexts to children as they're added).
+            pipeline.set_context(&importer.gst_context());
+            let encoder = build_cuda_chain(pipeline, &src_tail)?;
+            Ok((encoder, FrameFeeder::Cuda(importer)))
+        }
+        ZeroCopy::Dmabuf(backend) => {
+            let encoder = build_dmabuf_hw_chain(pipeline, &src_tail, backend)?;
+            Ok((encoder, FrameFeeder::DmaDrm(DmaBufAllocator::new())))
+        }
+    }
+}
+
+enum ZeroCopy {
+    Cuda(cuda_dmabuf::CudaImporter),
+    Dmabuf(&'static HwBackend),
+}
+
+/// Choose the zero-copy backend: an explicit `CARPLAY_ENCODE_BACKEND` override
+/// (`cuda`/`vaapi`/`v4l2`) if set, else auto-probe NVIDIA (CUDA) then the `HW_BACKENDS`.
+fn select_zerocopy_backend() -> Result<ZeroCopy> {
+    let cuda = || -> Result<ZeroCopy> {
+        let node = render_node();
+        cuda_dmabuf::CudaImporter::new(&node)
+            .map(ZeroCopy::Cuda)
+            .map_err(|e| eyre!("CUDA importer on {node}: {e}"))
+    };
+    let hw = |name: &str| -> Option<ZeroCopy> {
+        HW_BACKENDS.iter().find(|b| b.name == name).map(ZeroCopy::Dmabuf)
+    };
+
+    match std::env::var("CARPLAY_ENCODE_BACKEND").ok().as_deref() {
+        Some("cuda") => return cuda(),
+        Some("vaapi") => {
+            return hw("vaapi").ok_or_else(|| eyre!("vaapi backend not in HW_BACKENDS"));
+        }
+        Some("v4l2") => {
+            return hw("v4l2").ok_or_else(|| eyre!("v4l2 backend not in HW_BACKENDS"));
+        }
+        Some(other) => tracing::warn!("CARPLAY_ENCODE_BACKEND={other} unknown, auto-detecting"),
+        None => {}
+    }
+
+    // Auto: NVIDIA if nvh264enc exists and the importer comes up; else first available HW backend.
+    if element_available("nvh264enc") {
+        match cuda() {
+            Ok(zc) => return Ok(zc),
+            Err(e) => tracing::warn!("NVIDIA zero-copy unavailable, trying VA-API/v4l2: {e}"),
+        }
+    }
+    HW_BACKENDS
+        .iter()
+        .find(|b| element_available(b.postproc) && element_available(b.encoder))
+        .map(ZeroCopy::Dmabuf)
+        .ok_or_else(|| {
+            eyre!(
+                "CARJACK_ZEROCOPY set but no zero-copy backend available \
+                 (need nvh264enc, or vapostproc+vah264enc, or v4l2convert+v4l2h264enc)"
+            )
+        })
+}
+
+/// NVIDIA: `appsrc(CUDAMemory) ! nvh264enc`. The importer already produced GstCudaMemory buffers
+/// on the encoder's context, so nvh264enc consumes them directly (internal RGB->NV12). No
+/// glupload - NVIDIA won't hand its block-linear surface back as a GL texture.
+fn build_cuda_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Result<gst::Element> {
     let enc_desc =
         std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from("nvh264enc gop-size=6"));
     let (enc_name, enc_props) = parse_encoder_string(&enc_desc)?;
@@ -237,15 +393,76 @@ fn build_zerocopy_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Re
     for (key, val) in &enc_props {
         encoder.set_property_from_str(key, val);
     }
-    pipeline.add(&glupload).map_err(|_| eyre!("add glupload"))?;
     pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
-    src_tail.link(&glupload).map_err(|_| eyre!("link src-glupload"))?;
-    glupload.link(&encoder).map_err(|_| eyre!("link glupload-encoder"))?;
-    tracing::info!("Encode backend: zero-copy dmabuf (glupload ! {enc_name})");
+    src_tail.link(&encoder).map_err(|_| eyre!("link src-encoder"))?;
+    tracing::info!("Encode backend: zero-copy NVIDIA CUDA (dmabuf -> GstCudaMemory ! {enc_name})");
     Ok(encoder)
 }
 
-/// DMA_DRM caps for a dmabuf - carries the DRM fourcc + modifier so glupload can import it.
+/// VA-API / v4l2: `appsrc(DMABuf) ! <postproc> ! <encoder>`. The postproc imports the DMA_DRM
+/// dmabuf and does RGB->NV12 on the GPU; no scale/convert needed (the compositor already renders
+/// at the car's resolution).
+fn build_dmabuf_hw_chain(
+    pipeline: &gst::Pipeline,
+    src_tail: &gst::Element,
+    b: &HwBackend,
+) -> Result<gst::Element> {
+    let mk = |name: &str, label: &str| {
+        gst::ElementFactory::make(name)
+            .name(label)
+            .build()
+            .map_err(|_| eyre!("failed to create {label} ({name})"))
+    };
+    let postproc = mk(b.postproc, "postproc")?;
+    let encoder = mk(b.encoder, "encoder")?;
+    if !b.keyframe_prop.0.is_empty() {
+        encoder.set_property_from_str(b.keyframe_prop.0, b.keyframe_prop.1);
+    }
+    pipeline.add(&postproc).map_err(|_| eyre!("add postproc"))?;
+    pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
+    src_tail.link(&postproc).map_err(|_| eyre!("link src-postproc"))?;
+    postproc.link(&encoder).map_err(|_| eyre!("link postproc-encoder"))?;
+    tracing::info!(
+        "Encode backend: zero-copy hardware '{}' ({} ! {})",
+        b.name, b.postproc, b.encoder
+    );
+    Ok(encoder)
+}
+
+/// Software (non-zero-copy) chain: `appsrc(video/x-raw) ! videoconvert ! <encoder>`.
+///
+/// `videoscale`/`videorate` are intentionally absent: the compositor renders at exactly the
+/// car's resolution and the feeder pushes a steady 30fps, so there's nothing to scale or
+/// re-time. `videoconvert` stays because most encoders don't accept the compositor's BGRx (e.g.
+/// x264enc wants planar YUV) - it does the BGRx->encoder-format conversion on the CPU.
+fn build_software_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Result<gst::Element> {
+    let mk = |name: &str, label: &str| {
+        gst::ElementFactory::make(name)
+            .name(label)
+            .build()
+            .map_err(|_| eyre!("failed to create {label} ({name})"))
+    };
+    // gop-size caps the keyframe interval (see HwBackend::keyframe_prop for why).
+    let enc_desc = std::env::var("CARPLAY_ENCODER")
+        .unwrap_or_else(|_| String::from("nvh264enc gop-size=6"));
+    let (enc_name, enc_props) = parse_encoder_string(&enc_desc)?;
+    let encoder = gst::ElementFactory::make(&enc_name)
+        .name("encoder")
+        .build()
+        .map_err(|_| eyre!("failed to create encoder '{enc_name}'"))?;
+    for (key, val) in &enc_props {
+        encoder.set_property_from_str(key, val);
+    }
+    let convert = mk("videoconvert", "videoconvert")?;
+    pipeline.add(&convert).map_err(|_| eyre!("add convert"))?;
+    pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
+    src_tail.link(&convert).map_err(|_| eyre!("link src-convert"))?;
+    convert.link(&encoder).map_err(|_| eyre!("link convert-encoder"))?;
+    tracing::info!("Encode backend: software (videoconvert ! {enc_name})");
+    Ok(encoder)
+}
+
+/// DMA_DRM caps for a dmabuf - carries the DRM fourcc + modifier so the postproc can import it.
 fn dmabuf_caps(dmabuf: &Dmabuf) -> Result<gst::Caps> {
     let info = gst_video::VideoInfo::builder(
         gst_video::VideoFormat::DmaDrm,
@@ -262,8 +479,37 @@ fn dmabuf_caps(dmabuf: &Dmabuf) -> Result<gst::Caps> {
         .map_err(|e| eyre!("build dma-drm caps: {e}"))
 }
 
-/// Wrap a dmabuf's plane fds as a dmabuf-backed `gst::Buffer` with a `VideoMeta`, so glupload
-/// can import it. Fds are dup'd; GStreamer owns its copies.
+/// `video/x-raw(memory:CUDAMemory)` caps matching what the CUDA importer produces (a pitched
+/// BGRA buffer). The compositor renders Argb8888, whose little-endian bytes are B,G,R,A = BGRA.
+fn cuda_caps(dmabuf: &Dmabuf) -> gst::Caps {
+    gst::Caps::builder("video/x-raw")
+        .features(["memory:CUDAMemory"])
+        .field("format", "BGRA")
+        .field("width", dmabuf.width() as i32)
+        .field("height", dmabuf.height() as i32)
+        .field("framerate", gst::Fraction::new(30, 1))
+        .build()
+}
+
+/// Extract plane 0 of a dmabuf as a `cuda_dmabuf::DmabufPlane` (the compositor renders a single
+/// interleaved RGBA plane). The fd is borrowed for the import and stays owned by the frame.
+fn first_plane(dmabuf: &Dmabuf) -> Option<cuda_dmabuf::DmabufPlane> {
+    let fd = dmabuf.handles().next()?;
+    let offset = dmabuf.offsets().next()?;
+    let stride = dmabuf.strides().next()?;
+    Some(cuda_dmabuf::DmabufPlane {
+        fd: fd.as_raw_fd(),
+        width: dmabuf.width(),
+        height: dmabuf.height(),
+        fourcc: dmabuf.format().code as u32,
+        modifier: dmabuf.format().modifier.into(),
+        offset,
+        stride,
+    })
+}
+
+/// Wrap a dmabuf's plane fds as a dmabuf-backed `gst::Buffer` with a `VideoMeta`, so the
+/// postproc can import it. Fds are dup'd; GStreamer owns its copies.
 fn wrap_dmabuf(allocator: &DmaBufAllocator, dmabuf: &Dmabuf) -> Result<gst::Buffer> {
     let (width, height) = (dmabuf.width(), dmabuf.height());
     let mut buffer = gst::Buffer::new();
@@ -293,143 +539,6 @@ fn wrap_dmabuf(allocator: &DmaBufAllocator, dmabuf: &Dmabuf) -> Result<gst::Buff
     )
     .map_err(|e| eyre!("attach video meta: {e}"))?;
     Ok(buffer)
-}
-
-/// A hardware zero-copy encode backend: a dmabuf-capable post-processor (does RGB->NV12 +
-/// resize to the car's resolution on the GPU) feeding a hardware H264 encoder. Selected only
-/// when *both* its elements are available (probed at runtime via `ElementFactory::find`), so a
-/// machine without the driver silently falls back to software - the same auto-negotiation the
-/// working `pipewiresrc` path got for free.
-///
-/// Adding a platform = one row here. Keep the highest-value/most-specific backends first.
-struct HwBackend {
-    /// Value for `CARPLAY_ENCODE_BACKEND` to force this backend, and what gets logged.
-    name: &'static str,
-    /// dmabuf-importing convert+scale element (M2M): RGB->NV12 + resize, on-GPU, zero-copy.
-    postproc: &'static str,
-    /// hardware H264 encoder consuming the post-processor's output.
-    encoder: &'static str,
-    /// (property, value) that caps the keyframe interval to ~6 frames. The car tears the
-    /// session down after ~1s without a keyframe, so this bounds startup/recovery latency.
-    /// Property name differs per encoder; validate against the real element when enabling.
-    keyframe_prop: (&'static str, &'static str),
-}
-
-/// Probed in order; first whose `postproc` + `encoder` both exist wins. Entries are validated
-/// per-platform as the hardware becomes testable (VA-API on Intel/AMD dev machines, v4l2 on the
-/// Qualcomm target).
-///
-/// NOTE: full zero-copy additionally needs the compositor to forward its rendered dmabuf fd
-/// (instead of the CPU readback in compositor.rs) and to render on the *same* GPU as the
-/// encoder. Until then these give hardware encode of the already-composited frames, and only
-/// auto-select where the elements exist.
-const HW_BACKENDS: &[HwBackend] = &[
-    // Qualcomm / embedded (the deployment target). Untested off-device; keyframe control on
-    // v4l2 stateful encoders is usually via extra-controls, so this is a best guess to revisit.
-    HwBackend {
-        name: "v4l2",
-        postproc: "v4l2convert",
-        encoder: "v4l2h264enc",
-        keyframe_prop: ("", ""),
-    },
-    // Intel / AMD VA-API.
-    HwBackend {
-        name: "vaapi",
-        postproc: "vapostproc",
-        encoder: "vah264enc",
-        keyframe_prop: ("key-int-max", "6"),
-    },
-];
-
-fn element_available(name: &str) -> bool {
-    gst::ElementFactory::find(name).is_some()
-}
-
-/// Pick the hardware backend to use: an explicit `CARPLAY_ENCODE_BACKEND` override
-/// (`software` forces the fallback), else the first available `HW_BACKENDS` entry, else none
-/// (software).
-fn select_hw_backend() -> Option<&'static HwBackend> {
-    match std::env::var("CARPLAY_ENCODE_BACKEND").ok().as_deref() {
-        Some("software") => None,
-        Some(forced) => HW_BACKENDS
-            .iter()
-            .find(|b| b.name == forced)
-            .or_else(|| {
-                tracing::warn!("CARPLAY_ENCODE_BACKEND={forced} unknown, using software");
-                None
-            }),
-        None => HW_BACKENDS
-            .iter()
-            .find(|b| element_available(b.postproc) && element_available(b.encoder)),
-    }
-}
-
-/// Build `src_tail` (raw video) -> scale + RGB->NV12 convert + H264 encode, returning the
-/// element whose output is H264. Uses a hardware backend if one is available/forced, otherwise
-/// the software chain (videoscale ! videorate ! videoconvert ! `CARPLAY_ENCODER`).
-fn build_encode_chain(
-    pipeline: &gst::Pipeline,
-    src_tail: &gst::Element,
-    width: u32,
-    height: u32,
-) -> Result<gst::Element> {
-    let mk = |name: &str, label: &str| {
-        gst::ElementFactory::make(name)
-            .name(label)
-            .build()
-            .map_err(|_| eyre!("failed to create {label} ({name})"))
-    };
-    // Enforces the car's exact display size (head units reject a mismatched stream) and 30fps.
-    let target_caps = gst::Caps::builder("video/x-raw")
-        .field("width", width as i32)
-        .field("height", height as i32)
-        .field("framerate", gst::Fraction::new(30, 1))
-        .build();
-
-    if let Some(b) = select_hw_backend() {
-        tracing::info!("Encode backend: hardware '{}' ({} ! {})", b.name, b.postproc, b.encoder);
-        let postproc = mk(b.postproc, "postproc")?;
-        let encoder = mk(b.encoder, "encoder")?;
-        if !b.keyframe_prop.0.is_empty() {
-            encoder.set_property_from_str(b.keyframe_prop.0, b.keyframe_prop.1);
-        }
-        pipeline.add(&postproc).map_err(|_| eyre!("add postproc"))?;
-        pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
-        src_tail.link(&postproc).map_err(|_| eyre!("link src-postproc"))?;
-        postproc
-            .link_filtered(&encoder, &target_caps)
-            .map_err(|_| eyre!("link postproc-encoder"))?;
-        return Ok(encoder);
-    }
-
-    tracing::info!("Encode backend: software (videoscale ! videorate ! videoconvert ! encoder)");
-    // gop-size caps the keyframe interval (see keyframe_prop above for why).
-    let enc_desc = std::env::var("CARPLAY_ENCODER")
-        .unwrap_or_else(|_| String::from("nvh264enc gop-size=6"));
-    let (enc_name, enc_props) = parse_encoder_string(&enc_desc)?;
-    let encoder = gst::ElementFactory::make(&enc_name)
-        .name("encoder")
-        .build()
-        .map_err(|_| eyre!("failed to create encoder '{enc_name}'"))?;
-    for (key, val) in &enc_props {
-        encoder.set_property_from_str(key, val);
-    }
-    let scale = mk("videoscale", "videoscale")?;
-    let rate = mk("videorate", "videorate")?;
-    let convert = mk("videoconvert", "videoconvert")?;
-
-    pipeline.add(&scale).map_err(|_| eyre!("add scale"))?;
-    pipeline.add(&rate).map_err(|_| eyre!("add rate"))?;
-    pipeline.add(&convert).map_err(|_| eyre!("add convert"))?;
-    pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
-
-    src_tail.link(&scale).map_err(|_| eyre!("link src-scale"))?;
-    scale.link(&rate).map_err(|_| eyre!("link scale-rate"))?;
-    rate.link(&convert).map_err(|_| eyre!("link rate-convert"))?;
-    convert
-        .link_filtered(&encoder, &target_caps)
-        .map_err(|_| eyre!("link convert-encoder"))?;
-    Ok(encoder)
 }
 
 /// Split an encoder description like `"nvh264enc gop-size=6"` into
