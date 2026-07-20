@@ -40,8 +40,6 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
     let (video_tx, mut video_rx) = mpsc::channel::<EncodedFrame>(64);
     let _encoder = AbortOnDropHandle::new(tokio::spawn(encode_h264_to_channel(
         comp.subscribe_frames(),
-        1280,
-        720,
         video_tx,
     )));
     let encoded = Arc::new(AtomicU64::new(0));

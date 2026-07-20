@@ -159,8 +159,6 @@ async fn run_session() -> Result<()> {
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(64);
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_h264_to_channel(
         frame_rx,
-        conn.width,
-        conn.height,
         video_tx,
     )));
     let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx);

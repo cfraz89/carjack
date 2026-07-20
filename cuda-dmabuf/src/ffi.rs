@@ -33,6 +33,9 @@ pub const CU_MEMORYTYPE_ARRAY: u32 = 3;
 
 // CUeglFrameType
 pub const CU_EGL_FRAME_TYPE_ARRAY: u32 = 0;
+/// The pitched (non-tiled) variant. Not matched explicitly (anything that isn't `ARRAY` is
+/// treated as pitched device memory in `import`), kept for documentation of the enum.
+#[allow(dead_code)]
 pub const CU_EGL_FRAME_TYPE_PITCH: u32 = 1;
 
 // ---------- structs ----------
@@ -119,8 +122,12 @@ unsafe extern "C" {
 // ---------- linked GStreamer CUDA ----------
 #[link(name = "gstcuda-1.0")]
 unsafe extern "C" {
+    /// Populates libgstcuda's internal CUDA driver vtable (`gst_cuda_vtable`). Normally called by
+    /// the nvcodec plugin's `plugin_init`, but we call `gst_cuda_context_new` directly without
+    /// having created an nvcodec element yet, so we must load it ourselves first - otherwise
+    /// `gst_cuda_context_new` asserts `gst_cuda_vtable.CuInit != nullptr` and aborts.
+    pub fn gst_cuda_load_library() -> i32;
     pub fn gst_cuda_context_new(device_id: u32) -> *mut c_void;
-    pub fn gst_cuda_context_get_handle(ctx: *mut c_void) -> *mut c_void;
     pub fn gst_cuda_context_push(ctx: *mut c_void) -> i32;
     pub fn gst_cuda_context_pop(previous: *mut *mut c_void) -> i32;
     pub fn gst_cuda_allocator_alloc_wrapped(

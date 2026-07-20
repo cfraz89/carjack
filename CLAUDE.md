@@ -109,19 +109,37 @@ validates by importing into the renderer). Note: Waydroid needs
 and takes ~20-30s to boot Android (black until then; not a teardown - the
 compositor keeps emitting frames throughout).
 
-The frame currently takes one CPU copy (GPU readback to `Vec`) because the
-software GStreamer encode path can't consume dmabuf directly (see the encode
-notes below). Full GPU zero-copy (forward the compositor's dmabuf fd straight to
-a hardware encoder on the same GPU) is the remaining optimization, gated on the
-capability-probed hardware backends in `encode.rs`.
+Two encode modes, both selected by `CARJACK_ZEROCOPY` (read by *both* compositor
+and `encode.rs`, so the frame variant always matches the pipeline):
+- **Zero-copy** (`CARJACK_ZEROCOPY` set): the compositor forwards its rendered
+  dmabuf and `encode.rs` picks a same-GPU hardware backend (auto-probed, or
+  forced via `CARPLAY_ENCODE_BACKEND=cuda|vaapi|v4l2`):
+  - **NVIDIA** (`cuda`): the `cuda-dmabuf` crate imports the block-linear dmabuf
+    via EGL + `cuGraphicsEGLRegisterImage`, de-tiles it GPU->GPU into pitched
+    `GstCudaMemory`, and pushes straight into `nvh264enc`. This exists because
+    `glupload`/`vapostproc` **can't** import NVIDIA's tiled surface.
+  - **Intel/AMD** (`vaapi`): `appsrc(DMABuf) ! vapostproc ! vah264enc`.
+  - **Qualcomm/embedded** (`v4l2`): `appsrc(DMABuf) ! v4l2convert ! v4l2h264enc`.
+    Untested off-device; keyframe control is a best guess to revisit.
+  vaapi/v4l2 rows live in `HW_BACKENDS`; adding a platform = one row.
+- **Software** (default): the compositor reads the frame back to a `Vec` (one
+  CPU copy) and `encode.rs` runs `appsrc(video/x-raw) ! videoconvert ! encoder`.
+  `videoscale`/`videorate` were removed: the compositor already renders at the
+  car's exact resolution and the feeder pushes a steady 30fps, so there's nothing
+  to scale or re-time. `videoconvert` stays - most encoders (e.g. `x264enc`)
+  won't accept the compositor's BGRx.
 
 ### encode.rs gotchas (still apply)
 - Do NOT hand a dmabuf to `videoscale`/`videorate`/`videoconvert` as
   `memory:DMABuf` (with or without `format=DMA_DRM`) - they reject it outright
-  (not-negotiated). A real fd-to-encoder zero-copy path needs DRM/VA-aware
-  elements (vapostproc/v4l2/glupload) - that's what `HW_BACKENDS` is for.
-- The appsrc needs `do-timestamp=true`: buffers are pushed with no PTS and
-  without it `videorate` stalls and nothing reaches the encoder.
+  (not-negotiated). The zero-copy path uses DRM/VA-aware elements
+  (vapostproc/v4l2) or the CUDA importer instead.
+- The appsrc needs `do-timestamp=true`: buffers are pushed with no PTS and the
+  encoder needs timestamps.
+- CUDA gotcha: `gst_cuda_context_new` aborts unless libgstcuda's driver vtable is
+  loaded first. The nvcodec plugin normally does that in its init, but we call
+  the context ctor directly, so `cuda-dmabuf` calls `gst_cuda_load_library()`
+  itself before creating the context.
 
 ### Unverified
 - **Frame orientation**: GL renders bottom-up; `copy_framebuffer` readback

@@ -7,7 +7,7 @@ _run_rust_log := env('RUST_LOG', '')
 _run_desktop_cmd := env('CARJACK_DESKTOP_CMD', '')
 _run_zerocopy := env('CARJACK_ZEROCOPY', '')
 _run_render_node := env('CARJACK_RENDER_NODE', '')
-run_env := f'RUST_LOG="{_run_rust_log}" CARJACK_DESKTOP_CMD="{_run_desktop_cmd}" CARJACK_ZEROCOPY="{_run_zerocopy}" CARJACK_RENDER_NODE="{_run_render_node}"'
+run_env := f'RUST_LOG="{{_run_rust_log}}" CARJACK_DESKTOP_CMD="{{_run_desktop_cmd}}" CARJACK_ZEROCOPY="{{_run_zerocopy}}" CARJACK_RENDER_NODE="{{_run_render_node}}"'
 
 toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }
 toolbox_run := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_RUN', '') == 'true' { 'toolbox run env ' + run_env + ' ' } else { '' }
