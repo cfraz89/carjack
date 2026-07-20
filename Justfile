@@ -1,6 +1,10 @@
 set dotenv-load
 mod armbian
 
+# Prefix cargo commands with `toolbox run` when USE_TOOLBOX is set and we're not already inside
+# a toolbox (TOOLBOX_PATH unset), so they build against the toolbox's native libs.
+toolbox := if env('TOOLBOX_PATH', '') != '' { '' } else if env('USE_TOOLBOX', '') == 'true' { 'toolbox run ' } else { '' }
+
 run $GST_DEBUG="*:2": build
     ./target/debug/carjack
 
@@ -33,10 +37,11 @@ test-run timeout="60":
     # `run` handles the toolbox re-exec itself now, so just call it directly.
     timeout "{{timeout}}s" just run || true
 
-[script]
 build:
-    if [ "${USE_TOOLBOX:-}" = "true" ] && [ -z "${TOOLBOX_PATH:-}" ]; then
-        toolbox run cargo build
-    else
-        cargo build
-    fi
+    {{toolbox}}cargo build
+
+# Run a single cargo test filtered by name (e.g. `just test compositor`), in the toolbox (when
+# USE_TOOLBOX is set) for the native build/link libs; the toolbox shares the host GPU/DRM the
+# compositor test needs at runtime.
+test test_name:
+    {{toolbox}}cargo test {{test_name}}

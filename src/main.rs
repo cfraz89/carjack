@@ -8,16 +8,13 @@ use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 
 use libcarjack::carplay_ctrl::wait_for_carplay_ctrl_probe;
 
+use carjack::{compositor::Compositor, encode};
+
 use crate::{
-    airplay::start_video_stream,
-    compositor::Compositor,
     wifi_connect::{CarWifi, connect_to_car_wifi},
     wireless::wireless_carplay,
 };
 
-mod airplay;
-mod compositor;
-mod encode;
 mod usb;
 mod wifi_connect;
 mod wireless;
@@ -53,12 +50,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Temporary standalone validation hook for the internal-compositor build-out: start the
-    // compositor, run a client against it, and confirm frames come out with client content.
-    if std::env::var("CARJACK_TEST_COMPOSITOR").is_ok() {
-        return test_compositor().await;
-    }
-
     // Each session runs the full flow (Bluetooth -> WiFi -> AirPlay). If it fails - most
     // importantly when the car tears down the screen socket - restart from a fresh Bluetooth
     // connection rather than exiting.
@@ -74,92 +65,6 @@ async fn main() -> Result<()> {
             }
         }
     }
-}
-
-/// Standalone validation of the internal compositor: bring it up, run a fullscreen client that
-/// paints the screen white, and confirm the composited frames actually contain the client's
-/// output (not just the black clear).
-async fn test_compositor() -> Result<()> {
-    let comp = compositor::Compositor::start(1280, 720)?;
-    tracing::info!("compositor started, socket={:?}", comp.socket_name);
-
-    // Use the configured desktop app if set (so this validates the real CARJACK_DESKTOP_CMD),
-    // otherwise a foot that fills the screen white so a rendered frame is unmistakably non-black.
-    let cmd = std::env::var("CARJACK_DESKTOP_CMD")
-        .unwrap_or_else(|_| "foot -e sh -c 'printf \\033[47m\\033[2J; sleep 60'".to_string());
-    tracing::info!("test client: {cmd}");
-    let mut child = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd)
-        .env("WAYLAND_DISPLAY", &comp.socket_name)
-        .spawn()
-        .map_err(|e| eyre!("spawn test client: {e}"))?;
-
-    // Also run the H264 encoder on the compositor frames and count encoded access units, so
-    // this validates the full compositor -> encode path (incl. the zero-copy dmabuf pipeline)
-    // without needing the car.
-    let (video_tx, mut video_rx) = mpsc::channel::<airplay::EncodedFrame>(64);
-    let _encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_h264_to_channel(
-        comp.subscribe_frames(),
-        1280,
-        720,
-        video_tx,
-    )));
-    let encoded = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let encoded2 = encoded.clone();
-    let _counter = AbortOnDropHandle::new(tokio::spawn(async move {
-        while let Some(f) = video_rx.recv().await {
-            let n = encoded2.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if n % 30 == 1 {
-                tracing::info!("encoded AU #{n} ({} bytes, keyframe={})", f.data.len(), f.config.is_some());
-            }
-        }
-    }));
-
-    let mut rx = comp.subscribe_frames();
-    let mut checked = 0;
-    let mut max_brightness = 0u64;
-    // ~30fps, so frames ≈ seconds*30. GPU clients like Waydroid take a while to boot.
-    let budget: u64 = std::env::var("CARJACK_TEST_FRAMES").ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(90);
-    while checked < budget {
-        if rx.changed().await.is_err() {
-            break;
-        }
-        let Some(frame) = rx.borrow_and_update().clone() else {
-            continue;
-        };
-        checked += 1;
-        match &*frame {
-            compositor::CapturedFrame::Shm { data, width, height, .. } => {
-                // Sample luma to confirm the client actually rendered (not just black clear).
-                let sum: u64 = data.iter().step_by(997).map(|&b| b as u64).sum();
-                max_brightness = max_brightness.max(sum);
-                if checked % 30 == 1 {
-                    tracing::info!("frame #{checked}: SHM {width}x{height}, sample-sum={sum}");
-                }
-            }
-            compositor::CapturedFrame::Dmabuf(_) => {
-                // GPU memory - can't cheaply sample; the point is that dmabufs are flowing.
-                max_brightness = 1_000_000;
-                if checked % 30 == 1 {
-                    tracing::info!("frame #{checked}: DMABUF forwarded (zero-copy)");
-                }
-            }
-        }
-    }
-    let _ = child.kill();
-
-    let encoded_total = encoded.load(std::sync::atomic::Ordering::Relaxed);
-    tracing::info!("compositor OK: {checked} frames reached the stream, {encoded_total} encoded AUs");
-    if encoded_total == 0 {
-        return Err(eyre!("encoder produced no output - the encode pipeline didn't work"));
-    }
-    if max_brightness <= 10_000 {
-        return Err(eyre!("frames stayed black - client never rendered into the compositor"));
-    }
-    Ok(())
 }
 
 async fn run_session() -> Result<()> {
@@ -247,14 +152,25 @@ async fn run_session() -> Result<()> {
     spawn_desktop_apps(&compositor.socket_name);
     let frame_rx = compositor.subscribe_frames();
 
-    let airplay = start_video_stream(conn, frame_rx, touch_tx);
-    tokio::pin!(airplay);
+    // Encode the compositor's frames to H264 on its own task (so it keeps buffering through
+    // AirPlay setup) and stream them to the car. The encoder and the video stream are both
+    // session-lifetime, so their arms live directly in the loop below alongside the Bluetooth
+    // handle and touch - one place for the whole streaming session to end or error.
+    let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(64);
+    let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_h264_to_channel(
+        frame_rx,
+        conn.width,
+        conn.height,
+        video_tx,
+    )));
+    let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx);
+    tokio::pin!(video);
 
     // If the car later drops Bluetooth on its own, that's not fatal - keep streaming.
     let mut carplay_done = false;
-    // touch_tx lives on the AirPlay/HID side (see start_video_stream), not on carplay_handle,
-    // so it's tracked separately - gating it on carplay_done (as before) meant a BT drop
-    // silently killed touch for the rest of the session even though it kept working fine.
+    // touch_tx lives on the AirPlay/HID side (run_video_stream), not on carplay_handle, so it's
+    // tracked separately - gating it on carplay_done meant a BT drop silently killed touch for
+    // the rest of the session even though it kept working fine.
     let mut touch_done = false;
 
     loop {
@@ -267,7 +183,16 @@ async fn run_session() -> Result<()> {
                     Err(e) => tracing::warn!("CarPlay task panicked: {e}"),
                 }
             }
-            result = &mut airplay => {
+            // Race the encoder so a GStreamer failure surfaces as a real error rather than a
+            // silently closed video channel (which the stream side only sees as a clean end).
+            result = &mut encoder => {
+                return match result {
+                    Ok(Ok(())) => Err(eyre!("video encoder task ended unexpectedly")),
+                    Ok(Err(e)) => Err(eyre!("video encoder failed: {e}")),
+                    Err(e) => Err(eyre!("video encoder task panicked: {e}")),
+                };
+            }
+            result = &mut video => {
                 // Propagate so the caller restarts the whole flow (e.g. car closed the
                 // screen socket).
                 result?;

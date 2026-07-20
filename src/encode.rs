@@ -15,7 +15,7 @@ use smithay::backend::allocator::Buffer as _;
 use tokio::sync::{mpsc, watch};
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::airplay::EncodedFrame;
+use libcarjack::airplay::EncodedFrame;
 use crate::compositor::CapturedFrame;
 
 /// Zero-copy `AsRef<[u8]>` view of an SHM frame's pixels, so re-pushing the same frame (the
