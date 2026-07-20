@@ -2,19 +2,13 @@ set dotenv-load
 mod armbian
 
 # Prefix cargo commands with `toolbox run` when USE_TOOLBOX is set and we're not already inside
-# a toolbox (TOOLBOX_PATH unset), so they build against the toolbox's native libs.
+# a toolbox (TOOLBOX_PATH unset), to ease building on silverblue and the like
 toolbox := if env('TOOLBOX_PATH', '') != '' { '' } else if env('USE_TOOLBOX', '') == 'true' { 'toolbox run ' } else { '' }
 
 run $GST_DEBUG="*:2": build
     ./target/debug/carjack
 
-# Safety-netted wrapper around `run` for exercising real hardware access (NetworkManager,
-# BlueZ, GPU) during development. carjack drives the *real* host NetworkManager/BlueZ over
-# D-Bus - including from inside toolbox, which shares the host D-Bus session - so a run that
-# hangs or gets killed can leave the host's own network disconnected. This caps the run to
-# `timeout` seconds and unconditionally restores whatever NetworkManager connection was active
-# beforehand, killing any leftover carjack processes first in case `timeout` alone didn't reach
-# them.
+#Run the app until timeout, then kill it and restore the original wifi connection
 [script('bash')]
 test-run timeout="60":
     set -uo pipefail
@@ -38,10 +32,10 @@ test-run timeout="60":
     timeout "{{timeout}}s" just run || true
 
 build:
-    {{toolbox}}cargo build
+    {{toolbox}}cargo build < /dev/null
 
 # Run a single cargo test filtered by name (e.g. `just test compositor`), in the toolbox (when
 # USE_TOOLBOX is set) for the native build/link libs; the toolbox shares the host GPU/DRM the
 # compositor test needs at runtime.
 test test_name:
-    {{toolbox}}cargo test {{test_name}}
+    {{toolbox}}cargo test {{test_name}} < /dev/null
