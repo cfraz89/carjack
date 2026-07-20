@@ -3,9 +3,8 @@ mod armbian
 
 toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }
 toolbox_run := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_RUN', '') == 'true' { f'toolbox run env RUST_LOG="{{env('RUST_LOG', '')}}" ' } else { '' }
-
-run $GST_DEBUG="*:2": build
-    {{toolbox_run}} cargo run < /dev/null
+run +flags="": (build flags)
+    {{toolbox_run}}cargo run {{flags}} < /dev/null
 
 #Run the app until timeout, then kill it and restore the original wifi connection
 [script('bash')]
@@ -30,8 +29,8 @@ test-run timeout="60":
     # `run` handles the toolbox re-exec itself now, so just call it directly.
     timeout "{{timeout}}s" just run || true
 
-build:
-    {{toolbox_build}}cargo build < /dev/null
+build +flags="":
+    {{toolbox_build}}cargo build {{flags}} < /dev/null
 
 # Run a single cargo test filtered by name (e.g. `just test compositor`), in the toolbox (when
 # USE_TOOLBOX is set) for the native build/link libs; the toolbox shares the host GPU/DRM the
