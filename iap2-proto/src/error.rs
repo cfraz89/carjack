@@ -1,7 +1,6 @@
 use bytes::Bytes;
 use deku::DekuError;
 use thiserror::Error;
-use tokio::time::error::Elapsed;
 
 use crate::packet::Packet;
 
