@@ -22,7 +22,6 @@ pub struct Graphics {
     /// Which DRM device to render *and* encode on (they must match for zero-copy). One of:
     /// `"auto"`, a driver name (`"nvidia"`, `"amdgpu"`, `"i915"`, ...), a render-node path
     /// (`"/dev/dri/renderD128"`), or a numeric index (`"0"` -> `renderD128`, `"1"` -> `renderD129`).
-    /// (Single-word key so the env separator stays a single underscore: `CARJACK_GRAPHICS_DEVICE`.)
     pub drm_device: String,
     /// Zero-copy encode mode: `"auto"` (try it, fall back to software with a warning), `true`
     /// (require it - error out if the pipeline can't be built), or `false` (software).
@@ -149,9 +148,9 @@ pub struct Cli {
     #[arg(long, value_name = "CMD")]
     pub command: Option<String>,
 
-    /// Override [app] app_resizable.
+    /// Override [app] resizable.
     #[arg(long, action = clap::ArgAction::Set, value_name = "BOOL")]
-    pub app_resizable: Option<bool>,
+    pub resizable: Option<bool>,
 }
 
 impl Config {
@@ -202,7 +201,7 @@ impl Config {
         if let Some(v) = &cli.command {
             cfg.app.command = v.clone();
         }
-        if let Some(v) = cli.app_resizable {
+        if let Some(v) = cli.resizable {
             cfg.app.resizable = v;
         }
         Ok(cfg)
@@ -370,7 +369,7 @@ mod tests {
             (cfg.display.width, cfg.display.height, cfg.display.fps),
             (800, 480, 60)
         );
-        assert_eq!(cfg.desktop_command(), Some("foo"));
+        assert_eq!(cfg.desktop_command(), "foo");
         assert!(cfg.app.resizable);
     }
 
@@ -396,14 +395,14 @@ mod tests {
             "false",
             "--width",
             "640",
-            "--app-resizable",
+            "--resizable",
             "true",
         ]);
         let cfg = Config::load(&cli).unwrap();
         assert_eq!(cfg.graphics.drm_device, "i915");
         assert_eq!(cfg.graphics.zerocopy, ZeroCopyMode::Off);
         assert_eq!(cfg.display.width, 640);
-        assert!(cfg.app.app_resizable);
+        assert!(cfg.app.resizable);
     }
 
     #[test]

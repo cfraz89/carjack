@@ -4,7 +4,7 @@ mod armbian
 toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }
 toolbox_run := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_RUN', '') == 'true' { f'toolbox run env RUST_LOG="{{env('RUST_LOG', '')}}" ' } else { '' }
 run +flags="": (build flags)
-    {{toolbox_run}}cargo run {{flags}} < /dev/null
+    {{toolbox_run}} waydroid session stop && cargo run {{flags}} < /dev/null
 
 #Run the app until timeout, then kill it and restore the original wifi connection
 [script('bash')]
