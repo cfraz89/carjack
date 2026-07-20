@@ -1,0 +1,8 @@
+{
+    // rust-analyzer runs `cargo check` on the HOST toolchain, while `just build`/`just test`
+    // build inside the toolbox - both against the same shared `target/`. That makes them
+    // contend for `target/debug/.cargo-lock` (so `toolbox run cargo build` intermittently hangs
+    // waiting on the lock) and invalidate each other's fingerprints (constant rebuilds). Giving
+    // rust-analyzer its own `target/rust-analyzer` dir isolates it from the toolbox builds.
+    "rust-analyzer.cargo.targetDir": true
+}

@@ -72,8 +72,14 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
         checked += 1;
         match &*frame {
             CapturedFrame::Shm { data, width, height, .. } => {
-                // Sample luma to confirm the client actually rendered (not just black clear).
-                let sum: u64 = data.iter().step_by(997).map(|&b| b as u64).sum();
+                // Sample colour to confirm the client actually rendered (not just black clear).
+                // Sum only R/G/B per pixel - NOT the 4th (X) byte, which is opaque 255 padding
+                // in BGRx and would make even a pure-black frame score non-zero.
+                let sum: u64 = data
+                    .chunks_exact(4)
+                    .step_by(251)
+                    .map(|px| px[0] as u64 + px[1] as u64 + px[2] as u64)
+                    .sum();
                 max_brightness = max_brightness.max(sum);
                 if checked % 30 == 1 {
                     tracing::info!("frame #{checked}: SHM {width}x{height}, sample-sum={sum}");
