@@ -50,3 +50,8 @@ smithay = { version = "0.7.0", default-features = false, features = ["backend_eg
 gstreamer-allocators = "0.24"
 gstreamer-video = { version = "0.24", features = ["v1_24"] }
 cuda-dmabuf = { path = "cuda-dmabuf" }
+serde = { version = "1", features = ["derive"] }
+config = { version = "0.15", default-features = false, features = ["toml"] }
+libc = "0.2"
+xdg = "3.0.0"
+clap = { version = "4.6.2", features = ["derive"] }

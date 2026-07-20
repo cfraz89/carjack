@@ -1,0 +1,41 @@
+# carjack configuration.
+# Loaded from ~/.config/carjack/config.toml (XDG), or pass `-c <path>` / `carjack --config <path>`.
+# Every key has a default, so you only need the ones you want to change.
+#
+# Precedence (highest wins): launch flag > CARJACK_* env var > this file > default.
+#   flags:    carjack --drm-device nvidia --zerocopy auto --width 800 --command "..." (see --help)
+#   env vars: CARJACK_GRAPHICS__DRM_DEVICE, CARJACK_GRAPHICS__ZEROCOPY, CARJACK_DISPLAY__WIDTH,
+#             CARJACK_APP__COMMAND, CARJACK_APP__APP_RESIZABLE, ...  (section + `__` + key)
+
+[graphics]
+# Which GPU to render *and* encode on (they must be the same for zero-copy). One of:
+#   "auto"                  - pick automatically, preferring an encode-capable GPU
+#                             (nvidia > amdgpu > i915 > others)
+#   "nvidia" / "amdgpu" / "i915" / ...  - pick the render node with this kernel driver
+#   "/dev/dri/renderD129"   - an explicit render-node path
+#   "0" / "1" / ...         - a numeric index (0 -> renderD128, 1 -> renderD129)
+drm_device = "auto"
+
+# Zero-copy encode (compositor dmabuf straight into a same-GPU hardware encoder):
+#   "auto"   - try zero-copy; if it can't be set up, fall back to software (with a warning)
+#   true     - require zero-copy; error out at startup if it can't be set up
+#   false    - software encode only
+zerocopy = "auto"
+
+[display]
+# Initial compositor size/rate, used before the car reports its real display over AirPlay.
+# TIP: set these to your car's actual values. Then the app boots at the right size and the later
+# reconfigure is a no-op - important with resizable = false below.
+width = 1280
+height = 720
+fps = 30
+
+[app]
+# Desktop command to stream (run via `sh -c "exec ..."`). Empty = stream black until a client
+# connects.
+command = "waydroid show-full-ui"
+# Can the app live-resize?
+#   true  - launched at startup (boots during the BT/WiFi phase) and left to resize itself
+#   false - can't resize (Android/Waydroid): NOT launched until the car's resolution is known,
+#           and relaunched on later reconnects that change the size
+resizable = false
