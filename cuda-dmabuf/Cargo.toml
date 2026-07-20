@@ -4,10 +4,8 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-# All native libs (libcuda, libEGL, libgbm, libgstcuda) are dlopen'd at runtime via libloading,
-# not linked - the build runs in the toolbox where they're absent; carjack runs on the host where
-# they exist.
-libloading = "0.8"
+# All native libs (libcuda, libEGL, libgbm, libgstcuda) are linked at build time via
+# build.rs. The build toolbox must have the corresponding -devel packages installed.
 gstreamer = "0.24"
 gstreamer-video = { version = "0.24", features = ["v1_24"] }
 eyre = "0.6.12"

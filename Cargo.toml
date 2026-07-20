@@ -30,7 +30,7 @@ tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = "0.1.18"
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "tracing-log"] }
 usb-gadget = "1.2.0"
 zbus = { version = "5.17.0", features = ["tokio"] }
 tap = "1.0.1"
