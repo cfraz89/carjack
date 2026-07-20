@@ -23,9 +23,9 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   internal Smithay compositor headless on the DRM render node - no external
   compositor). Only the build is in the toolbox. Configure a **host-installed**
   desktop app to stream via `[app] command` in the config file (or
-  `CARJACK_APP__COMMAND` / `--command`); leave unset to stream black. Settings
+  `CARJACK_APP.COMMAND` / `--command`); leave unset to stream black. Settings
   come from `~/.config/carjack/config.toml` (see `carjack.toml.example`),
-  overridable by `CARJACK_<SECTION>__<KEY>` env vars (`.env` sets these) and
+  overridable by `CARJACK_<SECTION>.<KEY>` env vars (`.env` sets these) and
   launch flags (`carjack --help`); config module is `src/config.rs`.
 - just test-run [timeout] - **use this instead of `just run`/bare `cargo run`
   for any live/manual testing.** carjack drives the real host NetworkManager and
@@ -38,7 +38,7 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 - To exercise the compositor standalone without a car: `just test compositor`
   (the `tests/compositor.rs` integration test) brings it up, runs a client, and
   checks the composited frames contain client content and drive the encode path.
-  `CARJACK_APP__COMMAND` overrides the test client; `CARJACK_TEST_FRAMES` caps
+  `CARJACK_APP.COMMAND` overrides the test client; `CARJACK_TEST_FRAMES` caps
   the frames sampled. It needs host GPU/DRM at runtime.
 
 ## CarPlay / iAP2 protocol notes
@@ -153,13 +153,22 @@ variant always matches the pipeline. Two families:
   to scale or re-time. `videoconvert` stays - most encoders (e.g. `x264enc`)
   won't accept the compositor's BGRx.
 
-Anti-stutter: the encode feeder pushes on the compositor's frame production
-(`frame_rx.changed()`), **not** a second independent timer - two ~30fps clocks
-beat and periodically dup/drop a frame. The compositor render timer rearms to
-absolute deadlines (not `now + interval`) so per-frame render time doesn't drag
-the cadence. The CUDA de-tile buffers are pooled (`CudaPool` in `cuda-dmabuf`)
-so `import` reuses device memory instead of `cuMemAlloc`/`cuMemFree` per frame;
-buffers return to the pool via the GstCudaMemory free callback.
+Anti-stutter / low-latency (all in `encode.rs`, overridable via `CARPLAY_ENCODER`):
+- The encode feeder pushes on the compositor's frame production
+  (`frame_rx.changed()`), **not** a second independent timer - two ~30fps clocks
+  beat and periodically dup/drop a frame. The compositor render timer rearms to
+  absolute deadlines (not `now + interval`) so per-frame render time doesn't drag
+  the cadence.
+- The CUDA de-tile buffers are pooled (`CudaPool` in `cuda-dmabuf`) so `import`
+  reuses device memory instead of `cuMemAlloc`/`cuMemFree` per frame; buffers
+  return to the pool via the GstCudaMemory free callback.
+- `DEFAULT_ENCODER` is tuned for real-time: `gop-size=30` (~1s keyframes, not a
+  fraction of a second - frequent IDRs are large and burst the car's WiFi);
+  `tune=ultra-low-latency` + `bframes=0` + `rc-lookahead=0` + `zerolatency` (no
+  reorder/lookahead delay); `rc-mode=cbr bitrate=12000` (steady, link-friendly).
+- A leaky `queue` (`leaky=downstream`, `max-size-buffers=3`) sits after the
+  appsrc so a momentary encode/WiFi stall drops the oldest frame instead of
+  growing latency.
 
 ### encode.rs gotchas (still apply)
 

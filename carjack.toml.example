@@ -4,8 +4,8 @@
 #
 # Precedence (highest wins): launch flag > CARJACK_* env var > this file > default.
 #   flags:    carjack --drm-device nvidia --zerocopy auto --width 800 --command "..." (see --help)
-#   env vars: CARJACK_GRAPHICS__DRM_DEVICE, CARJACK_GRAPHICS__ZEROCOPY, CARJACK_DISPLAY__WIDTH,
-#             CARJACK_APP__COMMAND, CARJACK_APP__APP_RESIZABLE, ...  (section + `__` + key)
+#   env vars: CARJACK_GRAPHICS.DRM_DEVICE, CARJACK_GRAPHICS.ZEROCOPY, CARJACK_DISPLAY.WIDTH,
+#             CARJACK_APP.COMMAND, CARJACK_APP.RESIZABLE, ...  (CARJACK_ + section + `.` + key)
 
 [graphics]
 # Which GPU to render *and* encode on (they must be the same for zero-copy). One of:

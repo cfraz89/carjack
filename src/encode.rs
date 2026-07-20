@@ -164,10 +164,22 @@ pub async fn encode_h264_to_channel(
     src.set_property("do-timestamp", true);
     pipeline.add(&src).map_err(|_| eyre!("add source"))?;
 
+    // A small leaky queue decouples the feeder from the encode chain and, crucially, keeps
+    // latency bounded: if the encoder or the car's WiFi momentarily falls behind, it drops the
+    // oldest frame (leaky=downstream) rather than letting buffers pile up and lag grow. It's a
+    // live stream, so a dropped frame is always better than a growing delay.
+    let queue = mk("queue", "queue")?;
+    queue.set_property_from_str("leaky", "downstream");
+    queue.set_property("max-size-buffers", 3u32);
+    queue.set_property("max-size-time", 0u64);
+    queue.set_property("max-size-bytes", 0u32);
+    pipeline.add(&queue).map_err(|_| eyre!("add queue"))?;
+    src.link(&queue).map_err(|_| eyre!("link src-queue"))?;
+
     // Build the pipeline for the backend chosen at startup. The compositor was started in a
     // matching mode (dmabuf for zero-copy, CPU-readback SHM for software), so the frame variant
     // the feeder receives always matches what this pipeline's first element can consume.
-    let (encoder, feeder) = build_backend(&pipeline, &src, &backend)?;
+    let (encoder, feeder) = build_backend(&pipeline, &queue, &backend)?;
     tracing::info!("Encode backend: {}", backend.describe());
 
     let output_caps = gst::Caps::builder("video/x-h264")
@@ -371,7 +383,8 @@ const HW_BACKENDS: &[HwBackend] = &[
         name: "vaapi",
         postproc: "vapostproc",
         encoder: "vah264enc",
-        keyframe_prop: ("key-int-max", "6"),
+        // ~1s keyframe interval (see DEFAULT_ENCODER for why not shorter).
+        keyframe_prop: ("key-int-max", "30"),
     },
 ];
 
@@ -379,40 +392,52 @@ fn element_available(name: &str) -> bool {
     gst::ElementFactory::find(name).is_some()
 }
 
-/// Build the encode chain onto `pipeline` (from the `appsrc`) for the resolved backend, and
+/// Build the encode chain onto `pipeline` (linking from `tail`) for the resolved backend, and
 /// return the encoder element (whose src pad is H264) plus the [`FrameFeeder`] describing how to
 /// push frames into it.
 fn build_backend(
     pipeline: &gst::Pipeline,
-    src: &gst_app::AppSrc,
+    tail: &gst::Element,
     backend: &EncodeBackend,
 ) -> Result<(gst::Element, FrameFeeder)> {
-    let src_tail: gst::Element = src.clone().upcast();
     match &backend.kind {
         BackendKind::Software => {
-            Ok((build_software_chain(pipeline, &src_tail)?, FrameFeeder::Shm))
+            Ok((build_software_chain(pipeline, tail)?, FrameFeeder::Shm))
         }
         BackendKind::Cuda(importer) => {
             // Share our CUDA context with nvh264enc so the imported GstCudaMemory and the encoder
             // live on the same context. Must be set before the encoder is added to the bin (the
             // bin propagates its contexts to children as they're added).
             pipeline.set_context(&importer.gst_context());
-            let encoder = build_cuda_chain(pipeline, &src_tail)?;
+            let encoder = build_cuda_chain(pipeline, tail)?;
             Ok((encoder, FrameFeeder::Cuda(importer.clone())))
         }
         BackendKind::Dmabuf(b) => {
-            let encoder = build_dmabuf_hw_chain(pipeline, &src_tail, b)?;
+            let encoder = build_dmabuf_hw_chain(pipeline, tail, b)?;
             Ok((encoder, FrameFeeder::DmaDrm(DmaBufAllocator::new())))
         }
     }
 }
+
+/// Default encoder + settings, tuned for real-time streaming to the car (overridable via
+/// `CARPLAY_ENCODER`). Rationale, since the defaults matter for smoothness:
+/// - `gop-size=30` (~1s keyframe interval) instead of a fraction of a second: a keyframe (IDR) is
+///   a large frame, and emitting one every few frames produces periodic bursts that congest the
+///   car's WiFi - a major stutter source. The car requests an IDR on connect/loss anyway.
+/// - `tune=ultra-low-latency` + `bframes=0` + `rc-lookahead=0` + `zerolatency`: no frame
+///   reordering and no lookahead buffering, so encoded frames come out immediately (kills "lag").
+/// - `rc-mode=cbr` + fixed `bitrate`: a steady, predictable bitrate the WiFi link can sustain,
+///   rather than nvenc's automatic (spiky) rate control.
+/// - `preset=p4`: the modern medium preset (used together with `tune`).
+const DEFAULT_ENCODER: &str = "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=cbr \
+    bitrate=12000 gop-size=30 bframes=0 rc-lookahead=0 zerolatency=true aud=true";
 
 /// NVIDIA: `appsrc(CUDAMemory) ! nvh264enc`. The importer already produced GstCudaMemory buffers
 /// on the encoder's context, so nvh264enc consumes them directly (internal RGB->NV12). No
 /// glupload - NVIDIA won't hand its block-linear surface back as a GL texture.
 fn build_cuda_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Result<gst::Element> {
     let enc_desc =
-        std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from("nvh264enc gop-size=6"));
+        std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from(DEFAULT_ENCODER));
     let (enc_name, enc_props) = parse_encoder_string(&enc_desc)?;
     let encoder = gst::ElementFactory::make(&enc_name)
         .name("encoder")
@@ -470,9 +495,8 @@ fn build_software_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Re
             .build()
             .map_err(|_| eyre!("failed to create {label} ({name})"))
     };
-    // gop-size caps the keyframe interval (see HwBackend::keyframe_prop for why).
     let enc_desc = std::env::var("CARPLAY_ENCODER")
-        .unwrap_or_else(|_| String::from("nvh264enc gop-size=6"));
+        .unwrap_or_else(|_| String::from(DEFAULT_ENCODER));
     let (enc_name, enc_props) = parse_encoder_string(&enc_desc)?;
     let encoder = gst::ElementFactory::make(&enc_name)
         .name("encoder")
