@@ -69,7 +69,7 @@ pub async fn run_video_stream(
     mut video_rx: mpsc::Receiver<EncodedFrame>,
     touch_tx: mpsc::Sender<TouchEvent>,
 ) -> Result<()> {
-    let AirPlayConnection { tx, width, height, .. } = conn;
+    let AirPlayConnection { tx, width, height, max_fps } = conn;
 
     // CarPlay resource arbitration: claim the main screen for us (the controller) via a
     // ModesChanged command BEFORE setting up the screen stream. This ordering is mandatory
@@ -118,7 +118,19 @@ pub async fn run_video_stream(
     let mut sent_keyframe = false;
     let mut frames_sent: u64 = 0;
     let mut last_heartbeat = std::time::Instant::now();
+    let mut frames_at_last_heartbeat: u64 = 0;
     const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+    // Steady media clock. The car honours our PTS (`respect_timestamps`), so presenting frames on
+    // an evenly-spaced timeline (`frame_dur` apart) - rather than at jittery wall-clock arrival
+    // time - is what makes playback smooth: the `latency` buffer soaks up encode/delivery jitter.
+    // We re-anchor to real-time only if the clock drifts out of a safe window (a stall, or the
+    // production rate wandering from `fps`), so a PTS never lands in the past (which the head unit
+    // rejects) or runs unboundedly ahead.
+    let fps = if max_fps == 0 { 30 } else { max_fps };
+    let frame_dur = Duration::from_nanos(1_000_000_000 / fps as u64);
+    const AHEAD_LIMIT: Duration = Duration::from_millis(200);
+    let mut next_pts: Option<std::time::Instant> = None;
 
     while let Some(encoded) = video_rx.recv().await {
         let data_len = encoded.data.len();
@@ -129,11 +141,20 @@ pub async fn run_video_stream(
             continue;
         }
 
+        // Advance the media clock by one frame; keep the smooth scheduled time as long as it
+        // stays in the safe window (strictly in the future so it's never rejected as past, and
+        // not more than AHEAD_LIMIT beyond the ideal so buffering can't grow unbounded), else
+        // re-anchor to `now + latency`.
+        let now = std::time::Instant::now();
+        let ideal = now + latency;
+        let pts_instant = match next_pts {
+            Some(t) if t > now && t <= ideal + AHEAD_LIMIT => t,
+            _ => ideal,
+        };
+        next_pts = Some(pts_instant + frame_dur);
+
         let frame = EncodedVideoFrame {
-            // Present `latency` in the future, matching catplay's own transmitter usage.
-            // A bare `now` lands in the past relative to the media clock anchor, producing
-            // the negative/backwards timestamps the head unit rejects.
-            pts: Pts(std::time::Instant::now() + latency),
+            pts: Pts(pts_instant),
             width,
             height,
             data: BytesMut::from(&encoded.data[..]),
@@ -163,11 +184,16 @@ pub async fn run_video_stream(
             sent_keyframe = true;
         }
 
-        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+        let elapsed = last_heartbeat.elapsed();
+        if elapsed >= HEARTBEAT_INTERVAL {
+            let sent = frames_sent - frames_at_last_heartbeat;
+            let rate = sent as f64 / elapsed.as_secs_f64();
             tracing::info!(
-                "Streaming heartbeat: {frames_sent} frames sent, last frame {data_len} bytes, keyframe={is_keyframe}"
+                "Streaming heartbeat: {rate:.1} fps ({sent} frames / {:.1}s), last frame {data_len} bytes, target {fps} fps",
+                elapsed.as_secs_f64()
             );
             last_heartbeat = std::time::Instant::now();
+            frames_at_last_heartbeat = frames_sent;
         }
     }
 

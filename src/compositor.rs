@@ -593,10 +593,33 @@ fn run(
     // The interval is re-read from `state.frame_interval` so `reconfigure` can change it live.
     let frame_interval = Duration::from_micros(1_000_000 / fps as u64);
     let mut next_deadline = std::time::Instant::now() + frame_interval;
+    // Lightweight cadence stats (logged ~every 5s): how many frames we actually rendered per
+    // second, and the worst render time - to tell apart "compositor can't keep up" from
+    // downstream stutter. Compare against the encoder/send-side heartbeat's fps.
+    let mut stat_count: u32 = 0;
+    let mut stat_render_max = Duration::ZERO;
+    let mut stat_since = std::time::Instant::now();
     loop_handle
         .insert_source(Timer::from_duration(frame_interval), move |_, _, state: &mut State| {
+            let render_start = std::time::Instant::now();
             state.render_and_publish();
             let now = std::time::Instant::now();
+
+            stat_count += 1;
+            stat_render_max = stat_render_max.max(now - render_start);
+            let elapsed = now - stat_since;
+            if elapsed >= Duration::from_secs(5) {
+                tracing::info!(
+                    "compositor: {:.1} fps rendered (target {}), worst render {:.1}ms",
+                    stat_count as f64 / elapsed.as_secs_f64(),
+                    (1_000_000 / state.frame_interval.as_micros().max(1)),
+                    stat_render_max.as_secs_f64() * 1000.0,
+                );
+                stat_count = 0;
+                stat_render_max = Duration::ZERO;
+                stat_since = now;
+            }
+
             next_deadline += state.frame_interval;
             if next_deadline <= now {
                 next_deadline = now + state.frame_interval;
