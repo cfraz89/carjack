@@ -3,6 +3,7 @@ use std::{
     time::Duration,
 };
 
+use backon::{ConstantBuilder, Retryable};
 use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
@@ -12,6 +13,7 @@ use bluer::{
     rfcomm::{self, Role},
 };
 use eyre::{Result, eyre};
+use futures::FutureExt;
 use iap2_proto::{config::LinkConfig, error::Iap2Error, iap2::Iap2};
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
@@ -82,48 +84,40 @@ pub async fn wireless_carplay(
         }
     });
 
-    // Connect out to the accessory's iAP profile - this outgoing accessory-role stream is
-    // the one the accessory drives the iAP2 session over. Retry persistently: right after a
-    // reboot BlueZ reports ProfileUnavailable until the accessory's SDP record resolves, and
-    // that can take many seconds. Each attempt is time-boxed so a wedged BlueZ call can't
-    // stall the session. "already-connected" means the RFCOMM link is already up (the
-    // acceptance task above has, or will get, the stream) - treat it as success.
-    const CONNECT_ATTEMPTS: u32 = 40;
-    let mut connected = false;
-    for attempt in 0..CONNECT_ATTEMPTS {
-        match tokio::time::timeout(
+    (|| async {
+        tokio::time::timeout(
             Duration::from_secs(3),
-            device.connect_profile(&IAP_ACCESSORY_UUID),
+            device
+                .connect_profile(&IAP_ACCESSORY_UUID)
+                .map(|r| match r {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.kind == bluer::ErrorKind::AlreadyConnected => {
+                        tracing::info!("Accessory profile already connected, proceeding");
+                        Ok(())
+                    }
+                    Err(e) => Err(eyre!(e)),
+                }),
         )
-        .await
-        {
-            Ok(Ok(())) => {
-                connected = true;
-                break;
-            }
-            Ok(Err(e)) => {
-                if e.to_string().contains("already-connected") {
-                    tracing::info!("Accessory profile already connected, proceeding");
-                    connected = true;
-                    break;
-                }
-                tracing::warn!(?e, attempt, "connect_profile failed, retrying");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            Err(_) => {
-                tracing::warn!(attempt, "connect_profile timed out, retrying");
-            }
-        }
-    }
-    if !connected {
-        // Fall through anyway - the accessory may still have connected inbound, in which
-        // case the acceptance task below already holds the stream; otherwise it times out.
-        tracing::warn!("connect_profile never confirmed; awaiting inbound connection anyway");
-    }
+        .await?
+    })
+    .retry(
+        ConstantBuilder::new()
+            .with_delay(Duration::from_millis(500))
+            .with_max_times(40),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!("Connecting profile failed with {e}, proceeding anyway.");
+    });
 
-    let (stream, _profiles) = match tokio::time::timeout(Duration::from_secs(30), acceptance).await {
+    let (stream, _profiles) = match tokio::time::timeout(Duration::from_secs(30), acceptance).await
+    {
         Ok(joined) => joined??,
-        Err(_) => return Err(eyre!("Timed out waiting for accessory Bluetooth connection")),
+        Err(_) => {
+            return Err(eyre!(
+                "Timed out waiting for accessory Bluetooth connection"
+            ));
+        }
     };
     tracing::debug!("Establishing iAP2 link");
 
