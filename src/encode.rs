@@ -1,24 +1,33 @@
+use std::os::fd::AsFd;
 use std::sync::Arc;
 
 use catplay_carplay::video::{AnnexBIter, AvccConfig, NalType};
 use eyre::{Result, eyre};
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_allocators::prelude::*;
+use gstreamer_allocators::DmaBufAllocator;
 use gstreamer_app as gst_app;
+use gstreamer_video as gst_video;
 use futures::StreamExt;
+use smithay::backend::allocator::dmabuf::Dmabuf;
+use smithay::backend::allocator::Buffer as _;
 use tokio::sync::{mpsc, watch};
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::airplay::EncodedFrame;
 use crate::compositor::CapturedFrame;
 
-/// Zero-copy `AsRef<[u8]>` view of a frame's pixels, so re-pushing the same frame (the repeater
-/// does 30x/sec) is just an `Arc` refcount bump rather than a full memcpy each tick.
+/// Zero-copy `AsRef<[u8]>` view of an SHM frame's pixels, so re-pushing the same frame (the
+/// repeater does 30x/sec) is just an `Arc` refcount bump rather than a full memcpy each tick.
 struct FrameData(Arc<CapturedFrame>);
 
 impl AsRef<[u8]> for FrameData {
     fn as_ref(&self) -> &[u8] {
-        &self.0.data
+        match &*self.0 {
+            CapturedFrame::Shm { data, .. } => data,
+            CapturedFrame::Dmabuf(_) => &[],
+        }
     }
 }
 
@@ -57,12 +66,19 @@ pub async fn encode_h264_to_channel(
     src.set_property_from_str("format", "time");
     src.set_property("do-timestamp", true);
     pipeline.add(&src).map_err(|_| eyre!("add source"))?;
-    let wayland_feed = Some((src.clone(), frame_rx));
-    let src_tail: gst::Element = src.upcast();
 
-    // src_tail (raw video) -> [scale + RGB->NV12 convert + H264 encode] -> `encoder`, built by
-    // whichever backend the hardware supports. Returns the H264-producing element.
-    let encoder = build_encode_chain(&pipeline, &src_tail, width, height)?;
+    // Zero-copy: the compositor forwards its rendered dmabuf and we import it straight into the
+    // GPU encoder (glupload -> nvh264enc), no CPU copy. Otherwise the software chain encodes the
+    // CPU-read-back frames. The compositor and encoder read the same CARJACK_ZEROCOPY flag so
+    // the frame variant (Dmabuf vs Shm) always matches the pipeline.
+    let zero_copy = std::env::var("CARJACK_ZEROCOPY").is_ok();
+    let src_tail: gst::Element = src.clone().upcast();
+    let encoder = if zero_copy {
+        build_zerocopy_chain(&pipeline, &src_tail)?
+    } else {
+        build_encode_chain(&pipeline, &src_tail, width, height)?
+    };
+    let wayland_feed = Some((src, frame_rx));
 
     let output_caps = gst::Caps::builder("video/x-h264")
         .field("stream-format", "byte-stream")
@@ -126,7 +142,8 @@ pub async fn encode_h264_to_channel(
     // latest-wins, so if capture outpaces us we simply skip older frames.
     let _frame_feeder = wayland_feed.map(|(appsrc, frame_rx)| {
         AbortOnDropHandle::new(tokio::spawn(async move {
-            let mut current_caps: Option<(u32, u32, &'static str)> = None;
+            let dmabuf_allocator = DmaBufAllocator::new();
+            let mut caps_set = false;
             let mut ticker = tokio::time::interval(std::time::Duration::from_micros(1_000_000 / 30));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -134,18 +151,41 @@ pub async fn encode_h264_to_channel(
                 let Some(frame) = frame_rx.borrow().clone() else {
                     continue;
                 };
-                let wanted_caps = (frame.width, frame.height, frame.gst_format);
-                if current_caps != Some(wanted_caps) {
-                    let caps = gst::Caps::builder("video/x-raw")
-                        .field("format", frame.gst_format)
-                        .field("width", frame.width as i32)
-                        .field("height", frame.height as i32)
-                        .field("framerate", gst::Fraction::new(30, 1))
-                        .build();
-                    appsrc.set_caps(Some(&caps));
-                    current_caps = Some(wanted_caps);
-                }
-                let buffer = gst::Buffer::from_slice(FrameData(frame));
+                let buffer = match &*frame {
+                    CapturedFrame::Shm { width, height, gst_format, .. } => {
+                        if !caps_set {
+                            appsrc.set_caps(Some(
+                                &gst::Caps::builder("video/x-raw")
+                                    .field("format", *gst_format)
+                                    .field("width", *width as i32)
+                                    .field("height", *height as i32)
+                                    .field("framerate", gst::Fraction::new(30, 1))
+                                    .build(),
+                            ));
+                            caps_set = true;
+                        }
+                        gst::Buffer::from_slice(FrameData(frame.clone()))
+                    }
+                    CapturedFrame::Dmabuf(dmabuf) => {
+                        if !caps_set {
+                            match dmabuf_caps(dmabuf) {
+                                Ok(caps) => appsrc.set_caps(Some(&caps)),
+                                Err(e) => {
+                                    tracing::warn!("dmabuf caps failed: {e}");
+                                    continue;
+                                }
+                            }
+                            caps_set = true;
+                        }
+                        match wrap_dmabuf(&dmabuf_allocator, dmabuf) {
+                            Ok(buf) => buf,
+                            Err(e) => {
+                                tracing::warn!("wrap dmabuf failed: {e}");
+                                continue;
+                            }
+                        }
+                    }
+                };
                 if appsrc.push_buffer(buffer).is_err() {
                     break;
                 }
@@ -175,6 +215,84 @@ pub async fn encode_h264_to_channel(
     }
 
     Ok(())
+}
+
+/// Zero-copy encode chain: `glupload` imports the compositor's dmabuf as a GL texture (via
+/// EGLImage, zero-copy) and `nvh264enc` consumes it through GL-CUDA interop (also zero-copy),
+/// converting RGB->NV12 internally. No scale/rate/convert - the compositor already renders at
+/// the car's resolution and 30fps. Requires the compositor to render on the same GPU as the
+/// encoder (CARJACK_RENDER_NODE) so the dmabuf is GPU-local.
+fn build_zerocopy_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Result<gst::Element> {
+    let glupload = gst::ElementFactory::make("glupload")
+        .name("glupload")
+        .build()
+        .map_err(|_| eyre!("failed to create glupload"))?;
+    let enc_desc =
+        std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from("nvh264enc gop-size=6"));
+    let (enc_name, enc_props) = parse_encoder_string(&enc_desc)?;
+    let encoder = gst::ElementFactory::make(&enc_name)
+        .name("encoder")
+        .build()
+        .map_err(|_| eyre!("failed to create encoder '{enc_name}'"))?;
+    for (key, val) in &enc_props {
+        encoder.set_property_from_str(key, val);
+    }
+    pipeline.add(&glupload).map_err(|_| eyre!("add glupload"))?;
+    pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
+    src_tail.link(&glupload).map_err(|_| eyre!("link src-glupload"))?;
+    glupload.link(&encoder).map_err(|_| eyre!("link glupload-encoder"))?;
+    tracing::info!("Encode backend: zero-copy dmabuf (glupload ! {enc_name})");
+    Ok(encoder)
+}
+
+/// DMA_DRM caps for a dmabuf - carries the DRM fourcc + modifier so glupload can import it.
+fn dmabuf_caps(dmabuf: &Dmabuf) -> Result<gst::Caps> {
+    let info = gst_video::VideoInfo::builder(
+        gst_video::VideoFormat::DmaDrm,
+        dmabuf.width(),
+        dmabuf.height(),
+    )
+    .fps(gst::Fraction::new(30, 1))
+    .build()
+    .map_err(|e| eyre!("build video info: {e}"))?;
+    let fourcc = dmabuf.format().code as u32;
+    let modifier: u64 = dmabuf.format().modifier.into();
+    gst_video::VideoInfoDmaDrm::new(info, fourcc, modifier)
+        .to_caps()
+        .map_err(|e| eyre!("build dma-drm caps: {e}"))
+}
+
+/// Wrap a dmabuf's plane fds as a dmabuf-backed `gst::Buffer` with a `VideoMeta`, so glupload
+/// can import it. Fds are dup'd; GStreamer owns its copies.
+fn wrap_dmabuf(allocator: &DmaBufAllocator, dmabuf: &Dmabuf) -> Result<gst::Buffer> {
+    let (width, height) = (dmabuf.width(), dmabuf.height());
+    let mut buffer = gst::Buffer::new();
+    let bm = buffer.get_mut().ok_or_else(|| eyre!("buffer not uniquely owned"))?;
+    let mut offsets = Vec::new();
+    let mut strides = Vec::new();
+    for (fd, (offset, stride)) in dmabuf.handles().zip(dmabuf.offsets().zip(dmabuf.strides())) {
+        let owned = fd.as_fd().try_clone_to_owned().map_err(|e| eyre!("dup dmabuf fd: {e}"))?;
+        let size = (stride as usize) * (height as usize) + offset as usize;
+        let mem = unsafe {
+            allocator
+                .alloc_dmabuf(owned, size)
+                .map_err(|e| eyre!("alloc dmabuf memory: {e}"))?
+        };
+        bm.append_memory(mem);
+        offsets.push(offset as usize);
+        strides.push(stride as i32);
+    }
+    gst_video::VideoMeta::add_full(
+        bm,
+        gst_video::VideoFrameFlags::empty(),
+        gst_video::VideoFormat::DmaDrm,
+        width,
+        height,
+        &offsets,
+        &strides,
+    )
+    .map_err(|e| eyre!("attach video meta: {e}"))?;
+    Ok(buffer)
 }
 
 /// A hardware zero-copy encode backend: a dmabuf-capable post-processor (does RGB->NV12 +

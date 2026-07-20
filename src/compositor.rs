@@ -64,12 +64,19 @@ use smithay::{
 };
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 
-/// One composited desktop frame: tightly packed pixels in `gst_format`, ready for the encoder.
-pub struct CapturedFrame {
-    pub data: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    pub gst_format: &'static str,
+/// One composited desktop frame for the encoder.
+pub enum CapturedFrame {
+    /// System-memory pixels read back from the GPU (the software encode path). Tightly packed,
+    /// `gst_format` layout.
+    Shm {
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+        gst_format: &'static str,
+    },
+    /// The rendered GPU buffer itself, forwarded zero-copy - `encode.rs` imports the fd into a
+    /// hardware encoder on the same GPU (glupload -> nvh264enc) without any CPU copy.
+    Dmabuf(Dmabuf),
 }
 
 /// The GPU device the compositor renders on, as a reference-counted fd Smithay can share
@@ -202,16 +209,23 @@ struct State {
     data_device_state: DataDeviceState,
 
     renderer: GlesRenderer,
-    render_dmabuf: Dmabuf,
+    /// Render targets. Zero-copy mode cycles through a small pool (a forwarded dmabuf is held
+    /// by GStreamer until it's consumed, so we can't re-render into it immediately); the CPU
+    /// readback mode uses a single reused buffer.
+    render_pool: Vec<Dmabuf>,
+    pool_idx: usize,
+    zero_copy: bool,
     damage_tracker: OutputDamageTracker,
     frame_tx: tokio::sync::watch::Sender<Option<Arc<CapturedFrame>>>,
 }
 
 impl State {
-    /// Render the current desktop into the dmabuf, read it back, and publish it as a frame.
+    /// Render the desktop into the current pool buffer and publish it - either as the dmabuf
+    /// itself (zero-copy) or read back into system memory (CPU path).
     fn render_and_publish(&mut self) {
+        let idx = self.pool_idx;
         let clear = [0.0, 0.0, 0.0, 1.0];
-        let mut fb = match self.renderer.bind(&mut self.render_dmabuf) {
+        let mut fb = match self.renderer.bind(&mut self.render_pool[idx]) {
             Ok(fb) => fb,
             Err(e) => {
                 tracing::warn!("compositor: bind dmabuf failed: {e}");
@@ -239,28 +253,36 @@ impl State {
             return;
         }
 
-        // Read the rendered framebuffer back into system memory. This is the one copy on our
-        // side; the software encoder needs system memory anyway, and it's the same GPU->CPU
-        // step the capture path did. (A hardware zero-copy path would forward the dmabuf fd
-        // instead - future work.)
-        let region = Rectangle::<i32, BufferCoord>::from_size((self.width, self.height).into());
-        match self.renderer.copy_framebuffer(&fb, region, Fourcc::Argb8888) {
-            Ok(mapping) => match self.renderer.map_texture(&mapping) {
-                Ok(bytes) => {
-                    let frame = CapturedFrame {
-                        data: bytes.to_vec(),
-                        width: self.width as u32,
-                        height: self.height as u32,
-                        // Argb8888 native-endian => in-memory bytes B,G,R,X (opaque).
-                        gst_format: "BGRx",
-                    };
-                    let _ = self.frame_tx.send(Some(Arc::new(frame)));
-                }
-                Err(e) => tracing::warn!("compositor: map_texture failed: {e}"),
-            },
-            Err(e) => tracing::warn!("compositor: copy_framebuffer failed: {e}"),
+        if self.zero_copy {
+            drop(fb);
+            // Forward the rendered GPU buffer itself - no readback, no CPU copy. The clone
+            // shares the fds; cycling the pool keeps us from overwriting a buffer the encoder
+            // is still reading.
+            let buf = self.render_pool[idx].clone();
+            let _ = self.frame_tx.send(Some(Arc::new(CapturedFrame::Dmabuf(buf))));
+            self.pool_idx = (idx + 1) % self.render_pool.len();
+        } else {
+            // Read the framebuffer back into system memory (GPU->CPU copy) - what the software
+            // encode path needs. Works with any modifier (GL readback, not a dmabuf mmap).
+            let region =
+                Rectangle::<i32, BufferCoord>::from_size((self.width, self.height).into());
+            match self.renderer.copy_framebuffer(&fb, region, Fourcc::Argb8888) {
+                Ok(mapping) => match self.renderer.map_texture(&mapping) {
+                    Ok(bytes) => {
+                        let _ = self.frame_tx.send(Some(Arc::new(CapturedFrame::Shm {
+                            data: bytes.to_vec(),
+                            width: self.width as u32,
+                            height: self.height as u32,
+                            // Argb8888 native-endian => in-memory bytes B,G,R,X (opaque).
+                            gst_format: "BGRx",
+                        })));
+                    }
+                    Err(e) => tracing::warn!("compositor: map_texture failed: {e}"),
+                },
+                Err(e) => tracing::warn!("compositor: copy_framebuffer failed: {e}"),
+            }
+            drop(fb);
         }
-        drop(fb);
 
         // Tell clients to draw their next frame, then flush.
         let now = self.start_time.elapsed();
@@ -344,12 +366,19 @@ fn run(
     } else {
         &render_modifiers
     };
-    // One reused render target: we read it back to system memory synchronously each frame
-    // before rendering again, so there's no aliasing and a pool isn't needed.
-    let gbm_buffer = allocator
-        .create_buffer(width, height, Fourcc::Argb8888, modifiers)
-        .map_err(|e| eyre!("allocate render buffer: {e}"))?;
-    let render_dmabuf = gbm_buffer.export().map_err(|e| eyre!("export dmabuf: {e}"))?;
+    // Zero-copy mode forwards each rendered dmabuf to the encoder, which holds it until
+    // consumed - so we cycle through a small pool. The CPU-readback path reuses a single buffer
+    // (readback is synchronous, no aliasing).
+    let zero_copy = std::env::var("CARJACK_ZEROCOPY").is_ok();
+    let pool_size = if zero_copy { 4 } else { 1 };
+    let mut render_pool = Vec::with_capacity(pool_size);
+    for _ in 0..pool_size {
+        let gbm_buffer = allocator
+            .create_buffer(width, height, Fourcc::Argb8888, modifiers)
+            .map_err(|e| eyre!("allocate render buffer: {e}"))?;
+        render_pool.push(gbm_buffer.export().map_err(|e| eyre!("export dmabuf: {e}"))?);
+    }
+    tracing::info!("compositor: encode path = {}", if zero_copy { "zero-copy dmabuf" } else { "CPU readback" });
 
     let mut event_loop: EventLoop<State> =
         EventLoop::try_new().map_err(|e| eyre!("create event loop: {e}"))?;
@@ -461,7 +490,9 @@ fn run(
         seat_state,
         data_device_state,
         renderer,
-        render_dmabuf,
+        render_pool,
+        pool_idx: 0,
+        zero_copy,
         damage_tracker,
         frame_tx,
     };

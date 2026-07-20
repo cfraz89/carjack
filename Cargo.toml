@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "iap2-proto",
     "libcarjack",
+    "cuda-dmabuf",
 ]
 
 [workspace.package]
@@ -46,3 +47,6 @@ bytes = "1.12.1"
 gstreamer = "0.24"
 gstreamer-app = "0.24"
 smithay = { version = "0.7.0", default-features = false, features = ["backend_egl", "backend_gbm", "renderer_gl", "wayland_frontend", "desktop"] }
+gstreamer-allocators = "0.24"
+gstreamer-video = { version = "0.24", features = ["v1_24"] }
+cuda-dmabuf = { path = "cuda-dmabuf" }
