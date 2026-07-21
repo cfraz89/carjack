@@ -8,45 +8,65 @@ use ashpd::desktop::{
 };
 use eyre::{Result, eyre};
 use libcarjack::carplay_session::{TouchEvent, TouchEventType};
-use std::collections::HashMap;
 use tracing::debug;
-use zbus::zvariant::OwnedValue;
+use wayland_client::protocol::{wl_output, wl_registry};
+use wayland_client::{Connection, Dispatch, QueueHandle};
 
-/// The applied scale of the primary monitor, from GNOME's Mutter DisplayConfig. The RemoteDesktop
-/// portal maps touch in *logical* coordinates, but `pipewiresrc` delivers *physical* pixels - so on
-/// a HiDPI desktop (e.g. a 3456x2160 panel at scale 2 = 1728x1080 logical) the physical size has to
-/// be divided by this before touch is scaled to it, else the bottom/right of the screen is
-/// unreachable. `None` off GNOME (callers then assume scale 1.0, i.e. physical == logical).
-pub async fn gnome_display_scale() -> Option<f64> {
-    type Mode = (String, i32, i32, f64, f64, Vec<f64>, HashMap<String, OwnedValue>);
-    type Monitor = ((String, String, String, String), Vec<Mode>, HashMap<String, OwnedValue>);
-    type LogicalMonitor = (
-        i32,
-        i32,
-        f64,
-        u32,
-        bool,
-        Vec<(String, String, String, String)>,
-        HashMap<String, OwnedValue>,
-    );
-    type State = (u32, Vec<Monitor>, Vec<LogicalMonitor>, HashMap<String, OwnedValue>);
+/// The output scale reported by whatever Wayland compositor is running (any DE) - read from
+/// `wl_output`, so it doesn't depend on GNOME/KDE-specific APIs. The RemoteDesktop portal maps
+/// touch in *logical* coordinates while `pipewiresrc` delivers *physical* pixels, so on a HiDPI
+/// desktop (e.g. a 3456x2160 panel at scale 2 = 1728x1080 logical) the physical size must be
+/// divided by this before touch is scaled to it, else the bottom/right of the screen is
+/// unreachable. `None` if there's no Wayland display or no output advertised a scale (callers then
+/// assume 1.0). `wl_output` scale is integer; fractional scaling reports the rounded-up value.
+pub fn display_scale() -> Option<f64> {
+    let conn = Connection::connect_to_env().ok()?;
+    let mut queue = conn.new_event_queue::<ScaleState>();
+    let qh = queue.handle();
+    let _registry = conn.display().get_registry(&qh, ());
+    let mut state = ScaleState::default();
+    queue.roundtrip(&mut state).ok()?; // registry globals -> bind outputs
+    queue.roundtrip(&mut state).ok()?; // output events -> scale
+    (state.scale > 0).then_some(f64::from(state.scale))
+}
 
-    let conn = zbus::Connection::session().await.ok()?;
-    let proxy = zbus::Proxy::new(
-        &conn,
-        "org.gnome.Mutter.DisplayConfig",
-        "/org/gnome/Mutter/DisplayConfig",
-        "org.gnome.Mutter.DisplayConfig",
-    )
-    .await
-    .ok()?;
-    let (_, _monitors, logical, _): State = proxy.call("GetCurrentState", &()).await.ok()?;
-    // Prefer the primary logical monitor's scale, else the first.
-    logical
-        .iter()
-        .find(|m| m.4)
-        .or_else(|| logical.first())
-        .map(|m| m.2)
+/// Collects the max `wl_output` scale across all outputs.
+#[derive(Default)]
+struct ScaleState {
+    scale: i32,
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for ScaleState {
+    fn event(
+        _state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global { name, interface, version } = event {
+            if interface == "wl_output" {
+                // v2+ carries the `scale` event.
+                registry.bind::<wl_output::WlOutput, (), Self>(name, version.min(2), qh, ());
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, ()> for ScaleState {
+    fn event(
+        state: &mut Self,
+        _: &wl_output::WlOutput,
+        event: wl_output::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_output::Event::Scale { factor } = event {
+            state.scale = state.scale.max(factor);
+        }
+    }
 }
 
 pub struct RemoteDesktopStream {
@@ -141,14 +161,14 @@ fn scale_touch(x: f64, y: f64, stream_size: Option<(f64, f64)>, car_size: (u32, 
 mod tests {
     use super::scale_touch;
 
-    #[tokio::test]
-    async fn gnome_scale_probe() {
-        match super::gnome_display_scale().await {
+    #[test]
+    fn display_scale_probe() {
+        match super::display_scale() {
             Some(s) => {
-                eprintln!("gnome display scale = {s}");
+                eprintln!("wayland display scale = {s}");
                 assert!(s > 0.0);
             }
-            None => eprintln!("no gnome scale (not on GNOME / no session bus) - skipping"),
+            None => eprintln!("no wayland display scale (no WAYLAND_DISPLAY) - skipping"),
         }
     }
 

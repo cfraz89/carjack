@@ -528,6 +528,7 @@ dependencies = [
  "tracing-subscriber",
  "usb-gadget",
  "uuid",
+ "wayland-client",
  "xdg",
  "zbus",
 ]
@@ -3897,6 +3898,18 @@ dependencies = [
  "rustix 1.1.4",
  "smallvec",
  "wayland-sys",
+]
+
+[[package]]
+name = "wayland-client"
+version = "0.31.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "645c7c96bb74690c3189b5c9cb4ca1627062bb23693a4fad9d8c3de958260144"
+dependencies = [
+ "bitflags",
+ "rustix 1.1.4",
+ "wayland-backend",
+ "wayland-scanner",
 ]
 
 [[package]]
