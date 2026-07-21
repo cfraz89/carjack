@@ -372,7 +372,9 @@ async fn run_session(
     // AirPlay setup) and stream them to the car. The encoder and the video stream are both
     // session-lifetime, so their arms live directly in the loop below alongside the Bluetooth
     // handle and touch - one place for the whole streaming session to end or error.
-    let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(64);
+    // Small on purpose: this is a real-time stream, so a shallow channel (plus the pipeline's leaky
+    // queue) keeps latency low - a deep buffer just fills once and adds a permanent delay.
+    let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(4);
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_h264_to_channel(
         frame_rx,
         video_tx,
@@ -437,7 +439,9 @@ async fn run_desktop_session(
     // by the display scale so touch reaches the whole (HiDPI) screen, not just the top-left.
     let display_scale = portal::gnome_display_scale().await.unwrap_or(1.0);
 
-    let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(64);
+    // Small on purpose: this is a real-time stream, so a shallow channel (plus the pipeline's leaky
+    // queue) keeps latency low - a deep buffer just fills once and adds a permanent delay.
+    let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(4);
     // The encoder reports the desktop's real frame size here; touch is scaled from car space to it.
     let (desktop_size_tx, desktop_size_rx) = tokio::sync::watch::channel::<Option<(u32, u32)>>(None);
     let node_id = rd.node_id();
