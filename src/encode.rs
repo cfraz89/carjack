@@ -326,7 +326,8 @@ fn build_pipewire_encode(
     // The configured (default) encoder - used by the GL and software paths (the HW backends bring
     // their own vendor encoder).
     let default_encoder = || -> Result<(String, gst::Element)> {
-        let desc = std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from(DEFAULT_ENCODER));
+        let desc =
+            std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from(DEFAULT_ENCODER_DESKTOP));
         let (name, props) = parse_encoder_string(&desc)?;
         let enc = mk(&name, "encoder")?;
         for (k, v) in &props {
@@ -352,27 +353,13 @@ fn build_pipewire_encode(
     };
 
     if !matches!(zerocopy, ZeroCopyMode::Off) {
-        // NVIDIA: upload to GL, convert/scale/re-time on the GPU, encode via GL-CUDA interop.
-        // `glupload` imports the portal's dmabuf (or system memory), `nvh264enc` takes GL memory.
-        if element_available("glupload") && element_available("nvh264enc") {
-            let (enc_name, encoder) = default_encoder()?;
-            let glupload = mk("glupload", "glupload")?;
-            let glconvert = mk("glcolorconvert", "glconvert")?;
-            let glscale = mk("glcolorscale", "glscale")?;
-            let rate = mk("videorate", "videorate")?;
-            pipeline
-                .add_many([&glupload, &glconvert, &glscale, &rate, &encoder])
-                .map_err(|_| eyre!("add gl elements"))?;
-            gst::Element::link_many([src, &glupload, &glconvert, &glscale, &rate])
-                .map_err(|_| eyre!("link gl chain"))?;
-            rate.link_filtered(&encoder, &caps(Some("memory:GLMemory")))
-                .map_err(|_| eyre!("link gl-encoder"))?;
-            tracing::info!("Encode source: desktop ZERO-COPY GL (glupload ! ... ! {enc_name})");
-            return Ok(encoder);
-        }
-        // Intel/AMD (vapostproc) or Qualcomm (v4l2convert): the postproc imports the dmabuf and
-        // does convert + scale on the GPU, handing dmabuf to the vendor encoder. Untested
-        // off-device (same caveat as the internal HW backends).
+        // Preferred: a dmabuf-importing postproc + encoder on the *same* GPU as the desktop -
+        // Intel/AMD `vapostproc ! vah264enc`, Qualcomm `v4l2convert ! v4l2h264enc`. The postproc
+        // imports the portal's dmabuf and does convert + scale on the GPU, handing dmabuf to the
+        // encoder: genuinely zero-copy. This is preferred over the NVIDIA/GL path below because a
+        // typical Wayland desktop is rendered on the integrated GPU (e.g. Intel), and encoding
+        // that on NVIDIA would be a cross-GPU copy anyway. (For the Intel `va` elements to be
+        // registered on a hybrid box, gst needs `GST_VA_ALL_DRIVERS=1`.)
         if let Some(b) = HW_BACKENDS
             .iter()
             .find(|b| element_available(b.postproc) && element_available(b.encoder))
@@ -396,10 +383,32 @@ fn build_pipewire_encode(
             );
             return Ok(encoder);
         }
+        // NVIDIA/GL fallback: upload to GL and convert/scale/re-time on the GPU, then hand GL
+        // memory to `nvh264enc`. NB: the *final* GL->CUDA handoff currently fails
+        // (INVALID_GRAPHICS_CONTEXT) and gst downloads GL->system memory - so this offloads the
+        // convert/scale to the GPU but the encoder handoff is *not* zero-copy. It's still useful
+        // when the desktop *is* NVIDIA-rendered and there's no VA-API. (`cudaupload` hits the same
+        // interop limit; true NVIDIA zero-copy would need a direct dmabuf->CUDA EGL import.)
+        if element_available("glupload") && element_available("nvh264enc") {
+            let (enc_name, encoder) = default_encoder()?;
+            let glupload = mk("glupload", "glupload")?;
+            let glconvert = mk("glcolorconvert", "glconvert")?;
+            let glscale = mk("glcolorscale", "glscale")?;
+            let rate = mk("videorate", "videorate")?;
+            pipeline
+                .add_many([&glupload, &glconvert, &glscale, &rate, &encoder])
+                .map_err(|_| eyre!("add gl elements"))?;
+            gst::Element::link_many([src, &glupload, &glconvert, &glscale, &rate])
+                .map_err(|_| eyre!("link gl chain"))?;
+            rate.link_filtered(&encoder, &caps(Some("memory:GLMemory")))
+                .map_err(|_| eyre!("link gl-encoder"))?;
+            tracing::info!("Encode source: desktop GL GPU convert/scale (glupload ! ... ! {enc_name})");
+            return Ok(encoder);
+        }
         if matches!(zerocopy, ZeroCopyMode::Force) {
             return Err(eyre!(
-                "zerocopy=true but no zero-copy desktop backend available (need glupload+nvh264enc, \
-                 vapostproc+vah264enc, or v4l2convert+v4l2h264enc)"
+                "zerocopy=true but no zero-copy desktop backend available (need \
+                 vapostproc+vah264enc, v4l2convert+v4l2h264enc, or glupload+nvh264enc)"
             ));
         }
         tracing::warn!("no zero-copy desktop backend available, using software convert/scale");
@@ -588,6 +597,15 @@ fn build_backend(
 /// - `preset=p4`: the modern medium preset (used together with `tune`).
 const DEFAULT_ENCODER: &str = "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=cbr \
     bitrate=12000 gop-size=30 bframes=0 rc-lookahead=0 zerolatency=true aud=true";
+
+/// Desktop-path encoder default: identical to [`DEFAULT_ENCODER`] except `gop-size=60`. The
+/// desktop path always ends up feeding `nvh264enc` *system memory* (the GL path downloads for the
+/// encoder handoff), and on system memory nvenc emits an IDR *every* frame with `gop-size=30`
+/// specifically - an nvenc quirk (it's fine with the internal path's CUDA memory, and fine with
+/// other gop-sizes). 60 (~2s) sidesteps it while still giving periodic keyframes. Verified via
+/// `tests/desktop.rs` against a real GNOME ScreenCast stream.
+const DEFAULT_ENCODER_DESKTOP: &str = "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=cbr \
+    bitrate=12000 gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true aud=true";
 
 /// NVIDIA: `appsrc(CUDAMemory) ! nvh264enc`. The importer already produced GstCudaMemory buffers
 /// on the encoder's context, so nvh264enc consumes them directly (internal RGB->NV12). No
