@@ -11,7 +11,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// What to stream: our internal compositor (running `[app] command`), or the user's existing
+    /// What to stream: the `[app] command` in carjack's own compositor, or the user's existing
     /// desktop via the xdg-desktop-portal RemoteDesktop/ScreenCast.
     pub source: Source,
     pub graphics: Graphics,
@@ -19,13 +19,14 @@ pub struct Config {
     pub app: App,
 }
 
-/// Video source: the internal compositor, or the existing desktop via the portal.
+/// Video source: run our own app, or capture the existing desktop via the portal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     /// Run `[app] command` in carjack's own headless compositor and stream that (default).
+    /// Accepts the aliases `internal` / `compositor` / `cmd` / `standalone`.
     #[default]
-    Internal,
+    App,
     /// Capture the user's existing Wayland desktop via xdg-desktop-portal (ScreenCast) and inject
     /// input via RemoteDesktop. Needs a running desktop session with a portal backend; `[app]`,
     /// `[display]`, and the display cache are ignored in this mode.
@@ -35,9 +36,9 @@ pub enum Source {
 impl Source {
     fn parse(s: &str) -> Result<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "internal" | "compositor" | "app" => Ok(Self::Internal),
+            "app" | "internal" | "compositor" | "cmd" | "standalone" => Ok(Self::App),
             "desktop" | "portal" => Ok(Self::Desktop),
-            other => Err(eyre!("invalid source '{other}' (expected internal/desktop)")),
+            other => Err(eyre!("invalid source '{other}' (expected app/desktop)")),
         }
     }
 }
@@ -154,7 +155,7 @@ pub struct Cli {
     #[arg(short = 'c', long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Override source: internal (compositor + app) | desktop (existing desktop via portal).
+    /// Override source: app (run [app] command in our compositor) | desktop (existing desktop).
     #[arg(long, value_name = "SOURCE")]
     pub source: Option<String>,
 
@@ -448,15 +449,19 @@ mod tests {
     }
 
     #[test]
-    fn source_parses_and_defaults_internal() {
-        assert_eq!(Source::default(), Source::Internal);
+    fn source_parses_and_defaults_app() {
+        assert_eq!(Source::default(), Source::App);
+        assert_eq!(Source::parse("app").unwrap(), Source::App);
         assert_eq!(Source::parse("desktop").unwrap(), Source::Desktop);
         assert_eq!(Source::parse("portal").unwrap(), Source::Desktop);
-        assert_eq!(Source::parse("internal").unwrap(), Source::Internal);
+        // back-compat aliases for the old name
+        assert_eq!(Source::parse("internal").unwrap(), Source::App);
+        assert_eq!(Source::parse("standalone").unwrap(), Source::App);
         assert!(Source::parse("nonsense").is_err());
         // via config file (serde rename_all=lowercase)
         assert_eq!(parse_toml("source = \"desktop\"\n").source, Source::Desktop);
-        assert_eq!(parse_toml("").source, Source::Internal);
+        assert_eq!(parse_toml("source = \"app\"\n").source, Source::App);
+        assert_eq!(parse_toml("").source, Source::App);
     }
 
     #[test]
