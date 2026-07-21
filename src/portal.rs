@@ -8,7 +8,46 @@ use ashpd::desktop::{
 };
 use eyre::{Result, eyre};
 use libcarjack::carplay_session::{TouchEvent, TouchEventType};
+use std::collections::HashMap;
 use tracing::debug;
+use zbus::zvariant::OwnedValue;
+
+/// The applied scale of the primary monitor, from GNOME's Mutter DisplayConfig. The RemoteDesktop
+/// portal maps touch in *logical* coordinates, but `pipewiresrc` delivers *physical* pixels - so on
+/// a HiDPI desktop (e.g. a 3456x2160 panel at scale 2 = 1728x1080 logical) the physical size has to
+/// be divided by this before touch is scaled to it, else the bottom/right of the screen is
+/// unreachable. `None` off GNOME (callers then assume scale 1.0, i.e. physical == logical).
+pub async fn gnome_display_scale() -> Option<f64> {
+    type Mode = (String, i32, i32, f64, f64, Vec<f64>, HashMap<String, OwnedValue>);
+    type Monitor = ((String, String, String, String), Vec<Mode>, HashMap<String, OwnedValue>);
+    type LogicalMonitor = (
+        i32,
+        i32,
+        f64,
+        u32,
+        bool,
+        Vec<(String, String, String, String)>,
+        HashMap<String, OwnedValue>,
+    );
+    type State = (u32, Vec<Monitor>, Vec<LogicalMonitor>, HashMap<String, OwnedValue>);
+
+    let conn = zbus::Connection::session().await.ok()?;
+    let proxy = zbus::Proxy::new(
+        &conn,
+        "org.gnome.Mutter.DisplayConfig",
+        "/org/gnome/Mutter/DisplayConfig",
+        "org.gnome.Mutter.DisplayConfig",
+    )
+    .await
+    .ok()?;
+    let (_, _monitors, logical, _): State = proxy.call("GetCurrentState", &()).await.ok()?;
+    // Prefer the primary logical monitor's scale, else the first.
+    logical
+        .iter()
+        .find(|m| m.4)
+        .or_else(|| logical.first())
+        .map(|m| m.2)
+}
 
 pub struct RemoteDesktopStream {
     /// Held for input injection (`send_touch`).
@@ -38,6 +77,10 @@ impl RemoteDesktopStream {
             .map(|(w, h)| (f64::from(w), f64::from(h)))
             .or(self.stream_size);
         let (x, y) = scale_touch(event.x, event.y, target, car_size);
+        debug!(
+            "touch {:?} slot={} car=({:.0},{:.0}) car_size={car_size:?} target={target:?} -> ({x:.0},{y:.0})",
+            event.event_type, event.slot, event.x, event.y
+        );
         match event.event_type {
             TouchEventType::Down => {
                 self.remote_desktop
@@ -97,6 +140,17 @@ fn scale_touch(x: f64, y: f64, stream_size: Option<(f64, f64)>, car_size: (u32, 
 #[cfg(test)]
 mod tests {
     use super::scale_touch;
+
+    #[tokio::test]
+    async fn gnome_scale_probe() {
+        match super::gnome_display_scale().await {
+            Some(s) => {
+                eprintln!("gnome display scale = {s}");
+                assert!(s > 0.0);
+            }
+            None => eprintln!("no gnome scale (not on GNOME / no session bus) - skipping"),
+        }
+    }
 
     #[test]
     fn touch_scales_car_space_to_stream_space() {

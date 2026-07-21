@@ -433,6 +433,9 @@ async fn run_desktop_session(
         establish_carplay().await?;
     let (width, height) = (conn.width, conn.height);
     tracing::info!("Streaming desktop to car at {width}x{height}");
+    // The portal maps touch in *logical* coords, but pipewiresrc reports *physical* pixels - divide
+    // by the display scale so touch reaches the whole (HiDPI) screen, not just the top-left.
+    let display_scale = portal::gnome_display_scale().await.unwrap_or(1.0);
 
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(64);
     // The encoder reports the desktop's real frame size here; touch is scaled from car space to it.
@@ -473,7 +476,13 @@ async fn run_desktop_session(
                     // Inject back into the real desktop via the portal (async, unlike the
                     // compositor's synchronous seat injection).
                     Some(event) => {
-                        let desktop_size = *desktop_size_rx.borrow();
+                        // Physical pipewiresrc size -> logical (what the portal's touch space uses).
+                        let desktop_size = desktop_size_rx.borrow().map(|(w, h)| {
+                            (
+                                ((f64::from(w) / display_scale).round() as u32).max(1),
+                                ((f64::from(h) / display_scale).round() as u32).max(1),
+                            )
+                        });
                         if let Err(e) = rd.send_touch(&event, (width, height), desktop_size).await {
                             tracing::warn!("portal touch inject failed: {e}");
                         }
