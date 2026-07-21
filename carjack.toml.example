@@ -8,8 +8,7 @@
 #             CARJACK_APP.COMMAND, CARJACK_APP.RESIZABLE, ...  (CARJACK_ + section + `.` + key)
 
 # What to stream:
-#   "app"      - run [app] command in carjack's own headless compositor (default; aliases:
-#                internal / compositor / cmd / standalone)
+#   "app"      - run [app] command in carjack's own headless compositor (default)
 #   "desktop"  - capture your existing desktop via xdg-desktop-portal (ScreenCast) and inject
 #                input via RemoteDesktop. Needs a running desktop session with a portal backend;
 #                [app], [display], and the display cache are ignored. A consent dialog appears on

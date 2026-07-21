@@ -24,7 +24,6 @@ pub struct Config {
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     /// Run `[app] command` in carjack's own headless compositor and stream that (default).
-    /// Accepts the aliases `internal` / `compositor` / `cmd` / `standalone`.
     #[default]
     App,
     /// Capture the user's existing Wayland desktop via xdg-desktop-portal (ScreenCast) and inject
@@ -36,8 +35,8 @@ pub enum Source {
 impl Source {
     fn parse(s: &str) -> Result<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "app" | "internal" | "compositor" | "cmd" | "standalone" => Ok(Self::App),
-            "desktop" | "portal" => Ok(Self::Desktop),
+            "app" => Ok(Self::App),
+            "desktop" => Ok(Self::Desktop),
             other => Err(eyre!("invalid source '{other}' (expected app/desktop)")),
         }
     }
@@ -453,10 +452,7 @@ mod tests {
         assert_eq!(Source::default(), Source::App);
         assert_eq!(Source::parse("app").unwrap(), Source::App);
         assert_eq!(Source::parse("desktop").unwrap(), Source::Desktop);
-        assert_eq!(Source::parse("portal").unwrap(), Source::Desktop);
-        // back-compat aliases for the old name
-        assert_eq!(Source::parse("internal").unwrap(), Source::App);
-        assert_eq!(Source::parse("standalone").unwrap(), Source::App);
+        assert!(Source::parse("internal").is_err());
         assert!(Source::parse("nonsense").is_err());
         // via config file (serde rename_all=lowercase)
         assert_eq!(parse_toml("source = \"desktop\"\n").source, Source::Desktop);

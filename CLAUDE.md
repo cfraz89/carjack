@@ -74,9 +74,9 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 
 ## Video source (`source` config): own app vs desktop portal
 
-`source = "app"` (default; aliases `internal`/`compositor`/`cmd`/`standalone`)
-streams carjack's own compositor running `[app] command`; `source = "desktop"`
-streams the user's *existing* desktop via xdg-desktop-portal. `main.rs` branches on
+`source = "app"` (default) streams carjack's own compositor running `[app]
+command`; `source = "desktop"` streams the user's *existing* desktop via
+xdg-desktop-portal. `main.rs` branches on
 it: `run_app` (compositor + app + display cache, below) or `run_desktop` (portal).
 Both share `establish_carplay`
 (the BT -> WiFi -> AirPlay handshake) and the per-session select loop; they differ
