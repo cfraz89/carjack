@@ -471,7 +471,7 @@ async fn run_desktop_session(
                     // Inject back into the real desktop via the portal (async, unlike the
                     // compositor's synchronous seat injection).
                     Some(event) => {
-                        if let Err(e) = rd.send_touch(&event).await {
+                        if let Err(e) = rd.send_touch(&event, (width, height)).await {
                             tracing::warn!("portal touch inject failed: {e}");
                         }
                     }
