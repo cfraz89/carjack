@@ -12,6 +12,7 @@ use libcarjack::carplay_ctrl::wait_for_carplay_ctrl_probe;
 
 use carjack::compositor::Compositor;
 use carjack::config::{Cli, Config};
+use carjack::display_cache::{DisplayCache, DisplayProps};
 use carjack::encode::{self, EncodeBackend};
 use clap::Parser;
 
@@ -109,24 +110,30 @@ async fn main() -> Result<()> {
         backend.describe()
     );
 
-    // Start the internal compositor at the configured default size. It persists across session
-    // restarts and is reconfigured to the car's resolution once AirPlay reports it.
+    // If we've seen a car before, start the compositor at its cached resolution rather than the
+    // config default - so the app (even a non-resizable one like Waydroid) can boot at the right
+    // size straight away, during the BT/WiFi/AirPlay setup, instead of after the display is known.
+    let mut cache = DisplayCache::load();
+    let cached = cache.last_props();
+    let (start_w, start_h, start_fps) = match cached {
+        Some(p) => (p.width, p.height, p.fps),
+        None => (config.display.width, config.display.height, config.display.fps),
+    };
     let compositor = Compositor::start(
         render_node,
         backend.is_zero_copy(),
-        config.display.width,
-        config.display.height,
-        config.display.fps,
+        start_w,
+        start_h,
+        start_fps,
     )?;
     let mut app = DesktopApp::new(
         config.desktop_command().to_owned(),
         compositor.socket_name.clone(),
     );
-    // A resizable app launches now (up front, so slow apps like Waydroid boot during the BT/WiFi
-    // phase and resize themselves when the car's size arrives). A non-resizable app (can't
-    // live-resize) is held back until we know the resolution - launched after the first
-    // reconfigure in `run_session`.
-    if config.app.resizable {
+    // Launch the app up front (so slow apps like Waydroid boot during the BT/WiFi phase) when we
+    // already know the target size - i.e. it can live-resize, or we have a cached resolution.
+    // Otherwise a non-resizable app is held back until the resolution is known (in `run_session`).
+    if config.app.resizable || cached.is_some() {
         app.launch();
     }
 
@@ -140,7 +147,7 @@ async fn main() -> Result<()> {
                 tracing::info!("Ctrl-C received, shutting down");
                 break Ok(());
             }
-            result = run_session(&compositor, &backend, &config, &mut app) => {
+            result = run_session(&compositor, &backend, &config, &mut app, &mut cache) => {
                 match result {
                     Ok(()) => {
                         tracing::info!("Session ended cleanly, exiting");
@@ -173,11 +180,13 @@ async fn run_session(
     backend: &EncodeBackend,
     config: &Config,
     app: &mut DesktopApp,
+    cache: &mut DisplayCache,
 ) -> Result<()> {
     let (touch_tx, mut touch_rx) = mpsc::channel::<TouchEvent>(64);
     let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCredentials>(4);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let (bt_mac_tx, bt_mac_rx) = tokio::sync::oneshot::channel::<String>();
+    let (car_addr_tx, car_addr_rx) = tokio::sync::oneshot::channel::<String>();
 
     tracing::info!("Starting CarPlay session");
 
@@ -189,8 +198,9 @@ async fn run_session(
     // AbortOnDropHandle guarantees the task (and its BlueZ resources) is torn down when this
     // function returns - e.g. before a session restart - rather than detached like a plain
     // JoinHandle.
-    let mut carplay_handle =
-        AbortOnDropHandle::new(tokio::spawn(wireless_carplay(wifi_tx, ready_tx, bt_mac_tx)));
+    let mut carplay_handle = AbortOnDropHandle::new(tokio::spawn(wireless_carplay(
+        wifi_tx, ready_tx, bt_mac_tx, car_addr_tx,
+    )));
 
     let mut wifi_handle: Option<tokio::task::JoinHandle<Result<CarWifi>>> = None;
     let mut ready_rx = Some(ready_rx);
@@ -255,10 +265,28 @@ async fn run_session(
     // launch, so the app is already up; this just resizes it.
     let conn = libcarjack::airplay::connect_airplay(peer_addr, remote_homekit_id).await?;
     let resized = compositor.reconfigure(conn.width, conn.height, conn.max_fps)?;
+
+    // Remember this car's display so next startup can size everything up front (the compositor was
+    // likely already at these dimensions from the cache, in which case `reconfigure` was a no-op).
+    // The car's MAC was surfaced early by the Bluetooth task. Normalize a missing fps to 30 so the
+    // cached value is directly usable to start the compositor (which would otherwise clamp 0 -> 1).
+    if conn.width > 0 && conn.height > 0 {
+        if let Ok(car_mac) = car_addr_rx.await {
+            cache.remember(
+                &car_mac,
+                DisplayProps {
+                    width: conn.width,
+                    height: conn.height,
+                    fps: if conn.max_fps == 0 { 30 } else { conn.max_fps },
+                },
+            );
+        }
+    }
+
     // A resizable app is already running and resizes itself - leave it. A non-resizable app is
     // (re)launched here at the now-known resolution: on the first session it wasn't started yet;
-    // on a reconnect it's only relaunched if the size actually changed (else it's still running
-    // at the right size).
+    // on a reconnect (or a wrong cache guess) it's only relaunched if the size actually changed
+    // (else it's still running at the right size).
     if !config.app.resizable && (resized || !app.is_running()) {
         tracing::info!("launching desktop app at {}x{}", conn.width, conn.height);
         app.launch();

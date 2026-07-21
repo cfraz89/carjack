@@ -31,6 +31,7 @@ pub async fn wireless_carplay(
     wifi_tx: mpsc::Sender<WifiCredentials>,
     ready_tx: oneshot::Sender<()>,
     bt_mac_tx: oneshot::Sender<String>,
+    car_addr_tx: oneshot::Sender<String>,
 ) -> Result<()> {
     let session = Session::new().await?;
     let headless_agent = Agent::default();
@@ -65,6 +66,9 @@ pub async fn wireless_carplay(
         .await?;
 
     let device = pair_available_accessory(&adapter).await?;
+    // Surface the car's MAC (known now, early) so the caller can look up its cached display and
+    // size the compositor / launch the app before AirPlay reports the display.
+    let _ = car_addr_tx.send(device.address().to_string());
     if device.is_connected().await? {
         tracing::info!("Already connected");
         device.disconnect().await?;

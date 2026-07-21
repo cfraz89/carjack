@@ -116,6 +116,15 @@ itself; `false` (default) = **not** launched until the car's resolution is known
 actually change the size. Setting `[display]` to the car's resolution avoids any
 resize/relaunch.
 
+Display cache (`src/display_cache.rs`, `~/.cache/carjack/displays.json`): each
+session records the car's resolution/refresh keyed by the car's Bluetooth MAC
+(surfaced early by `wireless_carplay` via `car_addr_tx`). At startup `main` sizes
+the compositor from the *last* car's cached props and launches the app up front
+(even a non-resizable one) - so Waydroid boots during BT/WiFi/AirPlay setup rather
+than after. When AirPlay reports the real display, `reconfigure` is a no-op if the
+cache was right (common single-car case); a wrong guess just resizes/relaunches as
+usual and updates the cache.
+
 Globals advertised: `wl_compositor`/`wl_subcompositor`, `wl_shm`, `xdg_wm_base`,
 `wl_seat`, `wl_output`+`xdg_output`, `wl_data_device_manager`, and
 **`zwp_linux_dmabuf_v1`** (formats from the GlesRenderer). The dmabuf global is
