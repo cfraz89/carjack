@@ -25,6 +25,7 @@ const SC: &str = "org.gnome.Mutter.ScreenCast";
 
 #[tokio::test]
 async fn desktop_pipewire_encodes() -> Result<()> {
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
     // Match `run_desktop`: enable the gst `va` elements on multi-GPU boxes so the VA-API zero-copy
     // path is exercised. SAFETY: set before any gst init, no other thread reads it yet.
     if std::env::var_os("GST_VA_ALL_DRIVERS").is_none() {

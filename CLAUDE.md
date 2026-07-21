@@ -86,24 +86,27 @@ ScreenCast + RemoteDesktop session once at startup (consent dialog first run;
 `PersistMode::Application` remembers it) and yields a PipeWire node id;
 `encode::encode_pipewire_to_channel` scales/re-times it to the car (unlike the
 internal path - the desktop isn't the car's resolution), and touch is injected
-back via `RemoteDesktop::notify_touch_*`. `[graphics] zerocopy` selects the encode
-path (`build_pipewire_encode`), tried in order:
-- **VA-API / v4l2** (preferred): `pipewiresrc ! vapostproc|v4l2convert ! videorate
-  ! caps(memory:DMABuf) ! vah264enc|v4l2h264enc`, via the shared `HW_BACKENDS`. The
-  postproc imports the portal's dmabuf and does convert+scale on the GPU - genuine
-  zero-copy *on the GPU that renders the desktop*. This is preferred over GL/NVENC
-  because a Wayland desktop is usually rendered on the integrated GPU (e.g. Intel),
-  so encoding it on NVIDIA would be a cross-GPU copy anyway. **Verified** on Intel
-  via `tests/desktop.rs`. `run_desktop` sets `GST_VA_ALL_DRIVERS=1` (the gst `va`
-  plugin skips the iGPU otherwise on a hybrid box), and it needs the iGPU's VA
-  driver (`intel-media-driver`) on whatever host runs carjack.
-- **NVIDIA GL** (fallback when no VA-API, e.g. an NVIDIA-rendered desktop):
-  `pipewiresrc ! glupload ! glcolorconvert ! glcolorscale ! videorate ! nvh264enc`.
-  Convert/scale on the GPU, but the *final* GL->CUDA handoff to NVENC currently
-  downloads to system memory (interop fails with `INVALID_GRAPHICS_CONTEXT`;
-  `cudaupload` hits the same) - so it's not fully zero-copy. True NVIDIA zero-copy
-  would need a direct dmabuf->CUDA EGL import like `cuda-dmabuf`, but that only fits
-  a same-GPU NVIDIA desktop (and this gst build lacks a CUDA scaler anyway).
+back via `RemoteDesktop::notify_touch_*`. `[graphics] zerocopy` picks the encode
+path (`build_pipewire_encode`) **based on the GPU that renders the desktop** - so
+the encoder runs on the same GPU the ScreenCast dmabuf lives on (encoding an
+Intel/AMD desktop on NVIDIA, or vice-versa, would be a cross-GPU copy).
+`config::desktop_render_driver()` finds it from the card with a connected display
+(`/sys/class/drm/card*-<conn>/status`). If it's NVIDIA -> prefer GL/NVENC; else ->
+prefer the dmabuf postproc (VA-API/v4l2); fall through to the other if the preferred
+elements are missing, then software. The paths:
+- **VA-API / v4l2** (Intel/AMD/Qualcomm): `pipewiresrc ! vapostproc|v4l2convert !
+  videorate ! caps(memory:DMABuf) ! vah264enc|v4l2h264enc`, via the shared
+  `HW_BACKENDS` - the postproc imports the dmabuf and does convert+scale on the GPU,
+  genuine zero-copy. **Verified** on Intel via `tests/desktop.rs`. `run_desktop`
+  sets `GST_VA_ALL_DRIVERS=1` (the gst `va` plugin skips the iGPU otherwise on a
+  hybrid box); needs the iGPU's VA driver (`intel-media-driver`) on the run host.
+- **NVIDIA GL**: `pipewiresrc ! glupload ! glcolorconvert ! glcolorscale !
+  videorate ! nvh264enc`. Convert/scale on the GPU, but the *final* GL->CUDA handoff
+  currently downloads to system memory (interop fails with
+  `INVALID_GRAPHICS_CONTEXT`; `cudaupload` hits the same) - so it's not fully
+  zero-copy. True NVIDIA zero-copy would need a direct dmabuf->CUDA EGL import like
+  `cuda-dmabuf` (only fits a same-GPU NVIDIA desktop; this gst build lacks a CUDA
+  scaler anyway).
 - **Software**: `videorate ! videoscale ! videoconvert`.
 
 `videorate` is memory-agnostic (`video/x-raw(ANY)`) so it re-times inside the GPU

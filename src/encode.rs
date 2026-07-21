@@ -352,58 +352,76 @@ fn build_pipewire_encode(
         }
     };
 
-    if !matches!(zerocopy, ZeroCopyMode::Off) {
-        // Preferred: a dmabuf-importing postproc + encoder on the *same* GPU as the desktop -
-        // Intel/AMD `vapostproc ! vah264enc`, Qualcomm `v4l2convert ! v4l2h264enc`. The postproc
-        // imports the portal's dmabuf and does convert + scale on the GPU, handing dmabuf to the
-        // encoder: genuinely zero-copy. This is preferred over the NVIDIA/GL path below because a
-        // typical Wayland desktop is rendered on the integrated GPU (e.g. Intel), and encoding
-        // that on NVIDIA would be a cross-GPU copy anyway. (For the Intel `va` elements to be
-        // registered on a hybrid box, gst needs `GST_VA_ALL_DRIVERS=1`.)
-        if let Some(b) = HW_BACKENDS
+    // A dmabuf-importing postproc + encoder on the *same* GPU as the desktop - Intel/AMD
+    // `vapostproc ! vah264enc`, Qualcomm `v4l2convert ! v4l2h264enc`. The postproc imports the
+    // portal's dmabuf and does convert + scale on the GPU, handing dmabuf to the encoder: genuine
+    // zero-copy. (For the Intel `va` elements to register on a hybrid box, gst needs
+    // `GST_VA_ALL_DRIVERS=1`, which `run_desktop` sets.) Returns `None` if no HW backend exists.
+    let build_hw = || -> Result<Option<gst::Element>> {
+        let Some(b) = HW_BACKENDS
             .iter()
             .find(|b| element_available(b.postproc) && element_available(b.encoder))
-        {
-            let postproc = mk(b.postproc, "postproc")?;
-            let rate = mk("videorate", "videorate")?;
-            let encoder = mk(b.encoder, "encoder")?;
-            if !b.keyframe_prop.0.is_empty() {
-                encoder.set_property_from_str(b.keyframe_prop.0, b.keyframe_prop.1);
-            }
-            pipeline
-                .add_many([&postproc, &rate, &encoder])
-                .map_err(|_| eyre!("add hw elements"))?;
-            gst::Element::link_many([src, &postproc, &rate])
-                .map_err(|_| eyre!("link hw chain"))?;
-            rate.link_filtered(&encoder, &caps(Some("memory:DMABuf")))
-                .map_err(|_| eyre!("link hw-encoder"))?;
-            tracing::info!(
-                "Encode source: desktop ZERO-COPY hardware '{}' ({} ! {})",
-                b.name, b.postproc, b.encoder
-            );
-            return Ok(encoder);
+        else {
+            return Ok(None);
+        };
+        let postproc = mk(b.postproc, "postproc")?;
+        let rate = mk("videorate", "videorate")?;
+        let encoder = mk(b.encoder, "encoder")?;
+        if !b.keyframe_prop.0.is_empty() {
+            encoder.set_property_from_str(b.keyframe_prop.0, b.keyframe_prop.1);
         }
-        // NVIDIA/GL fallback: upload to GL and convert/scale/re-time on the GPU, then hand GL
-        // memory to `nvh264enc`. NB: the *final* GL->CUDA handoff currently fails
-        // (INVALID_GRAPHICS_CONTEXT) and gst downloads GL->system memory - so this offloads the
-        // convert/scale to the GPU but the encoder handoff is *not* zero-copy. It's still useful
-        // when the desktop *is* NVIDIA-rendered and there's no VA-API. (`cudaupload` hits the same
-        // interop limit; true NVIDIA zero-copy would need a direct dmabuf->CUDA EGL import.)
-        if element_available("glupload") && element_available("nvh264enc") {
-            let (enc_name, encoder) = default_encoder()?;
-            let glupload = mk("glupload", "glupload")?;
-            let glconvert = mk("glcolorconvert", "glconvert")?;
-            let glscale = mk("glcolorscale", "glscale")?;
-            let rate = mk("videorate", "videorate")?;
-            pipeline
-                .add_many([&glupload, &glconvert, &glscale, &rate, &encoder])
-                .map_err(|_| eyre!("add gl elements"))?;
-            gst::Element::link_many([src, &glupload, &glconvert, &glscale, &rate])
-                .map_err(|_| eyre!("link gl chain"))?;
-            rate.link_filtered(&encoder, &caps(Some("memory:GLMemory")))
-                .map_err(|_| eyre!("link gl-encoder"))?;
-            tracing::info!("Encode source: desktop GL GPU convert/scale (glupload ! ... ! {enc_name})");
-            return Ok(encoder);
+        pipeline.add_many([&postproc, &rate, &encoder]).map_err(|_| eyre!("add hw elements"))?;
+        gst::Element::link_many([src, &postproc, &rate]).map_err(|_| eyre!("link hw chain"))?;
+        rate.link_filtered(&encoder, &caps(Some("memory:DMABuf")))
+            .map_err(|_| eyre!("link hw-encoder"))?;
+        tracing::info!(
+            "Encode source: desktop ZERO-COPY hardware '{}' ({} ! {})",
+            b.name, b.postproc, b.encoder
+        );
+        Ok(Some(encoder))
+    };
+    // NVIDIA/GL: upload to GL and convert/scale/re-time on the GPU, then hand GL memory to
+    // `nvh264enc`. NB: the *final* GL->CUDA handoff currently downloads to system memory (interop
+    // fails with INVALID_GRAPHICS_CONTEXT), so it's not fully zero-copy - but it's the right choice
+    // when the desktop *is* NVIDIA-rendered (same GPU). Returns `None` if the elements are absent.
+    let build_gl = || -> Result<Option<gst::Element>> {
+        if !(element_available("glupload") && element_available("nvh264enc")) {
+            return Ok(None);
+        }
+        let (enc_name, encoder) = default_encoder()?;
+        let glupload = mk("glupload", "glupload")?;
+        let glconvert = mk("glcolorconvert", "glconvert")?;
+        let glscale = mk("glcolorscale", "glscale")?;
+        let rate = mk("videorate", "videorate")?;
+        pipeline
+            .add_many([&glupload, &glconvert, &glscale, &rate, &encoder])
+            .map_err(|_| eyre!("add gl elements"))?;
+        gst::Element::link_many([src, &glupload, &glconvert, &glscale, &rate])
+            .map_err(|_| eyre!("link gl chain"))?;
+        rate.link_filtered(&encoder, &caps(Some("memory:GLMemory")))
+            .map_err(|_| eyre!("link gl-encoder"))?;
+        tracing::info!("Encode source: desktop GL GPU convert/scale (glupload ! ... ! {enc_name})");
+        Ok(Some(encoder))
+    };
+
+    if !matches!(zerocopy, ZeroCopyMode::Off) {
+        // Pick the backend that runs on the GPU the desktop buffer actually lives on: NVENC only if
+        // the desktop is NVIDIA-rendered (encoding an Intel/AMD desktop on NVIDIA would be a
+        // cross-GPU copy), otherwise the dmabuf postproc (VA-API/v4l2) on that GPU. Fall through to
+        // the other if the preferred one isn't available.
+        let driver = crate::config::desktop_render_driver();
+        let is_nvidia = matches!(driver.as_deref(), Some("nvidia") | Some("nvidia-drm"));
+        tracing::info!(
+            "desktop renders on GPU driver {}; preferring {} encode backend",
+            driver.as_deref().unwrap_or("unknown"),
+            if is_nvidia { "GL/NVENC" } else { "VA-API/v4l2" },
+        );
+        let attempts: [&dyn Fn() -> Result<Option<gst::Element>>; 2] =
+            if is_nvidia { [&build_gl, &build_hw] } else { [&build_hw, &build_gl] };
+        for attempt in attempts {
+            if let Some(encoder) = attempt()? {
+                return Ok(encoder);
+            }
         }
         if matches!(zerocopy, ZeroCopyMode::Force) {
             return Err(eyre!(
