@@ -23,9 +23,10 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   internal Smithay compositor headless on the DRM render node - no external
   compositor). Only the build is in the toolbox. Configure a **host-installed**
   desktop app to stream via `[app] command` in the config file (or
-  `CARJACK_APP.COMMAND` / `--command`); leave unset to stream black. Settings
+  `CARJACK.APP.COMMAND` / `--command`); leave unset to stream black. Settings
   come from `~/.config/carjack/config.toml` (see `carjack.toml.example`),
-  overridable by `CARJACK_<SECTION>.<KEY>` env vars (`.env` sets these) and
+  overridable by dotted `CARJACK.<config.path>` env vars (`.env` sets these; note
+  the prefix separator is a dot, so `CARJACK.SOURCE`, `CARJACK.APP.COMMAND`) and
   launch flags (`carjack --help`); config module is `src/config.rs`.
 - just test-run [timeout] - **use this instead of `just run`/bare `cargo run`
   for any live/manual testing.** carjack drives the real host NetworkManager and
@@ -38,8 +39,8 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 - To exercise the compositor standalone without a car: `just test compositor`
   (the `tests/compositor.rs` integration test) brings it up, runs a client, and
   checks the composited frames contain client content and drive the encode path.
-  `CARJACK_APP.COMMAND` overrides the test client; `CARJACK_TEST_FRAMES` caps
-  the frames sampled. It needs host GPU/DRM at runtime.
+  `CARJACK.APP.COMMAND` overrides the test client; `CARJACK_TEST_FRAMES` (read
+  directly, not via config) caps the frames sampled. It needs host GPU/DRM at runtime.
 
 ## CarPlay / iAP2 protocol notes
 
