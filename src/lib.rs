@@ -3,4 +3,5 @@
 //! under `tests/` can drive them without a car - see `tests/compositor.rs`.
 pub mod compositor;
 pub mod config;
+pub mod display_cache;
 pub mod encode;
