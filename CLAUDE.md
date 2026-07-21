@@ -72,13 +72,33 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   check that for where things stand, and update it rather than duplicating its
   content into this file.
 
+## Video source (`source` config): internal compositor vs desktop portal
+
+`source = "internal"` (default) streams carjack's own compositor running `[app]
+command`; `source = "desktop"` streams the user's *existing* desktop via
+xdg-desktop-portal. `main.rs` branches on it: `run_internal` (compositor + app +
+display cache, below) or `run_desktop` (portal). Both share `establish_carplay`
+(the BT -> WiFi -> AirPlay handshake) and the per-session select loop; they differ
+only in the video source and where touch goes.
+
+Desktop mode (`src/portal.rs`, ashpd): `start_remote_desktop` opens a portal
+ScreenCast + RemoteDesktop session once at startup (consent dialog first run;
+`PersistMode::Application` remembers it) and yields a PipeWire node id;
+`encode::encode_pipewire_to_channel` runs `pipewiresrc ! videorate ! videoscale !
+videoconvert ! caps(car res, 30) ! encoder` (it *does* scale/re-time, unlike the
+internal path - the desktop isn't the car's resolution), and touch is injected
+back via `RemoteDesktop::notify_touch_*`. `[app]`, `[display]`, the display cache,
+and `[graphics] zerocopy` don't apply in this mode. Needs a desktop session with a
+portal backend (not the headless deployment device).
+
 ## Internal compositor (`src/compositor.rs`)
 
-carjack runs its **own** minimal headless Wayland compositor (Smithay 0.7,
-GlesRenderer) rather than capturing from an external one. This is the core of
-the screen/input architecture. The old approach (`ext-image-copy-capture-v1`
-capture + `wlr-virtual-pointer` touch + xdg-desktop-portal fallback, in the now
-deleted `wayland_capture.rs`/`portal.rs`) is gone - do not resurrect it.
+For `source = "internal"`, carjack runs its **own** minimal headless Wayland
+compositor (Smithay 0.7, GlesRenderer) rather than capturing from an external one.
+This is the core of the internal screen/input architecture. (An older
+always-on capture approach - `ext-image-copy-capture-v1` + `wlr-virtual-pointer`
+in a deleted `wayland_capture.rs` - is gone; don't bring *that* back. The portal
+path lives on only as the opt-in `source = "desktop"` mode above.)
 
 Why own the compositor: (1) render at the car's _exact_ resolution + refresh
 (learned from AirPlay `/info`) so no scaling is needed - the compositor starts

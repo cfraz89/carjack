@@ -182,59 +182,6 @@ pub async fn encode_h264_to_channel(
     let (encoder, feeder) = build_backend(&pipeline, &queue, &backend)?;
     tracing::info!("Encode backend: {}", backend.describe());
 
-    let output_caps = gst::Caps::builder("video/x-h264")
-        .field("stream-format", "byte-stream")
-        .field("alignment", "au")
-        .build();
-
-    let h264parse = mk("h264parse", "h264parse")?;
-    h264parse.set_property("config-interval", -1i32);
-
-    let appsink = mk("appsink", "sink")?;
-    appsink.set_property("sync", false);
-
-    pipeline.add(&h264parse).map_err(|_| eyre!("add h264parse"))?;
-    pipeline.add(&appsink).map_err(|_| eyre!("add appsink"))?;
-
-    encoder
-        .link(&h264parse)
-        .map_err(|_| eyre!("link encoder-parse"))?;
-    h264parse
-        .link_filtered(&appsink, &output_caps)
-        .map_err(|_| eyre!("link parse-sink"))?;
-
-    // ---- appsink callbacks ----
-    let tx = video_tx.clone();
-    let appsink = appsink
-        .downcast::<gst_app::AppSink>()
-        .map_err(|_| eyre!("'sink' is not an appsink"))?;
-    appsink.set_callbacks(
-        gst_app::AppSinkCallbacks::builder()
-            .new_sample(move |sink| {
-                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-                let au = normalize_annexb_4byte(map.as_slice());
-                let config = extract_avcc_config(&au);
-                match tx.blocking_send(EncodedFrame { data: au, config }) {
-                    Ok(()) => Ok(gst::FlowSuccess::Ok),
-                    Err(_) => Err(gst::FlowError::Eos),
-                }
-            })
-            .build(),
-    );
-
-    // Ensure the pipeline is torn down if this future is dropped.
-    struct StopGuard(gst::Pipeline);
-    impl Drop for StopGuard {
-        fn drop(&mut self) {
-            let _ = self.0.set_state(gst::State::Null);
-        }
-    }
-
-    pipeline.set_state(gst::State::Playing)?;
-    let _guard = StopGuard(pipeline.clone());
-
     // Feed the encoder directly off the compositor's frame production: push each frame as it's
     // published, rather than re-sampling the latest on a *separate* timer. The compositor renders
     // on its own steady timer even for a static screen (so there's always a fresh frame ~every
@@ -322,9 +269,123 @@ pub async fn encode_h264_to_channel(
         }
     }));
 
-    let bus = pipeline
-        .bus()
-        .ok_or_else(|| eyre!("pipeline has no bus"))?;
+    // `_frame_feeder` stays alive for the whole call, feeding the appsrc while the pipeline runs.
+    drive_h264_pipeline(&pipeline, &encoder, video_tx).await
+}
+
+/// Stream the user's existing desktop, captured via the xdg-desktop-portal ScreenCast PipeWire
+/// `node_id`, scaled/re-timed to the car's `width`x`height` @ 30fps. Used for
+/// `source = "desktop"`; input is injected back through the portal (see `src/portal.rs`), not
+/// here. `pipewiresrc` is a live source with its own timestamps, so no appsrc/feeder is needed.
+pub async fn encode_pipewire_to_channel(
+    node_id: u32,
+    width: u32,
+    height: u32,
+    video_tx: mpsc::Sender<EncodedFrame>,
+) -> Result<()> {
+    gst::init()?;
+    let pipeline = gst::Pipeline::new();
+    let mk = |name: &str, label: &str| {
+        gst::ElementFactory::make(name)
+            .name(label)
+            .build()
+            .map_err(|_| eyre!("failed to create {label} ({name})"))
+    };
+
+    let src = mk("pipewiresrc", "source")?;
+    src.set_property_from_str("path", &node_id.to_string());
+    // The desktop is whatever resolution/rate the user's monitor is, so unlike the internal
+    // compositor path we *do* need to scale + re-time it to the car's display here.
+    let rate = mk("videorate", "videorate")?;
+    let scale = mk("videoscale", "videoscale")?;
+    let convert = mk("videoconvert", "videoconvert")?;
+    let target_caps = gst::Caps::builder("video/x-raw")
+        .field("width", width as i32)
+        .field("height", height as i32)
+        .field("framerate", gst::Fraction::new(30, 1))
+        .build();
+
+    let enc_desc = std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from(DEFAULT_ENCODER));
+    let (enc_name, enc_props) = parse_encoder_string(&enc_desc)?;
+    let encoder = mk(&enc_name, "encoder")?;
+    for (key, val) in &enc_props {
+        encoder.set_property_from_str(key, val);
+    }
+
+    pipeline
+        .add_many([&src, &rate, &scale, &convert, &encoder])
+        .map_err(|_| eyre!("add pipewire elements"))?;
+    gst::Element::link_many([&src, &rate, &scale, &convert])
+        .map_err(|_| eyre!("link pipewiresrc chain"))?;
+    convert
+        .link_filtered(&encoder, &target_caps)
+        .map_err(|_| eyre!("link convert-encoder"))?;
+    tracing::info!("Encode source: desktop portal (pipewiresrc node {node_id} -> {enc_name})");
+
+    drive_h264_pipeline(&pipeline, &encoder, video_tx).await
+}
+
+/// Link `encoder` (whose src pad emits H264) -> `h264parse` -> `appsink`, forward each access unit
+/// to `video_tx`, set the pipeline PLAYING, and run its bus until EOS/error. The pipeline is torn
+/// down when this future is dropped. Shared by the internal-compositor and portal source paths.
+async fn drive_h264_pipeline(
+    pipeline: &gst::Pipeline,
+    encoder: &gst::Element,
+    video_tx: mpsc::Sender<EncodedFrame>,
+) -> Result<()> {
+    let mk = |name: &str, label: &str| {
+        gst::ElementFactory::make(name)
+            .name(label)
+            .build()
+            .map_err(|_| eyre!("failed to create {label} ({name})"))
+    };
+    let output_caps = gst::Caps::builder("video/x-h264")
+        .field("stream-format", "byte-stream")
+        .field("alignment", "au")
+        .build();
+
+    let h264parse = mk("h264parse", "h264parse")?;
+    h264parse.set_property("config-interval", -1i32);
+    let appsink = mk("appsink", "sink")?;
+    appsink.set_property("sync", false);
+
+    pipeline.add(&h264parse).map_err(|_| eyre!("add h264parse"))?;
+    pipeline.add(&appsink).map_err(|_| eyre!("add appsink"))?;
+    encoder.link(&h264parse).map_err(|_| eyre!("link encoder-parse"))?;
+    h264parse
+        .link_filtered(&appsink, &output_caps)
+        .map_err(|_| eyre!("link parse-sink"))?;
+
+    let appsink = appsink
+        .downcast::<gst_app::AppSink>()
+        .map_err(|_| eyre!("'sink' is not an appsink"))?;
+    appsink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                let au = normalize_annexb_4byte(map.as_slice());
+                let config = extract_avcc_config(&au);
+                match video_tx.blocking_send(EncodedFrame { data: au, config }) {
+                    Ok(()) => Ok(gst::FlowSuccess::Ok),
+                    Err(_) => Err(gst::FlowError::Eos),
+                }
+            })
+            .build(),
+    );
+
+    // Ensure the pipeline is torn down if this future is dropped.
+    struct StopGuard(gst::Pipeline);
+    impl Drop for StopGuard {
+        fn drop(&mut self) {
+            let _ = self.0.set_state(gst::State::Null);
+        }
+    }
+    pipeline.set_state(gst::State::Playing)?;
+    let _guard = StopGuard(pipeline.clone());
+
+    let bus = pipeline.bus().ok_or_else(|| eyre!("pipeline has no bus"))?;
     let mut messages = bus.stream();
     while let Some(msg) = messages.next().await {
         match msg.view() {
@@ -342,7 +403,6 @@ pub async fn encode_h264_to_channel(
             _ => {}
         }
     }
-
     Ok(())
 }
 

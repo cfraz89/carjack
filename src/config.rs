@@ -11,9 +11,35 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// What to stream: our internal compositor (running `[app] command`), or the user's existing
+    /// desktop via the xdg-desktop-portal RemoteDesktop/ScreenCast.
+    pub source: Source,
     pub graphics: Graphics,
     pub display: Display,
     pub app: App,
+}
+
+/// Video source: the internal compositor, or the existing desktop via the portal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    /// Run `[app] command` in carjack's own headless compositor and stream that (default).
+    #[default]
+    Internal,
+    /// Capture the user's existing Wayland desktop via xdg-desktop-portal (ScreenCast) and inject
+    /// input via RemoteDesktop. Needs a running desktop session with a portal backend; `[app]`,
+    /// `[display]`, and the display cache are ignored in this mode.
+    Desktop,
+}
+
+impl Source {
+    fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "internal" | "compositor" | "app" => Ok(Self::Internal),
+            "desktop" | "portal" => Ok(Self::Desktop),
+            other => Err(eyre!("invalid source '{other}' (expected internal/desktop)")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -128,6 +154,10 @@ pub struct Cli {
     #[arg(short = 'c', long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
+    /// Override source: internal (compositor + app) | desktop (existing desktop via portal).
+    #[arg(long, value_name = "SOURCE")]
+    pub source: Option<String>,
+
     /// Override [graphics] drm_device: auto | <driver> | <path> | <index>.
     #[arg(long, value_name = "DEVICE")]
     pub drm_device: Option<String>,
@@ -183,6 +213,9 @@ impl Config {
             .map_err(|e| eyre!("parse config: {e}"))?;
 
         // CLI flag overrides (highest precedence).
+        if let Some(v) = &cli.source {
+            cfg.source = Source::parse(v)?;
+        }
         if let Some(v) = &cli.drm_device {
             cfg.graphics.drm_device = v.clone();
         }
@@ -381,6 +414,18 @@ mod tests {
         assert_eq!(cfg.graphics.drm_device, "auto"); // default kept
         assert_eq!(cfg.display.width, 1280); // default section
         assert!(!cfg.app.resizable); // default
+    }
+
+    #[test]
+    fn source_parses_and_defaults_internal() {
+        assert_eq!(Source::default(), Source::Internal);
+        assert_eq!(Source::parse("desktop").unwrap(), Source::Desktop);
+        assert_eq!(Source::parse("portal").unwrap(), Source::Desktop);
+        assert_eq!(Source::parse("internal").unwrap(), Source::Internal);
+        assert!(Source::parse("nonsense").is_err());
+        // via config file (serde rename_all=lowercase)
+        assert_eq!(parse_toml("source = \"desktop\"\n").source, Source::Desktop);
+        assert_eq!(parse_toml("").source, Source::Internal);
     }
 
     #[test]

@@ -7,6 +7,14 @@
 #   env vars: CARJACK_GRAPHICS.DRM_DEVICE, CARJACK_GRAPHICS.ZEROCOPY, CARJACK_DISPLAY.WIDTH,
 #             CARJACK_APP.COMMAND, CARJACK_APP.RESIZABLE, ...  (CARJACK_ + section + `.` + key)
 
+# What to stream:
+#   "internal" - run [app] command in carjack's own headless compositor (default)
+#   "desktop"  - capture your existing desktop via xdg-desktop-portal (ScreenCast) and inject
+#                input via RemoteDesktop. Needs a running desktop session with a portal backend;
+#                [app], [display], and the display cache are ignored. A consent dialog appears on
+#                first run. `[graphics] zerocopy` doesn't apply (frames come from PipeWire).
+source = "internal"
+
 [graphics]
 # Which GPU to render *and* encode on (they must be the same for zero-copy). One of:
 #   "auto"                  - pick automatically, preferring an encode-capable GPU
