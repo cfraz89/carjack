@@ -4,6 +4,6 @@
 /armbian/output
 /armbian/tmp
 .env
-carjack.log
+*.log
 *.pklg
 *.pcapng
