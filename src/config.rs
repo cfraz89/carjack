@@ -202,10 +202,15 @@ impl Config {
         if let Some(p) = &path {
             builder = builder.add_source(config::File::from(p.clone()));
         }
-        // Environment support: any setting can be overridden via `CARJACK_<SECTION>.<KEY>`,
-        // e.g. `CARJACK_GRAPHICS.DRM_DEVICE`, `CARJACK_APP.COMMAND`,
-        // `CARJACK_DISPLAY__WIDTH`. (`try_parsing` coerces numbers/bools from the string values.)
-        builder = builder.add_source(config::Environment::with_prefix("CARJACK").try_parsing(true));
+        // Environment support: any setting can be overridden via `CARJACK.<...>`, dot-separated
+        // to match the config paths - `CARJACK.SOURCE`, `CARJACK.GRAPHICS.ZEROCOPY`,
+        // `CARJACK.APP.COMMAND`, `CARJACK.DISPLAY.WIDTH`. The prefix separator is a dot too (not
+        // the crate default `_`), so it's dots all the way. (`try_parsing` coerces numbers/bools.)
+        builder = builder.add_source(
+            config::Environment::with_prefix("CARJACK")
+                .prefix_separator(".")
+                .try_parsing(true),
+        );
         let mut cfg: Config = builder
             .build()
             .map_err(|e| eyre!("read config: {e}"))?
@@ -458,6 +463,31 @@ mod tests {
         assert_eq!(parse_toml("source = \"desktop\"\n").source, Source::Desktop);
         assert_eq!(parse_toml("source = \"app\"\n").source, Source::App);
         assert_eq!(parse_toml("").source, Source::App);
+    }
+
+    #[test]
+    fn env_vars_are_dot_separated() {
+        // CARJACK.<path> with dots throughout (prefix separator included), matching config paths.
+        let mut env = std::collections::HashMap::new();
+        env.insert("CARJACK.SOURCE".to_string(), "desktop".to_string());
+        env.insert("CARJACK.GRAPHICS.ZEROCOPY".to_string(), "false".to_string());
+        env.insert("CARJACK.APP.COMMAND".to_string(), "foo".to_string());
+        env.insert("CARJACK.DISPLAY.WIDTH".to_string(), "800".to_string());
+        let cfg: Config = config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("CARJACK")
+                    .prefix_separator(".")
+                    .try_parsing(true)
+                    .source(Some(env)),
+            )
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert_eq!(cfg.source, Source::Desktop);
+        assert_eq!(cfg.graphics.zerocopy, ZeroCopyMode::Off);
+        assert_eq!(cfg.desktop_command(), "foo");
+        assert_eq!(cfg.display.width, 800);
     }
 
     #[test]

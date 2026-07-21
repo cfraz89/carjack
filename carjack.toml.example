@@ -4,8 +4,8 @@
 #
 # Precedence (highest wins): launch flag > CARJACK_* env var > this file > default.
 #   flags:    carjack --drm-device nvidia --zerocopy auto --width 800 --command "..." (see --help)
-#   env vars: CARJACK_GRAPHICS.DRM_DEVICE, CARJACK_GRAPHICS.ZEROCOPY, CARJACK_DISPLAY.WIDTH,
-#             CARJACK_APP.COMMAND, CARJACK_APP.RESIZABLE, ...  (CARJACK_ + section + `.` + key)
+#   env vars: CARJACK.SOURCE, CARJACK.GRAPHICS.DRM_DEVICE, CARJACK.GRAPHICS.ZEROCOPY,
+#             CARJACK.DISPLAY.WIDTH, CARJACK.APP.COMMAND, ...  (CARJACK + `.` + config path)
 
 # What to stream:
 #   "app"      - run [app] command in carjack's own headless compositor (default)
