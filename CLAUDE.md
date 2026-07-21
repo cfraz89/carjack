@@ -84,12 +84,20 @@ only in the video source and where touch goes.
 Desktop mode (`src/portal.rs`, ashpd): `start_remote_desktop` opens a portal
 ScreenCast + RemoteDesktop session once at startup (consent dialog first run;
 `PersistMode::Application` remembers it) and yields a PipeWire node id;
-`encode::encode_pipewire_to_channel` runs `pipewiresrc ! videorate ! videoscale !
-videoconvert ! caps(car res, 30) ! encoder` (it *does* scale/re-time, unlike the
+`encode::encode_pipewire_to_channel` scales/re-times it to the car (unlike the
 internal path - the desktop isn't the car's resolution), and touch is injected
-back via `RemoteDesktop::notify_touch_*`. `[app]`, `[display]`, the display cache,
-and `[graphics] zerocopy` don't apply in this mode. Needs a desktop session with a
-portal backend (not the headless deployment device).
+back via `RemoteDesktop::notify_touch_*`. `[graphics] zerocopy` selects the encode
+path (`build_pipewire_encode`): a GPU zero-copy backend when available -
+**NVIDIA** GL->NVENC (`pipewiresrc ! glupload ! glcolorconvert ! glcolorscale !
+videorate ! nvh264enc`, GL-CUDA interop) or **VA-API/v4l2** via the shared
+`HW_BACKENDS` postproc (`pipewiresrc ! vapostproc|v4l2convert ! videorate !
+caps(memory:DMABuf) ! vah264enc|v4l2h264enc`) - else **software**
+(`videorate ! videoscale ! videoconvert`). `videorate` is memory-agnostic
+(`video/x-raw(ANY)`) so it re-times inside the GPU chain without a CPU download.
+Only the NVIDIA/GL path is runtime-tested; VA-API/v4l2 are best-guess like their
+internal counterparts. `[app]`, `[display]`, and the display cache don't apply.
+Needs a desktop session with a portal backend (not the headless deployment
+device).
 
 ## Internal compositor (`src/compositor.rs`)
 
