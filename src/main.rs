@@ -11,7 +11,7 @@ use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use libcarjack::carplay_ctrl::wait_for_carplay_ctrl_probe;
 
 use carjack::compositor::Compositor;
-use carjack::config::{Cli, Config};
+use carjack::config::{Cli, Config, Source};
 use carjack::display_cache::{DisplayCache, DisplayProps};
 use carjack::encode::{self, EncodeBackend};
 use clap::Parser;
@@ -21,6 +21,7 @@ use crate::{
     wireless::wireless_carplay,
 };
 
+mod portal;
 mod usb;
 mod wifi_connect;
 mod wireless;
@@ -101,14 +102,30 @@ async fn main() -> Result<()> {
 
     let config = Config::load(&Cli::parse())?;
 
+    match config.source {
+        Source::Internal => run_internal(config).await,
+        Source::Desktop => run_desktop().await,
+    }
+}
+
+/// Await Ctrl-C or the retry backoff between sessions; returns `true` if Ctrl-C fired (stop).
+async fn backoff_or_ctrl_c() -> bool {
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Ctrl-C received, shutting down");
+            true
+        }
+        _ = tokio::time::sleep(Duration::from_secs(2)) => false,
+    }
+}
+
+/// `source = internal`: run `[app] command` in carjack's own headless compositor and stream that.
+async fn run_internal(config: Config) -> Result<()> {
     // Resolve which GPU to render + encode on, then decide the encode backend (this is where
     // zerocopy=auto falls back to software, or zerocopy=true errors out).
     let render_node = carjack::config::resolve_render_node(&config.graphics.drm_device)?;
     let backend = encode::resolve_backend(config.graphics.zerocopy, &render_node)?;
-    tracing::info!(
-        "Render node: {render_node}, encode backend: {}",
-        backend.describe()
-    );
+    tracing::info!("Render node: {render_node}, encode backend: {}", backend.describe());
 
     // If we've seen a car before, start the compositor at its cached resolution rather than the
     // config default - so the app (even a non-resizable one like Waydroid) can boot at the right
@@ -119,13 +136,8 @@ async fn main() -> Result<()> {
         Some(p) => (p.width, p.height, p.fps),
         None => (config.display.width, config.display.height, config.display.fps),
     };
-    let compositor = Compositor::start(
-        render_node,
-        backend.is_zero_copy(),
-        start_w,
-        start_h,
-        start_fps,
-    )?;
+    let compositor =
+        Compositor::start(render_node, backend.is_zero_copy(), start_w, start_h, start_fps)?;
     let mut app = DesktopApp::new(
         config.desktop_command().to_owned(),
         compositor.socket_name.clone(),
@@ -137,7 +149,7 @@ async fn main() -> Result<()> {
         app.launch();
     }
 
-    // Each session runs the full flow (Bluetooth -> WiFi -> AirPlay). If it fails - most
+    // Each session runs the full flow (Bluetooth -> WiFi -> AirPlay). On failure - most
     // importantly when the car tears down the screen socket - restart from a fresh Bluetooth
     // connection rather than exiting. Ctrl-C breaks out and cleans up (compositor thread joined,
     // app killed) via the drops below.
@@ -155,13 +167,8 @@ async fn main() -> Result<()> {
                     }
                     Err(e) => {
                         tracing::warn!("Session failed, restarting from Bluetooth: {e}");
-                        // Cancellable backoff so Ctrl-C during the retry wait still exits promptly.
-                        tokio::select! {
-                            _ = tokio::signal::ctrl_c() => {
-                                tracing::info!("Ctrl-C received, shutting down");
-                                break Ok(());
-                            }
-                            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                        if backoff_or_ctrl_c().await {
+                            break Ok(());
                         }
                     }
                 }
@@ -175,14 +182,58 @@ async fn main() -> Result<()> {
     exit
 }
 
-async fn run_session(
-    compositor: &Compositor,
-    backend: &EncodeBackend,
-    config: &Config,
-    app: &mut DesktopApp,
-    cache: &mut DisplayCache,
-) -> Result<()> {
-    let (touch_tx, mut touch_rx) = mpsc::channel::<TouchEvent>(64);
+/// `source = desktop`: stream the user's existing desktop via xdg-desktop-portal.
+async fn run_desktop() -> Result<()> {
+    // Ask the portal for ScreenCast + RemoteDesktop access once - a consent dialog appears on the
+    // first run (`PersistMode::Application` remembers it after). The PipeWire node + input session
+    // persist across CarPlay reconnects, the way the compositor does in internal mode.
+    let rd = portal::start_remote_desktop().await?;
+    tracing::info!(
+        "Desktop source ready via xdg-desktop-portal (PipeWire node {})",
+        rd.node_id()
+    );
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("Ctrl-C received, shutting down");
+                return Ok(());
+            }
+            result = run_desktop_session(&rd) => {
+                match result {
+                    Ok(()) => {
+                        tracing::info!("Session ended cleanly, exiting");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Session failed, restarting from Bluetooth: {e}");
+                        if backoff_or_ctrl_c().await {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Result of the shared Bluetooth -> WiFi -> AirPlay handshake, common to both source modes: the
+/// AirPlay connection, the still-running CarPlay/Bluetooth task, and the touch plumbing.
+struct Established {
+    conn: libcarjack::airplay::AirPlayConnection,
+    carplay_handle: AbortOnDropHandle<Result<()>>,
+    /// Sent to `run_video_stream` (the AirPlay/HID side pushes decoded touch events into it).
+    touch_tx: mpsc::Sender<TouchEvent>,
+    /// Read in the session loop and injected into the compositor or the portal.
+    touch_rx: mpsc::Receiver<TouchEvent>,
+    /// The car's Bluetooth MAC (for the display cache); resolves during the handshake.
+    car_addr_rx: tokio::sync::oneshot::Receiver<String>,
+}
+
+/// Run the Bluetooth -> WiFi -> AirPlay flow and return once AirPlay is connected (so the caller
+/// knows the car's display and can wire up the video source + input). Shared by both source modes.
+async fn establish_carplay() -> Result<Established> {
+    let (touch_tx, touch_rx) = mpsc::channel::<TouchEvent>(64);
     let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCredentials>(4);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let (bt_mac_tx, bt_mac_rx) = tokio::sync::oneshot::channel::<String>();
@@ -195,9 +246,8 @@ async fn run_session(
     // WiFi connect and AirPlay setup - if it only advanced when awaited in the loops below,
     // it would be starved for ~10s during screen-sharing setup and the car would reset the
     // Bluetooth link, tearing down CarPlay right as streaming starts.
-    // AbortOnDropHandle guarantees the task (and its BlueZ resources) is torn down when this
-    // function returns - e.g. before a session restart - rather than detached like a plain
-    // JoinHandle.
+    // AbortOnDropHandle guarantees the task (and its BlueZ resources) is torn down when the
+    // returned handle is dropped (e.g. before a session restart) rather than detached.
     let mut carplay_handle = AbortOnDropHandle::new(tokio::spawn(wireless_carplay(
         wifi_tx, ready_tx, bt_mac_tx, car_addr_tx,
     )));
@@ -259,11 +309,25 @@ async fn run_session(
             }
         };
 
-    // Phase 3: connect AirPlay to learn the car's display size + refresh, then reconfigure the
-    // already-running compositor (and its client) to exactly match - so it renders at the car's
-    // size and rate, no scaling needed downstream. The compositor + desktop app were started at
-    // launch, so the app is already up; this just resizes it.
+    // Connect AirPlay to learn the car's display size + refresh.
     let conn = libcarjack::airplay::connect_airplay(peer_addr, remote_homekit_id).await?;
+    Ok(Established { conn, carplay_handle, touch_tx, touch_rx, car_addr_rx })
+}
+
+/// `source = internal`: reconfigure the compositor to the car's display, encode its frames, and
+/// inject CarPlay touch back into it.
+async fn run_session(
+    compositor: &Compositor,
+    backend: &EncodeBackend,
+    config: &Config,
+    app: &mut DesktopApp,
+    cache: &mut DisplayCache,
+) -> Result<()> {
+    let Established { conn, mut carplay_handle, touch_tx, mut touch_rx, car_addr_rx } =
+        establish_carplay().await?;
+
+    // Reconfigure the already-running compositor (and its client) to exactly match the car's size
+    // and rate - so it renders at the car's resolution, no scaling needed downstream.
     let resized = compositor.reconfigure(conn.width, conn.height, conn.max_fps)?;
 
     // Remember this car's display so next startup can size everything up front (the compositor was
@@ -341,6 +405,62 @@ async fn run_session(
             touch = touch_rx.recv(), if !touch_done => {
                 match touch {
                     Some(event) => compositor.send_touch(&event)?,
+                    None => touch_done = true,
+                }
+            }
+        }
+    }
+}
+
+/// `source = desktop`: encode the portal's PipeWire stream (scaled to the car) and inject CarPlay
+/// touch back into the desktop through the portal's RemoteDesktop session.
+async fn run_desktop_session(rd: &portal::RemoteDesktopStream) -> Result<()> {
+    let Established { conn, mut carplay_handle, touch_tx, mut touch_rx, car_addr_rx: _ } =
+        establish_carplay().await?;
+    let (width, height) = (conn.width, conn.height);
+    tracing::info!("Streaming desktop to car at {width}x{height}");
+
+    let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(64);
+    let node_id = rd.node_id();
+    let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_pipewire_to_channel(
+        node_id, width, height, video_tx,
+    )));
+    let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx);
+    tokio::pin!(video);
+
+    let mut carplay_done = false;
+    let mut touch_done = false;
+
+    loop {
+        tokio::select! {
+            result = &mut carplay_handle, if !carplay_done => {
+                carplay_done = true;
+                match result {
+                    Ok(Ok(())) => tracing::info!("CarPlay (Bluetooth) session ended"),
+                    Ok(Err(e)) => tracing::warn!("CarPlay (Bluetooth) session ended: {e}"),
+                    Err(e) => tracing::warn!("CarPlay task panicked: {e}"),
+                }
+            }
+            result = &mut encoder => {
+                return match result {
+                    Ok(Ok(())) => Err(eyre!("video encoder task ended unexpectedly")),
+                    Ok(Err(e)) => Err(eyre!("video encoder failed: {e}")),
+                    Err(e) => Err(eyre!("video encoder task panicked: {e}")),
+                };
+            }
+            result = &mut video => {
+                result?;
+                return Ok(());
+            }
+            touch = touch_rx.recv(), if !touch_done => {
+                match touch {
+                    // Inject back into the real desktop via the portal (async, unlike the
+                    // compositor's synchronous seat injection).
+                    Some(event) => {
+                        if let Err(e) = rd.send_touch(&event).await {
+                            tracing::warn!("portal touch inject failed: {e}");
+                        }
+                    }
                     None => touch_done = true,
                 }
             }
