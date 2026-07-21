@@ -246,6 +246,37 @@ impl Config {
     }
 }
 
+/// The kernel driver of the GPU that renders the desktop - taken as the driver of the card with a
+/// connected display (`/sys/class/drm/card*-<connector>/status == "connected"`). The desktop-capture
+/// path uses this to pick a zero-copy encoder on the *same* GPU the ScreenCast dmabuf lives on
+/// (encoding an Intel-rendered desktop on NVIDIA would be a cross-GPU copy). `None` if it can't be
+/// determined (headless / sysfs unavailable) or on an exotic render-vs-scanout split.
+pub fn desktop_render_driver() -> Option<String> {
+    for entry in std::fs::read_dir("/sys/class/drm").ok()?.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // Connector dirs look like "card1-eDP-1"; skip the bare "card1" / "renderD*" nodes.
+        let Some((card, _connector)) = name.split_once('-') else {
+            continue;
+        };
+        if !card.starts_with("card") {
+            continue;
+        }
+        let connected = std::fs::read_to_string(entry.path().join("status"))
+            .map(|s| s.trim() == "connected")
+            .unwrap_or(false);
+        if !connected {
+            continue;
+        }
+        if let Ok(link) = std::fs::read_link(format!("/sys/class/drm/{card}/device/driver")) {
+            if let Some(drv) = link.file_name() {
+                return Some(drv.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
 /// Resolve the configured `drm_device` selector to a concrete render-node path.
 pub fn resolve_render_node(selector: &str) -> Result<String> {
     let sel = selector.trim();
