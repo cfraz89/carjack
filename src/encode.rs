@@ -292,6 +292,7 @@ pub async fn encode_pipewire_to_channel(
     height: u32,
     zerocopy: ZeroCopyMode,
     video_tx: mpsc::Sender<EncodedFrame>,
+    desktop_size_tx: tokio::sync::watch::Sender<Option<(u32, u32)>>,
 ) -> Result<()> {
     gst::init()?;
     let pipeline = gst::Pipeline::new();
@@ -301,6 +302,33 @@ pub async fn encode_pipewire_to_channel(
         .map_err(|_| eyre!("failed to create pipewiresrc"))?;
     src.set_property_from_str("path", &node_id.to_string());
     pipeline.add(&src).map_err(|_| eyre!("add pipewiresrc"))?;
+
+    // Report the desktop's *actual* frame size (from the negotiated pipewiresrc caps) so touch can
+    // be scaled to it - that's the coordinate space the car's view maps into, regardless of what
+    // the portal reported or how the desktop is scaled.
+    if let Some(pad) = src.static_pad("src") {
+        pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+            if let Some(gst::PadProbeData::Event(ev)) = &info.data {
+                if let gst::EventView::Caps(caps) = ev.view() {
+                    if let Some(s) = caps.caps().structure(0) {
+                        if let (Ok(w), Ok(h)) = (s.get::<i32>("width"), s.get::<i32>("height")) {
+                            desktop_size_tx.send_if_modified(|cur| {
+                                let next = Some((w as u32, h as u32));
+                                if *cur != next {
+                                    tracing::info!("desktop stream size {w}x{h} (touch scales to this)");
+                                    *cur = next;
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
 
     let encoder = build_pipewire_encode(&pipeline, &src, width, height, zerocopy)?;
     drive_h264_pipeline(&pipeline, &encoder, video_tx).await
@@ -367,8 +395,8 @@ fn build_pipewire_encode(
         let postproc = mk(b.postproc, "postproc")?;
         let rate = mk("videorate", "videorate")?;
         let encoder = mk(b.encoder, "encoder")?;
-        if !b.keyframe_prop.0.is_empty() {
-            encoder.set_property_from_str(b.keyframe_prop.0, b.keyframe_prop.1);
+        for (k, v) in b.props {
+            encoder.set_property_from_str(k, v);
         }
         pipeline.add_many([&postproc, &rate, &encoder]).map_err(|_| eyre!("add hw elements"))?;
         gst::Element::link_many([src, &postproc, &rate]).map_err(|_| eyre!("link hw chain"))?;
@@ -544,31 +572,39 @@ struct HwBackend {
     postproc: &'static str,
     /// hardware H264 encoder consuming the post-processor's (NV12, GPU-memory) output.
     encoder: &'static str,
-    /// (property, value) that caps the keyframe interval to ~6 frames. The car tears the
-    /// session down after ~1s without a keyframe, so this bounds startup/recovery latency.
-    /// Property name differs per encoder; empty = leave the encoder default.
-    keyframe_prop: (&'static str, &'static str),
+    /// Real-time encoder tuning applied in order: steady CBR, no B-frame reordering, minimal
+    /// reference buffering, and a ~1s keyframe interval (the car tears the session down after ~1s
+    /// without a keyframe). Property names differ per encoder; empty = leave the encoder defaults.
+    props: &'static [(&'static str, &'static str)],
 }
 
 /// Probed in order; first whose `postproc` + `encoder` both exist wins.
 const HW_BACKENDS: &[HwBackend] = &[
     // Qualcomm / embedded (the deployment target). v4l2 stateful encoders import DMABuf via
-    // V4L2_MEMORY_DMABUF; keyframe control is usually via extra-controls, so leave it default
+    // V4L2_MEMORY_DMABUF; keyframe/rate control is usually via extra-controls, so leave defaults
     // here and revisit against the real device.
     HwBackend {
         name: "v4l2",
         postproc: "v4l2convert",
         encoder: "v4l2h264enc",
-        keyframe_prop: ("", ""),
+        props: &[],
     },
     // Intel / AMD VA-API. vapostproc imports the DMA_DRM dmabuf and outputs NV12 in VAMemory,
-    // which vah264enc consumes on the same GPU - fully zero-copy.
+    // which vah264enc consumes on the same GPU - fully zero-copy. Defaults use B-frames + non-CBR
+    // rate control, which adds reordering/lookahead latency (visible lag) - tune for real-time.
     HwBackend {
         name: "vaapi",
         postproc: "vapostproc",
         encoder: "vah264enc",
-        // ~1s keyframe interval (see DEFAULT_ENCODER for why not shorter).
-        keyframe_prop: ("key-int-max", "30"),
+        props: &[
+            ("rate-control", "cbr"),
+            ("bitrate", "12000"),
+            ("b-frames", "0"),
+            ("ref-frames", "1"),
+            ("target-usage", "6"),
+            ("key-int-max", "30"),
+            ("aud", "true"),
+        ],
     },
 ];
 
@@ -661,8 +697,8 @@ fn build_dmabuf_hw_chain(
     };
     let postproc = mk(b.postproc, "postproc")?;
     let encoder = mk(b.encoder, "encoder")?;
-    if !b.keyframe_prop.0.is_empty() {
-        encoder.set_property_from_str(b.keyframe_prop.0, b.keyframe_prop.1);
+    for (k, v) in b.props {
+        encoder.set_property_from_str(k, v);
     }
     pipeline.add(&postproc).map_err(|_| eyre!("add postproc"))?;
     pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;

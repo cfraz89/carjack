@@ -72,8 +72,10 @@ async fn desktop_pipewire_encodes() -> Result<()> {
 
     // Encode the desktop stream, scaled to a car-like 1080x600, and count access units.
     let (video_tx, mut video_rx) = mpsc::channel::<EncodedFrame>(64);
+    let (dsize_tx, _dsize_rx) = tokio::sync::watch::channel::<Option<(u32, u32)>>(None);
     let _encoder = AbortOnDropHandle::new(tokio::spawn(async move {
-        if let Err(e) = encode_pipewire_to_channel(node_id, 1080, 600, mode, video_tx).await {
+        if let Err(e) = encode_pipewire_to_channel(node_id, 1080, 600, mode, video_tx, dsize_tx).await
+        {
             eprintln!("encoder error: {e}");
         }
     }));
