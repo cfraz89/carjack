@@ -184,6 +184,15 @@ async fn run_internal(config: Config) -> Result<()> {
 
 /// `source = desktop`: stream the user's existing desktop via xdg-desktop-portal.
 async fn run_desktop(config: Config) -> Result<()> {
+    // The gst `va` plugin only registers its VA-API elements (vapostproc/vah264enc) with this set
+    // on multi-GPU boxes - it's how the desktop zero-copy path reaches an integrated (e.g. Intel)
+    // GPU that renders the desktop. Set it before any gst init.
+    // SAFETY: nothing in desktop mode has initialized gst or read this var yet, and no other
+    // thread races on it here.
+    if std::env::var_os("GST_VA_ALL_DRIVERS").is_none() {
+        unsafe { std::env::set_var("GST_VA_ALL_DRIVERS", "1") };
+    }
+
     // Ask the portal for ScreenCast + RemoteDesktop access once - a consent dialog appears on the
     // first run (`PersistMode::Application` remembers it after). The PipeWire node + input session
     // persist across CarPlay reconnects, the way the compositor does in internal mode.

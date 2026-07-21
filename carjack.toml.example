@@ -12,8 +12,9 @@
 #   "desktop"  - capture your existing desktop via xdg-desktop-portal (ScreenCast) and inject
 #                input via RemoteDesktop. Needs a running desktop session with a portal backend;
 #                [app], [display], and the display cache are ignored. A consent dialog appears on
-#                first run. [graphics] zerocopy still applies here: auto/true = GL/GPU convert+
-#                scale (needs a GL-memory encoder like nvh264enc), false = software convert+scale.
+#                first run. [graphics] zerocopy still applies: auto/true prefers VA-API/v4l2 GPU
+#                zero-copy on the GPU that renders the desktop (needs that GPU's VA driver, e.g.
+#                intel-media-driver), then GL convert/scale, then software; false = software.
 source = "internal"
 
 [graphics]

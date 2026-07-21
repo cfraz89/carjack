@@ -87,17 +87,33 @@ ScreenCast + RemoteDesktop session once at startup (consent dialog first run;
 `encode::encode_pipewire_to_channel` scales/re-times it to the car (unlike the
 internal path - the desktop isn't the car's resolution), and touch is injected
 back via `RemoteDesktop::notify_touch_*`. `[graphics] zerocopy` selects the encode
-path (`build_pipewire_encode`): a GPU zero-copy backend when available -
-**NVIDIA** GL->NVENC (`pipewiresrc ! glupload ! glcolorconvert ! glcolorscale !
-videorate ! nvh264enc`, GL-CUDA interop) or **VA-API/v4l2** via the shared
-`HW_BACKENDS` postproc (`pipewiresrc ! vapostproc|v4l2convert ! videorate !
-caps(memory:DMABuf) ! vah264enc|v4l2h264enc`) - else **software**
-(`videorate ! videoscale ! videoconvert`). `videorate` is memory-agnostic
-(`video/x-raw(ANY)`) so it re-times inside the GPU chain without a CPU download.
-Only the NVIDIA/GL path is runtime-tested; VA-API/v4l2 are best-guess like their
-internal counterparts. `[app]`, `[display]`, and the display cache don't apply.
-Needs a desktop session with a portal backend (not the headless deployment
-device).
+path (`build_pipewire_encode`), tried in order:
+- **VA-API / v4l2** (preferred): `pipewiresrc ! vapostproc|v4l2convert ! videorate
+  ! caps(memory:DMABuf) ! vah264enc|v4l2h264enc`, via the shared `HW_BACKENDS`. The
+  postproc imports the portal's dmabuf and does convert+scale on the GPU - genuine
+  zero-copy *on the GPU that renders the desktop*. This is preferred over GL/NVENC
+  because a Wayland desktop is usually rendered on the integrated GPU (e.g. Intel),
+  so encoding it on NVIDIA would be a cross-GPU copy anyway. **Verified** on Intel
+  via `tests/desktop.rs`. `run_desktop` sets `GST_VA_ALL_DRIVERS=1` (the gst `va`
+  plugin skips the iGPU otherwise on a hybrid box), and it needs the iGPU's VA
+  driver (`intel-media-driver`) on whatever host runs carjack.
+- **NVIDIA GL** (fallback when no VA-API, e.g. an NVIDIA-rendered desktop):
+  `pipewiresrc ! glupload ! glcolorconvert ! glcolorscale ! videorate ! nvh264enc`.
+  Convert/scale on the GPU, but the *final* GL->CUDA handoff to NVENC currently
+  downloads to system memory (interop fails with `INVALID_GRAPHICS_CONTEXT`;
+  `cudaupload` hits the same) - so it's not fully zero-copy. True NVIDIA zero-copy
+  would need a direct dmabuf->CUDA EGL import like `cuda-dmabuf`, but that only fits
+  a same-GPU NVIDIA desktop (and this gst build lacks a CUDA scaler anyway).
+- **Software**: `videorate ! videoscale ! videoconvert`.
+
+`videorate` is memory-agnostic (`video/x-raw(ANY)`) so it re-times inside the GPU
+chain. When the encoder ends up on *system memory* (the GL/software paths feeding
+`nvh264enc`), the path uses `DEFAULT_ENCODER_DESKTOP` (`gop-size=60`, not 30): nvenc
+emits an IDR *every frame* with `gop-size=30` on system memory specifically (fine on
+the internal CUDA path). `tests/desktop.rs` drives GNOME's internal
+`org.gnome.Mutter.ScreenCast` D-Bus API to exercise all this without a car or a
+portal-consent dialog. `[app]`, `[display]`, and the display cache don't apply.
+Needs a desktop session with a portal backend (not the headless deployment device).
 
 ## Internal compositor (`src/compositor.rs`)
 
