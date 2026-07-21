@@ -435,9 +435,11 @@ async fn run_desktop_session(
     tracing::info!("Streaming desktop to car at {width}x{height}");
 
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(64);
+    // The encoder reports the desktop's real frame size here; touch is scaled from car space to it.
+    let (desktop_size_tx, desktop_size_rx) = tokio::sync::watch::channel::<Option<(u32, u32)>>(None);
     let node_id = rd.node_id();
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_pipewire_to_channel(
-        node_id, width, height, zerocopy, video_tx,
+        node_id, width, height, zerocopy, video_tx, desktop_size_tx,
     )));
     let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx);
     tokio::pin!(video);
@@ -471,7 +473,8 @@ async fn run_desktop_session(
                     // Inject back into the real desktop via the portal (async, unlike the
                     // compositor's synchronous seat injection).
                     Some(event) => {
-                        if let Err(e) = rd.send_touch(&event, (width, height)).await {
+                        let desktop_size = *desktop_size_rx.borrow();
+                        if let Err(e) = rd.send_touch(&event, (width, height), desktop_size).await {
                             tracing::warn!("portal touch inject failed: {e}");
                         }
                     }

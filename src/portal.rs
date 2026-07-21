@@ -24,10 +24,20 @@ pub struct RemoteDesktopStream {
 
 impl RemoteDesktopStream {
     /// Inject a CarPlay touch. `car_size` is the car's display size (the space `event.x/.y` are in);
-    /// coords are scaled to the desktop stream's size, which is what the portal expects.
-    pub async fn send_touch(&self, event: &TouchEvent, car_size: (u32, u32)) -> Result<()> {
+    /// coords are scaled to the desktop stream's size, which is what the portal expects. Prefer the
+    /// caller-provided `desktop_size` (the encoder's negotiated pipewiresrc size, the frame the car
+    /// actually sees) over the portal-reported stream size, which can be missing or HiDPI-physical.
+    pub async fn send_touch(
+        &self,
+        event: &TouchEvent,
+        car_size: (u32, u32),
+        desktop_size: Option<(u32, u32)>,
+    ) -> Result<()> {
         let stream_id = self.node_id;
-        let (x, y) = self.scale_to_stream(event.x, event.y, car_size);
+        let target = desktop_size
+            .map(|(w, h)| (f64::from(w), f64::from(h)))
+            .or(self.stream_size);
+        let (x, y) = scale_touch(event.x, event.y, target, car_size);
         match event.event_type {
             TouchEventType::Down => {
                 self.remote_desktop
@@ -64,11 +74,6 @@ impl RemoteDesktopStream {
             }
         }
         Ok(())
-    }
-
-    /// Map a car-space touch coordinate to the desktop stream's pixel space.
-    fn scale_to_stream(&self, x: f64, y: f64, car_size: (u32, u32)) -> (f64, f64) {
-        scale_touch(x, y, self.stream_size, car_size)
     }
 
     pub fn node_id(&self) -> u32 {

@@ -93,9 +93,12 @@ path (`build_pipewire_encode`) **based on the GPU that renders the desktop** - s
 the encoder runs on the same GPU the ScreenCast dmabuf lives on (encoding an
 Intel/AMD desktop on NVIDIA, or vice-versa, would be a cross-GPU copy).
 Touch is injected back via `RemoteDesktop::notify_touch_*`, but the car sends touch
-in *its* (scaled-down) display pixels, while the portal wants the desktop *stream's*
-pixels - so `RemoteDesktopStream::send_touch` scales car coords up by
-`stream.size() / car_size` (else they land in the wrong spot).
+in *its* (scaled-down) display pixels while the portal wants the desktop *stream's*
+pixels - so `send_touch` scales car coords up by `desktop_size / car_size`. The
+desktop size is the encoder's *negotiated pipewiresrc frame size* (reported back via
+a watch channel), not the portal's `stream.size()` - the latter is often missing or
+HiDPI-physical (e.g. a 3456x2160 panel), which left touch landing in the top-left
+corner.
 `config::desktop_render_driver()` finds it from the card with a connected display
 (`/sys/class/drm/card*-<conn>/status`). If it's NVIDIA -> prefer GL/NVENC; else ->
 prefer the dmabuf postproc (VA-API/v4l2); fall through to the other if the preferred
