@@ -277,52 +277,149 @@ pub async fn encode_h264_to_channel(
 /// `node_id`, scaled/re-timed to the car's `width`x`height` @ 30fps. Used for
 /// `source = "desktop"`; input is injected back through the portal (see `src/portal.rs`), not
 /// here. `pipewiresrc` is a live source with its own timestamps, so no appsrc/feeder is needed.
+///
+/// `zerocopy` selects the convert/scale path:
+/// - **GL zero-copy** (`Auto`/`Force`, when `glupload` is present): `pipewiresrc ! glupload !
+///   glcolorconvert ! glcolorscale ! videorate ! nvh264enc` - imports the portal's dmabuf into a
+///   GL texture and does convert/scale/retime on the GPU (`videorate` is memory-agnostic), then
+///   feeds the encoder via GL memory (GL-CUDA interop for NVENC). Needs a GL-memory-capable
+///   encoder (nvh264enc); the GL context is auto-negotiated.
+/// - **Software** (`Off`, or `Auto` without `glupload`): `pipewiresrc ! videorate ! videoscale !
+///   videoconvert ! encoder` - convert/scale on the CPU.
 pub async fn encode_pipewire_to_channel(
     node_id: u32,
     width: u32,
     height: u32,
+    zerocopy: ZeroCopyMode,
     video_tx: mpsc::Sender<EncodedFrame>,
 ) -> Result<()> {
     gst::init()?;
     let pipeline = gst::Pipeline::new();
+    let src = gst::ElementFactory::make("pipewiresrc")
+        .name("source")
+        .build()
+        .map_err(|_| eyre!("failed to create pipewiresrc"))?;
+    src.set_property_from_str("path", &node_id.to_string());
+    pipeline.add(&src).map_err(|_| eyre!("add pipewiresrc"))?;
+
+    let encoder = build_pipewire_encode(&pipeline, &src, width, height, zerocopy)?;
+    drive_h264_pipeline(&pipeline, &encoder, video_tx).await
+}
+
+/// Build the desktop encode chain from `src` (a `pipewiresrc`), scaling/re-timing to the car's
+/// `width`x`height` @ 30fps, and return the H264 encoder element. Picks a GPU zero-copy path when
+/// `zerocopy` allows and one is available - GL->NVENC on NVIDIA, or a dmabuf-importing postproc +
+/// vendor encoder from `HW_BACKENDS` for VA-API / v4l2 - else software convert/scale.
+fn build_pipewire_encode(
+    pipeline: &gst::Pipeline,
+    src: &gst::Element,
+    width: u32,
+    height: u32,
+    zerocopy: ZeroCopyMode,
+) -> Result<gst::Element> {
     let mk = |name: &str, label: &str| {
         gst::ElementFactory::make(name)
             .name(label)
             .build()
             .map_err(|_| eyre!("failed to create {label} ({name})"))
     };
+    // The configured (default) encoder - used by the GL and software paths (the HW backends bring
+    // their own vendor encoder).
+    let default_encoder = || -> Result<(String, gst::Element)> {
+        let desc = std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from(DEFAULT_ENCODER));
+        let (name, props) = parse_encoder_string(&desc)?;
+        let enc = mk(&name, "encoder")?;
+        for (k, v) in &props {
+            enc.set_property_from_str(k, v);
+        }
+        Ok((name, enc))
+    };
+    let caps = |feature: Option<&str>| -> gst::Caps {
+        let fps = gst::Fraction::new(30, 1);
+        match feature {
+            Some(f) => gst::Caps::builder("video/x-raw")
+                .features([f])
+                .field("width", width as i32)
+                .field("height", height as i32)
+                .field("framerate", fps)
+                .build(),
+            None => gst::Caps::builder("video/x-raw")
+                .field("width", width as i32)
+                .field("height", height as i32)
+                .field("framerate", fps)
+                .build(),
+        }
+    };
 
-    let src = mk("pipewiresrc", "source")?;
-    src.set_property_from_str("path", &node_id.to_string());
-    // The desktop is whatever resolution/rate the user's monitor is, so unlike the internal
-    // compositor path we *do* need to scale + re-time it to the car's display here.
+    if !matches!(zerocopy, ZeroCopyMode::Off) {
+        // NVIDIA: upload to GL, convert/scale/re-time on the GPU, encode via GL-CUDA interop.
+        // `glupload` imports the portal's dmabuf (or system memory), `nvh264enc` takes GL memory.
+        if element_available("glupload") && element_available("nvh264enc") {
+            let (enc_name, encoder) = default_encoder()?;
+            let glupload = mk("glupload", "glupload")?;
+            let glconvert = mk("glcolorconvert", "glconvert")?;
+            let glscale = mk("glcolorscale", "glscale")?;
+            let rate = mk("videorate", "videorate")?;
+            pipeline
+                .add_many([&glupload, &glconvert, &glscale, &rate, &encoder])
+                .map_err(|_| eyre!("add gl elements"))?;
+            gst::Element::link_many([src, &glupload, &glconvert, &glscale, &rate])
+                .map_err(|_| eyre!("link gl chain"))?;
+            rate.link_filtered(&encoder, &caps(Some("memory:GLMemory")))
+                .map_err(|_| eyre!("link gl-encoder"))?;
+            tracing::info!("Encode source: desktop ZERO-COPY GL (glupload ! ... ! {enc_name})");
+            return Ok(encoder);
+        }
+        // Intel/AMD (vapostproc) or Qualcomm (v4l2convert): the postproc imports the dmabuf and
+        // does convert + scale on the GPU, handing dmabuf to the vendor encoder. Untested
+        // off-device (same caveat as the internal HW backends).
+        if let Some(b) = HW_BACKENDS
+            .iter()
+            .find(|b| element_available(b.postproc) && element_available(b.encoder))
+        {
+            let postproc = mk(b.postproc, "postproc")?;
+            let rate = mk("videorate", "videorate")?;
+            let encoder = mk(b.encoder, "encoder")?;
+            if !b.keyframe_prop.0.is_empty() {
+                encoder.set_property_from_str(b.keyframe_prop.0, b.keyframe_prop.1);
+            }
+            pipeline
+                .add_many([&postproc, &rate, &encoder])
+                .map_err(|_| eyre!("add hw elements"))?;
+            gst::Element::link_many([src, &postproc, &rate])
+                .map_err(|_| eyre!("link hw chain"))?;
+            rate.link_filtered(&encoder, &caps(Some("memory:DMABuf")))
+                .map_err(|_| eyre!("link hw-encoder"))?;
+            tracing::info!(
+                "Encode source: desktop ZERO-COPY hardware '{}' ({} ! {})",
+                b.name, b.postproc, b.encoder
+            );
+            return Ok(encoder);
+        }
+        if matches!(zerocopy, ZeroCopyMode::Force) {
+            return Err(eyre!(
+                "zerocopy=true but no zero-copy desktop backend available (need glupload+nvh264enc, \
+                 vapostproc+vah264enc, or v4l2convert+v4l2h264enc)"
+            ));
+        }
+        tracing::warn!("no zero-copy desktop backend available, using software convert/scale");
+    }
+
+    // Software: CPU convert + scale.
+    let (enc_name, encoder) = default_encoder()?;
     let rate = mk("videorate", "videorate")?;
     let scale = mk("videoscale", "videoscale")?;
     let convert = mk("videoconvert", "videoconvert")?;
-    let target_caps = gst::Caps::builder("video/x-raw")
-        .field("width", width as i32)
-        .field("height", height as i32)
-        .field("framerate", gst::Fraction::new(30, 1))
-        .build();
-
-    let enc_desc = std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from(DEFAULT_ENCODER));
-    let (enc_name, enc_props) = parse_encoder_string(&enc_desc)?;
-    let encoder = mk(&enc_name, "encoder")?;
-    for (key, val) in &enc_props {
-        encoder.set_property_from_str(key, val);
-    }
-
     pipeline
-        .add_many([&src, &rate, &scale, &convert, &encoder])
-        .map_err(|_| eyre!("add pipewire elements"))?;
-    gst::Element::link_many([&src, &rate, &scale, &convert])
-        .map_err(|_| eyre!("link pipewiresrc chain"))?;
+        .add_many([&rate, &scale, &convert, &encoder])
+        .map_err(|_| eyre!("add sw elements"))?;
+    gst::Element::link_many([src, &rate, &scale, &convert])
+        .map_err(|_| eyre!("link sw chain"))?;
     convert
-        .link_filtered(&encoder, &target_caps)
+        .link_filtered(&encoder, &caps(None))
         .map_err(|_| eyre!("link convert-encoder"))?;
-    tracing::info!("Encode source: desktop portal (pipewiresrc node {node_id} -> {enc_name})");
-
-    drive_h264_pipeline(&pipeline, &encoder, video_tx).await
+    tracing::info!("Encode source: desktop software (videoconvert ! {enc_name})");
+    Ok(encoder)
 }
 
 /// Link `encoder` (whose src pad emits H264) -> `h264parse` -> `appsink`, forward each access unit

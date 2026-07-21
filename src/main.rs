@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
 
     match config.source {
         Source::Internal => run_internal(config).await,
-        Source::Desktop => run_desktop().await,
+        Source::Desktop => run_desktop(config).await,
     }
 }
 
@@ -183,7 +183,7 @@ async fn run_internal(config: Config) -> Result<()> {
 }
 
 /// `source = desktop`: stream the user's existing desktop via xdg-desktop-portal.
-async fn run_desktop() -> Result<()> {
+async fn run_desktop(config: Config) -> Result<()> {
     // Ask the portal for ScreenCast + RemoteDesktop access once - a consent dialog appears on the
     // first run (`PersistMode::Application` remembers it after). The PipeWire node + input session
     // persist across CarPlay reconnects, the way the compositor does in internal mode.
@@ -192,6 +192,8 @@ async fn run_desktop() -> Result<()> {
         "Desktop source ready via xdg-desktop-portal (PipeWire node {})",
         rd.node_id()
     );
+    // `[graphics] zerocopy` here selects the desktop encode path: GL (GPU) vs software convert.
+    let zerocopy = config.graphics.zerocopy;
 
     loop {
         tokio::select! {
@@ -199,7 +201,7 @@ async fn run_desktop() -> Result<()> {
                 tracing::info!("Ctrl-C received, shutting down");
                 return Ok(());
             }
-            result = run_desktop_session(&rd) => {
+            result = run_desktop_session(&rd, zerocopy) => {
                 match result {
                     Ok(()) => {
                         tracing::info!("Session ended cleanly, exiting");
@@ -414,7 +416,10 @@ async fn run_session(
 
 /// `source = desktop`: encode the portal's PipeWire stream (scaled to the car) and inject CarPlay
 /// touch back into the desktop through the portal's RemoteDesktop session.
-async fn run_desktop_session(rd: &portal::RemoteDesktopStream) -> Result<()> {
+async fn run_desktop_session(
+    rd: &portal::RemoteDesktopStream,
+    zerocopy: carjack::config::ZeroCopyMode,
+) -> Result<()> {
     let Established { conn, mut carplay_handle, touch_tx, mut touch_rx, car_addr_rx: _ } =
         establish_carplay().await?;
     let (width, height) = (conn.width, conn.height);
@@ -423,7 +428,7 @@ async fn run_desktop_session(rd: &portal::RemoteDesktopStream) -> Result<()> {
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(64);
     let node_id = rd.node_id();
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_pipewire_to_channel(
-        node_id, width, height, video_tx,
+        node_id, width, height, zerocopy, video_tx,
     )));
     let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx);
     tokio::pin!(video);
