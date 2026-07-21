@@ -498,15 +498,26 @@ async fn drive_h264_pipeline(
 
     let h264parse = mk("h264parse", "h264parse")?;
     h264parse.set_property("config-interval", -1i32);
+    // Leaky queue between the encoder and the appsink: if the consumer (`video_tx` -> the car)
+    // stalls or is still setting up, drop the *oldest* encoded frames instead of letting them pile
+    // up - otherwise a backlog forms (e.g. while the AirPlay connection negotiates) and never
+    // drains, showing as a permanent 1-2s delay.
+    let sink_queue = mk("queue", "sink_queue")?;
+    sink_queue.set_property_from_str("leaky", "downstream");
+    sink_queue.set_property("max-size-buffers", 3u32);
+    sink_queue.set_property("max-size-time", 0u64);
+    sink_queue.set_property("max-size-bytes", 0u32);
     let appsink = mk("appsink", "sink")?;
     appsink.set_property("sync", false);
 
     pipeline.add(&h264parse).map_err(|_| eyre!("add h264parse"))?;
+    pipeline.add(&sink_queue).map_err(|_| eyre!("add sink_queue"))?;
     pipeline.add(&appsink).map_err(|_| eyre!("add appsink"))?;
     encoder.link(&h264parse).map_err(|_| eyre!("link encoder-parse"))?;
-    h264parse
+    h264parse.link(&sink_queue).map_err(|_| eyre!("link parse-queue"))?;
+    sink_queue
         .link_filtered(&appsink, &output_caps)
-        .map_err(|_| eyre!("link parse-sink"))?;
+        .map_err(|_| eyre!("link queue-sink"))?;
 
     let appsink = appsink
         .downcast::<gst_app::AppSink>()
