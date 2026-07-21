@@ -436,8 +436,13 @@ async fn run_desktop_session(
     let (width, height) = (conn.width, conn.height);
     tracing::info!("Streaming desktop to car at {width}x{height}");
     // The portal maps touch in *logical* coords, but pipewiresrc reports *physical* pixels - divide
-    // by the display scale so touch reaches the whole (HiDPI) screen, not just the top-left.
-    let display_scale = portal::gnome_display_scale().await.unwrap_or(1.0);
+    // by the display scale so touch reaches the whole (HiDPI) screen, not just the top-left. Read
+    // the scale from the compositor over Wayland (blocking, so off the async thread).
+    let display_scale = tokio::task::spawn_blocking(portal::display_scale)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(1.0);
 
     // Small on purpose: this is a real-time stream, so a shallow channel (plus the pipeline's leaky
     // queue) keeps latency low - a deep buffer just fills once and adds a permanent delay.
