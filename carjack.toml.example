@@ -8,14 +8,15 @@
 #             CARJACK_APP.COMMAND, CARJACK_APP.RESIZABLE, ...  (CARJACK_ + section + `.` + key)
 
 # What to stream:
-#   "internal" - run [app] command in carjack's own headless compositor (default)
+#   "app"      - run [app] command in carjack's own headless compositor (default; aliases:
+#                internal / compositor / cmd / standalone)
 #   "desktop"  - capture your existing desktop via xdg-desktop-portal (ScreenCast) and inject
 #                input via RemoteDesktop. Needs a running desktop session with a portal backend;
 #                [app], [display], and the display cache are ignored. A consent dialog appears on
 #                first run. [graphics] zerocopy still applies: auto/true prefers VA-API/v4l2 GPU
 #                zero-copy on the GPU that renders the desktop (needs that GPU's VA driver, e.g.
 #                intel-media-driver), then GL convert/scale, then software; false = software.
-source = "internal"
+source = "app"
 
 [graphics]
 # Which GPU to render *and* encode on (they must be the same for zero-copy). One of:

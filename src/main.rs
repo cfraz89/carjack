@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
     let config = Config::load(&Cli::parse())?;
 
     match config.source {
-        Source::Internal => run_internal(config).await,
+        Source::App => run_app(config).await,
         Source::Desktop => run_desktop(config).await,
     }
 }
@@ -119,8 +119,8 @@ async fn backoff_or_ctrl_c() -> bool {
     }
 }
 
-/// `source = internal`: run `[app] command` in carjack's own headless compositor and stream that.
-async fn run_internal(config: Config) -> Result<()> {
+/// `source = app`: run `[app] command` in carjack's own headless compositor and stream that.
+async fn run_app(config: Config) -> Result<()> {
     // Resolve which GPU to render + encode on, then decide the encode backend (this is where
     // zerocopy=auto falls back to software, or zerocopy=true errors out).
     let render_node = carjack::config::resolve_render_node(&config.graphics.drm_device)?;
@@ -195,7 +195,7 @@ async fn run_desktop(config: Config) -> Result<()> {
 
     // Ask the portal for ScreenCast + RemoteDesktop access once - a consent dialog appears on the
     // first run (`PersistMode::Application` remembers it after). The PipeWire node + input session
-    // persist across CarPlay reconnects, the way the compositor does in internal mode.
+    // persist across CarPlay reconnects, the way the compositor does in app mode.
     let rd = portal::start_remote_desktop().await?;
     tracing::info!(
         "Desktop source ready via xdg-desktop-portal (PipeWire node {})",
@@ -325,7 +325,7 @@ async fn establish_carplay() -> Result<Established> {
     Ok(Established { conn, carplay_handle, touch_tx, touch_rx, car_addr_rx })
 }
 
-/// `source = internal`: reconfigure the compositor to the car's display, encode its frames, and
+/// `source = app`: reconfigure the compositor to the car's display, encode its frames, and
 /// inject CarPlay touch back into it.
 async fn run_session(
     compositor: &Compositor,

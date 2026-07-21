@@ -72,12 +72,13 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   check that for where things stand, and update it rather than duplicating its
   content into this file.
 
-## Video source (`source` config): internal compositor vs desktop portal
+## Video source (`source` config): own app vs desktop portal
 
-`source = "internal"` (default) streams carjack's own compositor running `[app]
-command`; `source = "desktop"` streams the user's *existing* desktop via
-xdg-desktop-portal. `main.rs` branches on it: `run_internal` (compositor + app +
-display cache, below) or `run_desktop` (portal). Both share `establish_carplay`
+`source = "app"` (default; aliases `internal`/`compositor`/`cmd`/`standalone`)
+streams carjack's own compositor running `[app] command`; `source = "desktop"`
+streams the user's *existing* desktop via xdg-desktop-portal. `main.rs` branches on
+it: `run_app` (compositor + app + display cache, below) or `run_desktop` (portal).
+Both share `establish_carplay`
 (the BT -> WiFi -> AirPlay handshake) and the per-session select loop; they differ
 only in the video source and where touch goes.
 
@@ -120,7 +121,7 @@ Needs a desktop session with a portal backend (not the headless deployment devic
 
 ## Internal compositor (`src/compositor.rs`)
 
-For `source = "internal"`, carjack runs its **own** minimal headless Wayland
+For `source = "app"`, carjack runs its **own** minimal headless Wayland
 compositor (Smithay 0.7, GlesRenderer) rather than capturing from an external one.
 This is the core of the internal screen/input architecture. (An older
 always-on capture approach - `ext-image-copy-capture-v1` + `wlr-virtual-pointer`
