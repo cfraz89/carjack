@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use pretty_hex::PrettyHex;
+use std::io;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -21,6 +22,7 @@ pub async fn perform_switch<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     loop {
         match perform_switch_inner(stream).await {
             Ok(()) => return Ok(()),
+            Err(e @ Iap2Error::IO(_)) => return Err(e),
             Err(e) if attempt < MAX_ATTEMPTS => {
                 tracing::warn!(?e, attempt, "iAP2 switch attempt failed, retrying");
                 attempt += 1;
@@ -41,7 +43,14 @@ async fn perform_switch_inner<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     // returns on data or EOF. A timeout lets the caller retry.
     tokio::time::timeout(Duration::from_secs(12), stream.read_exact(&mut buf))
         .await
-        .map_err(|_| Iap2Error::Timeout(String::from("Timed out waiting for iAP2 switch command")))??;
+        .map_err(|_| Iap2Error::Timeout(String::from("Timed out waiting for iAP2 switch command")))?
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::ConnectionReset
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::UnexpectedEof => Iap2Error::IO(e),
+            _ => e.into(),
+        })?;
     tracing::trace!(buf = ?buf.hex_dump(), "Read stream");
     if buf.as_slice() != REQUEST_IAP2_SWITCH.as_ref() {
         Err(Iap2Error::UnexpectedBytes(

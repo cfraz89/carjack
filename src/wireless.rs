@@ -24,8 +24,105 @@ use libcarjack::{
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
+use uuid::Uuid;
 
 use libcarjack::carplay;
+
+const IAP_CHANNEL: u16 = 19;
+
+
+fn generate_iap2_sdp() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" ?>
+<record>
+    <attribute id="0x0001">
+        <sequence>
+            <uuid value="{}"/>
+        </sequence>
+    </attribute>
+    <attribute id="0x0004">
+        <sequence>
+            <sequence>
+                <uuid value="0x0100"/>
+            </sequence>
+            <sequence>
+                <uuid value="0x0003"/>
+                <uint8 value="{}"/>
+            </sequence>
+        </sequence>
+    </attribute>
+    <attribute id="0x0009">
+        <sequence>
+            <sequence>
+                <uuid value="0x1101"/>
+                <uint16 value="0x0102"/>
+            </sequence>
+        </sequence>
+    </attribute>
+    <attribute id="0x0005">
+        <sequence>
+            <uuid value="0x1002"/>
+        </sequence>
+    </attribute>
+    <attribute id="0x0008">
+        <uint8 value="0xFF"/>
+    </attribute>
+    <attribute id="0x0100">
+        <text value="Wireless iAP"/>
+    </attribute>
+</record>"#,
+        IAP_ACCESSORY_UUID, IAP_CHANNEL
+    )
+}
+
+
+const CARPLAY_HCI_CLASS: [u8; 2] = [0x20, 0x04];
+
+async fn apply_carplay_hci_hacks(adapter_index: u16) {
+    // Adding the CarPlay UUID to the BR/EDR EIR needs a raw HCI mgmt socket, which needs
+    // CAP_NET_ADMIN. We keep that capability OFF the main process (a capability-carrying process
+    // is /proc-locked to root under fs.suid_dumpable=2, which stops xdg-desktop-portal from
+    // introspecting us in desktop mode) and instead exec a tiny setcap'd helper binary that does
+    // just this one thing and exits. Best-effort: warn and continue if it isn't there / fails.
+    match run_btmgmt_helper(adapter_index).await {
+        Ok(()) => tracing::debug!("Added CarPlay EIR UUID to BR/EDR adapter"),
+        Err(e) => tracing::warn!(
+            ?e,
+            "Failed to add CarPlay EIR UUID (helper unavailable / needs cap_net_admin), continuing"
+        ),
+    }
+}
+
+/// Exec the `carjack-btmgmt` sidecar (found next to our own binary) to add the CarPlay EIR UUID.
+/// The sidecar carries `cap_net_admin`; we don't.
+async fn run_btmgmt_helper(adapter_index: u16) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let helper = exe
+        .parent()
+        .ok_or_else(|| eyre!("current exe has no parent dir"))?
+        .join("carjack-btmgmt");
+    let status = tokio::process::Command::new(&helper)
+        .arg(adapter_index.to_string())
+        .status()
+        .await
+        .map_err(|e| eyre!("failed to spawn {}: {e}", helper.display()))?;
+    if !status.success() {
+        return Err(eyre!("carjack-btmgmt exited with {status}"));
+    }
+    Ok(())
+
+    // // Set Class of Device to match CarPlay accessory (catplay sends [0x20, 0x04], reversed)
+    // let mut class = CARPLAY_HCI_CLASS;
+    // class.reverse();
+    // if let Err(e) = send_mgmt_command(adapter_index, MGMT_OP_SET_DEV_CLASS, &class).await {
+    //     tracing::warn!(
+    //         ?e,
+    //         "Failed to set CarPlay device class (may need root), continuing"
+    //     );
+    // } else {
+    //     tracing::debug!("Set CarPlay device class");
+    // }
+}
 
 pub async fn wireless_carplay(
     wifi_tx: mpsc::Sender<WifiCredentials>,
@@ -45,13 +142,23 @@ pub async fn wireless_carplay(
     let _ = bt_mac_tx.send(adapter.address().await?.to_string());
     let _advertisement_handle = publish_advertisement(&adapter).await?;
 
+    // Apply HCI-level CarPlay hacks so BR/EDR inquiry shows the CarPlay UUID
+    let adapter_name = adapter.name().to_string();
+    let adapter_index = adapter_name
+        .strip_prefix("hci")
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    tracing::trace!("Applying hci hacks");
+    apply_carplay_hci_hacks(adapter_index).await;
+
+    let sdp_record = generate_iap2_sdp();
     let iap_accessory_handle = session
         .register_profile(rfcomm::Profile {
             uuid: IAP_ACCESSORY_UUID,
             name: Some(String::from("Wireless iAP")),
             role: Some(Role::Client),
-            //Make sure we don't auto connect, otherwise it will connect before we're ready to accept a connection
-            auto_connect: Some(false),
+            auto_connect: Some(true),
+            require_authentication: Some(true),
             ..Default::default()
         })
         .await?;
@@ -60,10 +167,26 @@ pub async fn wireless_carplay(
             uuid: IAP_DEVICE_UUID,
             name: Some(String::from("Wireless iAP")),
             role: Some(Role::Server),
-            channel: Some(1),
+            channel: Some(IAP_CHANNEL),
+            service_record: Some(sdp_record),
+            require_authentication: Some(true),
+            require_authorization: Some(false),
             ..Default::default()
         })
         .await?;
+
+    // Register Wireless iAP v2 UUID (some head units look for this)
+    let _iap_v2_handle = session
+        .register_profile(rfcomm::Profile {
+            uuid: IAP2_UUID,
+            name: Some(String::from("Wireless iAP v2")),
+            role: Some(Role::Server),
+            channel: Some(IAP_CHANNEL),
+            require_authentication: Some(true),
+            require_authorization: Some(false),
+            ..Default::default()
+        })
+        .await;
 
     let device = pair_available_accessory(&adapter).await?;
     // Surface the car's MAC (known now, early) so the caller can look up its cached display and
@@ -168,6 +291,8 @@ async fn pair_available_accessory(adapter: &Adapter) -> Result<Device> {
             ..DiscoveryFilter::default()
         })
         .await?;
+
+    tracing::info!("Looking for compatible devices...");
 
     // An already-paired/connected accessory (e.g. it auto-reconnected from a prior session)
     // never fires a fresh DeviceAdded event, so check the devices BlueZ already knows first.
