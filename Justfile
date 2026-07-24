@@ -1,15 +1,20 @@
 set dotenv-load
 mod armbian
 
-toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }
-toolbox_run := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_RUN', '') == 'true' { f'toolbox run ' } else { '' }
-run +flags="": (build flags)
-    {{toolbox_run}} waydroid session stop && just _cargo_run {{flags}} < /dev/null
+[script]
+_setcap +flags="":
+    # Only the tiny `carjack-btmgmt` sidecar carries cap_net_admin (for the raw HCI mgmt socket).
+    # The main carjack binary stays unprivileged so xdg-desktop-portal can introspect it in
+    # desktop mode (a capability-carrying process is /proc-locked to root under fs.suid_dumpable=2).
+    binary="target/debug/carjack-btmgmt"
+    case " {{flags}} " in *" --release "*|*" -r "*) binary="target/release/carjack-btmgmt";; esac
+    # [ -t 0 ] && { sudo -v || true; }   # prompt once to cache creds, only when interactive
+    sudo setcap cap_net_admin+ep "$binary"
 
-# Used to just to load .env before running
-_cargo_run +flags="":
-    echo {{env("CARJACK.SOURCE")}}
-    cargo run {{flags}}
+toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }
+
+run +flags="": (build flags) (_setcap flags)
+    waydroid session stop && cargo run {{flags}} < /dev/null
 
 #Run the app until timeout, then kill it and restore the original wifi connection
 [script('bash')]
@@ -40,8 +45,8 @@ build +flags="":
 # Run a single cargo test filtered by name (e.g. `just test compositor`), in the toolbox (when
 # USE_TOOLBOX is set) for the native build/link libs; the toolbox shares the host GPU/DRM the
 # compositor test needs at runtime.
-test test_name:
-    {{toolbox_run}}cargo test {{test_name}} < /dev/null
+test test_name: (build "--tests")
+    cargo test {{test_name}} < /dev/null
 
 # Install -devel packages that cuda-dmabuf links against (libEGL, libgbm, libgstcuda).
 # libcuda comes from the host NVIDIA driver — ensure /usr/lib64/libcuda.so exists in
