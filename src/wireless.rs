@@ -170,8 +170,8 @@ pub async fn wireless_carplay(
     tracing::trace!("Applying hci hacks");
     //We need cap_net_admin to write to the hci socket directly.
     //However adding that cap to this process is probably a security liability, and breaks
-    //xdg-desktop-portal. So we offload the work to a seperate binary.
-    run_hci_helper().await?;
+    //xdg-desktop-portal. So we offload the work to a separate binary.
+    let _ = run_hci_helper().await;
 
     // let sdp_record = generate_iap2_sdp();
     let iap_accessory_handle = session

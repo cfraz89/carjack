@@ -26,6 +26,16 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - **iPhone pklg capture re-analyzed**: Found 62 iAP2 `FF 5A` packets and 4 `FF 55` switch commands. Extracted full protocol exchange: SYN→StartIdentification→IdentificationInformation→Auth→WiFiConfig→WirelessCarPlayUpdate. **Zero EA session messages** found — EA establishment likely happens over WiFi as part of AirPlay handshake, not Bluetooth.
 
 ### Active
+- **Session-ID fix confirmed working — on the STANDALONE TEST HEAD UNIT ("AUTO BOX"), not the bike**
+  (`just test-run`, 2026-07-26). With the control session addressed correctly, that unit answers
+  `StartIdentification` and the whole chain runs: `IdentificationInformation` (15 params, SSID
+  `carplay_wifi_895E`) → `AccessoryAuthenticationSerialNumber` → `AuthenticationCertificate` →
+  WiFi → **`AirPlay bootstrap complete!`**. So the fix is real, but it says **nothing about the
+  bike**, whose blocker is the who-originates-the-ACL problem above; that still needs its own
+  capture.
+  - Minor bug spotted in the same log: `carplay_session.rs` logs `Accessory identified: Unknown`
+    because it reads `ParameterId::DISPLAY_NAME`, while this unit puts its name (`AUTO BOX`) in
+    `ParameterId(0)`. Cosmetic, but the lookup is wrong.
 - **`cfmoto_6.pcapng` (2026-07-26) is NOT a regression from the session-ID fix — cfmoto_5's iAP2 was
   luck.** The whole capture has **zero bytes on RFCOMM ch 1 in either direction**; the session-ID fix
   only changes payloads sent *after* `FF 55` + SYN, so it cannot be implicated. What differs is
@@ -232,6 +242,26 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 
 ### Blocked
 - Nothing blocked on captures any more - the iPhone↔head-unit reference answered the open questions.
+
+## Tooling notes (2026-07-26)
+- **`just test-run` needs `timeout --foreground`.** Without it `timeout` puts the command in a new
+  process group; a terminal only sends SIGINT to its *foreground* group, so Ctrl-C reached the
+  script but never carjack - it ran on (spewing `RUST_LOG=trace`) until the timeout expired, which
+  reads as a wedged terminal. With the flag, measured **52 ms** from SIGINT to exit mid-desktop-
+  stream. Cost: on expiry `timeout` signals only its direct child (cargo), so the `pkill` in the
+  `cleanup` trap is what reaps carjack.
+- `test-run` now takes `build` as a recipe dependency, keeping the compile - and `_setcap`'s `run0`
+  polkit escalation - out of the timed section.
+- `_setcap` skips `run0` entirely when `getcap` already shows `cap_net_admin` (relinking drops the
+  cap, so this is an exact test). Previously it prompted on every build and failed outright in a
+  non-interactive shell.
+- The `cleanup` `pkill` pattern is now **anchored** (`^target/(debug|release)/carjack$`). Unanchored
+  it matched any process whose command line merely contained that path - it killed a wrapper script
+  driving the recipe, which masqueraded as carjack hanging on Ctrl-C.
+- `main.rs` has a SIGINT watchdog (`spawn_sigint_watchdog`): a second Ctrl-C force-exits with 130.
+  Not what was broken above, but a backstop - once anything awaits `tokio::signal::ctrl_c()`, the
+  default SIGINT disposition is gone process-wide, so a stalled graceful path means Ctrl-C does
+  nothing at all.
 
 ## Next Move
 1. **Re-test against both head units and capture.** Two things to check, in order:

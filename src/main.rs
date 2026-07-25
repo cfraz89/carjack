@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use eyre::{Result, eyre};
 use libcarjack::carplay_session::{TouchEvent, WifiCredentials};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
@@ -100,6 +101,9 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Before any GPU/portal/Bluetooth setup, so it covers the whole run.
+    spawn_sigint_watchdog()?;
+
     let config = Config::load(&Cli::parse())?;
 
     // Fail fast and loudly: without a target there is nothing to connect to, and carjack no longer
@@ -115,6 +119,30 @@ async fn main() -> Result<()> {
         Source::App => run_app(config).await,
         Source::Desktop => run_desktop(config).await,
     }
+}
+
+/// Make a second Ctrl-C always kill carjack, however wedged the graceful path is.
+///
+/// The moment anything awaits `tokio::signal::ctrl_c()`, tokio installs a SIGINT handler and the
+/// default "terminate the process" disposition is gone *process-wide*. From then on Ctrl-C only
+/// resolves futures - so if nothing is awaiting one, or the task that is has stalled, Ctrl-C does
+/// nothing at all. That happens easily here: the session `select!`s below poll the Ctrl-C branch
+/// and the session future in the *same* task, so a blocking call inside a session (GStreamer
+/// `set_state`, a DRM ioctl) starves the Ctrl-C branch; and the teardown *after* the loop
+/// (`drop(compositor)` joins the compositor thread) can block with no listener left at all.
+///
+/// One `signal()` stream rather than two `ctrl_c()` awaits: a stream can't miss a SIGINT that
+/// arrives between the first and second receipt.
+fn spawn_sigint_watchdog() -> Result<()> {
+    let mut sigint = signal(SignalKind::interrupt())?;
+    tokio::spawn(async move {
+        sigint.recv().await;
+        tracing::info!("Ctrl-C received, shutting down - press again to exit immediately");
+        sigint.recv().await;
+        tracing::warn!("Second Ctrl-C, forcing exit");
+        std::process::exit(130);
+    });
+    Ok(())
 }
 
 /// Await Ctrl-C or the retry backoff between sessions; returns `true` if Ctrl-C fired (stop).
