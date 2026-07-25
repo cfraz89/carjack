@@ -1,6 +1,6 @@
 use crate::{
     error::Iap2Error,
-    iap2::{Iap2, Stream},
+    iap2::{Iap2, Stream, LINK_SESSION_ID},
     packet::ControlByte,
 };
 
@@ -16,7 +16,7 @@ impl<'a, S: Stream> Reset<'a, S> {
                     rst: true,
                     ..Default::default()
                 },
-                0,
+                LINK_SESSION_ID,
                 Vec::new(),
             )
             .await

@@ -26,7 +26,91 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - **iPhone pklg capture re-analyzed**: Found 62 iAP2 `FF 5A` packets and 4 `FF 55` switch commands. Extracted full protocol exchange: SYN→StartIdentification→IdentificationInformation→Auth→WiFiConfig→WirelessCarPlayUpdate. **Zero EA session messages** found — EA establishment likely happens over WiFi as part of AirPlay handshake, not Bluetooth.
 
 ### Active
-- **iAP2 never starts on the bike — identity/CoD filter suspected** (from `mycar.pcapng`,
+- **`cfmoto_6.pcapng` (2026-07-26) is NOT a regression from the session-ID fix — cfmoto_5's iAP2 was
+  luck.** The whole capture has **zero bytes on RFCOMM ch 1 in either direction**; the session-ID fix
+  only changes payloads sent *after* `FF 55` + SYN, so it cannot be implicated. What differs is
+  **who paged whom**:
+  | | `cfmoto_5` (iAP2 worked) | `cfmoto_6` (no iAP2) |
+  |---|---|---|
+  | carjack `Create Connection` | t=28.23 → **Page Timeout (0x04)**, handle `0xffff` | t=13.16 → **success**, handle `0x0100` |
+  | car `Connect Request` (inbound) | **yes**, t=28.57 → handle `0x0200` | never |
+  | ACL that carried ch1 | **`0x0200` — the car's** | `0x0100` — carjack's |
+  | Result on ch1 | car sends `FF 55` 302 ms after SABM | car **DISC**s 411 ms after SABM, silent |
+  - So: **this head unit only speaks iAP2 over an ACL link it originated.** carjack's outbound page
+    happened to time out in `cfmoto_5`, which forced the car to page us — and that is the only reason
+    iAP2 ran. This is the same conclusion `iphonemycarcarplay.pklg` already gave (both
+    iPhone-*initiated* sessions produced no `FF 55`; only the car-initiated one did); it just hadn't
+    been acted on.
+  - **Root cause in code: the "go passive" item was never implemented.** `src/wireless.rs:205-214`
+    still spawns an unbounded `ExponentialBuilder::without_max_times()` retry of
+    `device.connect_profile(&IAP_ACCESSORY_UUID)` racing the passive
+    `acquire_profile_connection` wait. Whichever wins decides the session's fate, so runs alternate
+    between working and not depending on whether the outbound page succeeds.
+  - **Fixed 2026-07-26 — single-shot outbound dial (builds clean, not yet re-tested).** The dial
+    can't just be deleted (a head unit only pages devices it is already bonded to, so the first
+    contact has to be outbound), and **branching on `is_paired()` was tried and rejected**: on the
+    *other* head unit the passive/bonded path waits a very long time for an inbound connection, so
+    "bonded ⇒ never dial" strands that unit.
+    What's there now: **one** `connect_profile(&IAP_ACCESSORY_UUID)` attempt, unconditional, racing
+    the passive `acquire_profile_connection`; whichever lands first wins, and a failed dial is
+    logged at info and dropped rather than retried. The key property is that a *single* page
+    doesn't keep the controller busy, so it no longer starves our page scan and the car can still
+    reach us immediately afterwards - which was the real damage the old unbounded
+    `ExponentialBuilder::without_max_times()` retry did. The task is `drop`ped once a stream
+    arrives so a still-pending page can't land a second connection.
+  - **Plus: drop the ACL on a silent link.** Connection acquisition is now a loop. If a link comes
+    up but `Iap2::start` fails — the car DISC'd ch 1 without `FF 55`, or the switch command never
+    arrived (`perform_switch` bounds this at 12 s × 3, and returns immediately on EOF) — carjack
+    calls `device.disconnect()` and goes back to waiting. Rationale: while *we* hold the ACL the
+    car won't page us, and being paged is exactly what such a head unit is waiting to do. The loop
+    deliberately does **not** re-dial, so every attempt after the first is purely passive.
+    Structured as a `backon` `retry(...).context(...).when(...)`: the context carries the merged
+    profile streams and the dial handle across attempts, and `.when` is what decides whether to go
+    round again — it retries on `LinkAttemptError::Retryable` but aborts on
+    `LinkAttemptError::ProfilesClosed` (BlueZ took our registrations away, so no connection can
+    ever arrive and retrying would spin on an exhausted stream).
+  - **Still open:** the near-continuous `Inquiry` (t=15.97 and 32.97 here, every 16 s in `cfmoto_5`,
+    including while an ACL is up) also starves page scan, and now matters whenever the outbound
+    dial loses and we fall back to being paged. Not yet traced to a source — `find_target_device`
+    drops its discovery stream when it resolves the target, and takes the BlueZ-known-devices
+    branch without starting discovery at all, so this may be another process on the host. `btmon`
+    will show who issues it.
+- **iAP2 STARTS on the bike (when the car initiates); it dies at the first control message — wrong session ID**
+  (`cfmoto_5.pcapng`, 2026-07-26, vs `iphone-cfmoto.pklg`). The passive/car-initiated change worked:
+  the car opens RFCOMM ch 1 inbound (t=30.72), sends `FF 55 02 00 EE 10`, carjack echoes, and the
+  **Link SYN handshake completes** (car SYN → carjack SYN+ACK → car ACK). Two identical attempts in
+  the capture (t≈31 and t≈112), both failing the same way.
+  - The car's SYN payload is `01 01 1000 03e8 01f4 0f 00 | 02 00 02` — the trailing triple declares
+    **exactly one session: id=2, type=0 (Control), version=2**. No EA session is declared.
+  - carjack then sends `StartIdentification` on **session ID 1**:
+    `ff5a 0029 40 9e 59 **01** 46 | 4040 001f 1d00 …`
+    The iPhone sends it on **session ID 2**: `ff5a 0010 40 40 74 **02** a1 | 4040 0006 1d00`.
+    Every iPhone control packet in the whole reference capture uses session `02`; bare link ACKs use
+    session `00`.
+  - The car **link-layer ACKs** carjack's packet (`ff5a 0009 40 59 9e 00`) — the retransmit layer is
+    happy — then **discards the payload and never replies**, because session 1 doesn't exist. carjack
+    sits silent for 44 s and DISCs ch1 at t=75.3. That silence is the whole failure.
+  - **Both bugs fixed 2026-07-26 (built clean, not yet re-tested against the bike):**
+    1. `libcarjack/src/carplay_session.rs` hardcodes session id `1` at every send site
+       (`:106` keep-alive, `:124` `do_identification`, `:180` `send_ctrl`). It must use the id the
+       accessory declared in its SYN (`table.find_type(SessionType::Control)`), and bare link ACKs /
+       keep-alives should use session `0`, like the iPhone.
+    2. `iap2-proto/src/ops/syn.rs:76-89` injects hardcoded entries `{id:0, Control, v1}` and
+       `{id:2, ExternalAccessory, v1}` *after* adding the accessory's real sessions. Because
+       `SessionTable::add` does `retain(|s| s.id != entry.id)` (`stream.rs:41`), the fake
+       `{id:2, EA}` **overwrites the car's `{id:2, Control}`**. So even with (1) fixed, inbound
+       control messages on session 2 would be misrouted to `handle_ea` by `dispatch_packet`
+       (`carplay_session.rs:148-164`). Drop the hardcoded entries; trust the accessory's table.
+  - **Minor mismatch (fix while there):** `ControlMessage::start_identification()`
+    (`iap2-proto/src/ops/control.rs:381`) attaches three parameters (`DISPLAY_NAME "CarJack"`,
+    `VERSION`, `FEATURES`). Per spec and per the reference capture, `StartIdentification` (0x1D00)
+    carries **no parameters** — the iPhone's is 6 bytes total. Not proven fatal (the car never got
+    far enough to complain), but it should be empty.
+  - What the car does next, once this is fixed (from the iPhone capture): `IdentificationInformation`
+    (0x1D01, ~330 bytes, "Motorcycle Media Players") → we send `IdentificationAccepted` (0x1D02) →
+    `RequestAuthenticationCertificate` (0xAA00) → serial/cert/challenge/response → 0xAA05 →
+    then the car sends `WirelessCarPlayUpdate`-ish 0x4300 messages with SSID `CFMOTO-999700` etc.
+- **(Superseded) iAP2 never starts on the bike — identity/CoD filter suspected** (from `mycar.pcapng`,
   2026-07-21, carjack↔head unit, vs `bluetoothd-hci-latest.pklg` iPhone reference):
   - carjack's whole capture has **zero `FF 5A` (iAP2) and zero `FF 55` (switch)** bytes. The iPhone
     ref has 61 and 12. carjack fails *before* iAP2 — earlier than the RTSP/AirPlay theory below.
@@ -150,17 +234,24 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - Nothing blocked on captures any more - the iPhone↔head-unit reference answered the open questions.
 
 ## Next Move
-1. **Revert the connect-out change** in `src/wireless.rs`: drop the 40× `connect_profile(&IAP_ACCESSORY_UUID)`
-   retry loop. Go passive like catplay's phone side - register the profiles (client profile with
-   `AutoConnect=true`) and run the iAP2 session on the connection the **car** opens inbound. carjack's
-   `perform_switch` already does the right thing (wait for `FF 55`, echo it) once it's on that socket.
-2. Re-test and capture: expect `Rcvd SABM Channel=<n>` from the car, then `Rcvd` `FF 55 02 00 EE 10`,
-   then carjack's echo, then `FF 5A` iAP2 traffic.
-3. Make the connection **car-initiated** where possible (the only session that worked was one the car
-   started; consider whether carjack should avoid initiating ACL/pairing at all and just be connectable).
-4. Fix the HFP identity answers (`AT+CGMI` → Apple Inc., `AT+CGMM` → an iPhone model, plus `COPS`/
-   `NREC`/`CCLK`) - resolve the "who owns HFP-AG" question above first.
-5. Once iAP2 proceeds: continue to the WiFi/AirPlay RTSP steps.
+1. **Re-test against both head units and capture.** Two things to check, in order:
+   - **Who won the race, and what happens after a silent link.** Expect exactly **one**
+     `Sent Create Connection` from carjack, no more. On the bike it will likely succeed and then
+     produce no `FF 55` (that unit wants to originate the link); the sequence to confirm is
+     car `DISC` on ch 1 → carjack drops the ACL (`Sent Disconnect`) → **`Rcvd Connect Request`**
+     from the car → `FF 55` on the car's own link. On the other head unit the single dial should
+     just win outright and carry the session with no drop at all.
+   - **Then** the iAP2 payload: `StartIdentification` should go out as
+   `ff5a 0010 40 <seq> <ack> 02 <ck> | 4040 0006 1d00` (session **2**, no params), and the car to
+   answer with `IdentificationInformation` (0x1D01, ~330 bytes) instead of silence, then the auth
+   chain (0xAA00…0xAA05) and the WiFi/`0x4300` messages.
+2. Watch for a **new** failure at `handle_control_message`: the auth chain wants a real Apple
+   authentication coprocessor response for 0xAA02/0xAA03. `generate_challenge` is a PRNG stub, so
+   `AuthenticationSucceeded` may be a lie the car rejects. Unknown until we get there.
+3. Fix the HFP identity answers (`AT+CGMI` → Apple Inc., `AT+CGMM` → an iPhone model, plus `COPS`/
+   `NREC`/`CCLK`) - resolve the "who owns HFP-AG" question above first. Not implicated in this
+   failure (iAP2 got past it), so lower priority than it looked.
+6. Once iAP2 proceeds: continue to the WiFi/AirPlay RTSP steps.
 
 ## Relevant Files
 - `src/airplay.rs`: Now acts as RTSP client — sends ANNOUNCE (with SDP) → SETUP → PLAY, then streams interleaved RTP.
@@ -172,5 +263,13 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - `bluetoothd-hci-latest.pklg`: iPhone HCI capture with full iAP2 exchange up to WiFi config + post-config updates. No EA session messages found.
 - `mycar.pcapng`: carjack↔bike BT HCI capture (2026-07-21) showing HFP+A2DP succeed but iAP2 never starts (no `FF 55`/`FF 5A`); basis for the CoD-filter hypothesis.
 - `mycar_2.pcapng` / `mycar_3.pcapng` (in `~/Documents/carjack/`): carjack↔bike, 2026-07-24 - before/after the connect-out change.
+- **`cfmoto_6.pcapng`** (2026-07-26): carjack↔bike, after the session-ID fix. carjack's outbound page
+  *succeeded*, so the car never paged us; it opened ch1 on carjack's ACL and DISC'd without `FF 55`.
+  Zero ch1 bytes — proof the head unit requires a car-originated ACL, not a session-ID regression.
+- **`cfmoto_5.pcapng`** (2026-07-26): carjack↔bike, the first capture where iAP2 actually starts —
+  `FF 55` echo + full Link SYN handshake succeed, then `StartIdentification` on the wrong session id
+  (1 instead of 2) is ACKed-and-dropped. Two identical attempts, t≈31 and t≈112.
+- **`iphone-cfmoto.pklg`**: iPhone ("Tamagotchi") ↔ this bike, working CarPlay. The byte-level
+  reference for the control session id (`02`) and the post-identification auth chain.
 - **`iphonemycarcarplay.pklg`**: the key reference - a real iPhone doing *working* CarPlay on this same bike (2026-07-25). Shows the car opening iAP ch1 inbound and sending `FF 55` first, the iPhone's outbound dial being rejected, and the iPhone's HFP identity answers.
-- `src/bin/carjack-btmgmt.rs`: privileged sidecar — now sets both the CarPlay EIR UUID (`ADD_UUID`) and an iPhone-like Class of Device (`SET_DEV_CLASS`, `CARPLAY_DEV_CLASS`).
+- `src/bin/carjack-hci-helper.rs`: privileged sidecar — now sets both the CarPlay EIR UUID (`ADD_UUID`) and an iPhone-like Class of Device (`SET_DEV_CLASS`, `CARPLAY_DEV_CLASS`). Takes no arguments; resolves the adapter itself via bluer's default adapter.

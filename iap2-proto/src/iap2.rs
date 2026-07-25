@@ -11,7 +11,7 @@ use tokio_util::codec::{Decoder, Encoder, Framed};
 use crate::error::Iap2Error;
 use crate::ops::{switch::perform_switch, syn::Syn};
 use crate::packet::{Checksumable, ControlByte, Header, Packet};
-use crate::stream::SessionTable;
+use crate::stream::{SessionTable, SessionType};
 
 #[derive(Debug)]
 pub struct Iap2Codec;
@@ -78,7 +78,25 @@ impl<S: AsyncWriteExt + AsyncReadExt + Unpin> Stream for S {}
 //Yoinked from iap2-rs
 const INITIAL_SEQ: u8 = 0x9D;
 
+/// Session ID for packets that belong to the link layer itself rather than any
+/// negotiated session - bare ACKs and keep-alives. An iPhone uses 0 for these.
+pub const LINK_SESSION_ID: u8 = 0;
+
 impl<S: Stream> Iap2<S> {
+    /// The control session ID the *accessory* advertised in its SYN. Never assume a
+    /// value here: the CFMOTO head unit numbers its control session 2, and messages
+    /// sent on any other ID are link-ACKed and then silently dropped.
+    pub async fn control_session_id(&self) -> Result<u8, Iap2Error> {
+        self.session_table
+            .lock()
+            .await
+            .find_type(SessionType::Control)
+            .map(|s| s.id)
+            .ok_or(Iap2Error::ControlSessionError(
+                "No control session in session table",
+            ))
+    }
+
     pub async fn start(mut stream: S) -> Result<Self, Iap2Error> {
         perform_switch(&mut stream).await?;
 

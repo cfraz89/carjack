@@ -3,19 +3,19 @@ use std::{
     ffi::OsString,
     time::Duration,
 };
+use thiserror::Error;
 
-use backon::{ConstantBuilder, ExponentialBuilder, Retryable, RetryableWithContext};
+use backon::{ConstantBuilder, RetryableWithContext};
 use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
     Address, Device, DiscoveryFilter, Session,
     adv::{Advertisement, Type},
     agent::Agent,
-    rfcomm::{self, ConnectRequest, ProfileHandle, Role},
+    rfcomm::{self, ProfileHandle, Role},
 };
 use eyre::{Result, eyre};
-use futures::Stream;
-use iap2_proto::iap2::Iap2;
+use iap2_proto::{error::Iap2Error, iap2::Iap2};
 use libcarjack::carplay;
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
@@ -32,6 +32,10 @@ const IAP_CHANNEL: u16 = 1;
 /// How long to wait for the configured head unit to show up in discovery before giving up on this
 /// session. The caller retries, so this only bounds a single attempt.
 const DISCOVERY_WAIT: Duration = Duration::from_secs(60);
+
+/// Pause before re-arming the accept after a transient failure, so a persistently failing
+/// `ConnectRequest::accept` can't turn the wait loop into a busy spin.
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 // fn generate_iap2_sdp() -> String {
 //     format!(
@@ -90,28 +94,52 @@ fn bin_path() -> Option<OsString> {
         .ok()
 }
 
-/// Exec the `carjack-btmgmt` sidecar (found next to our own binary) to apply the BR/EDR mgmt tweaks
-/// (add the CarPlay EIR UUID and set an iPhone-like Class of Device). The sidecar carries
-/// `cap_net_admin`; we don't.
-async fn run_btmgmt_helper(adapter_index: u16) -> Result<()> {
-    let status = tokio::process::Command::new("carjack-btmgmt")
-        .arg(adapter_index.to_string())
+/// Exec the `carjack-hci-helper` sidecar (found next to our own binary) to apply the BR/EDR mgmt
+/// tweaks (add the CarPlay EIR UUID and set an iPhone-like Class of Device). The sidecar carries
+/// `cap_net_admin`; we don't. It resolves the adapter itself via bluer's default adapter.
+async fn run_hci_helper() -> Result<()> {
+    let status = tokio::process::Command::new("carjack-hci-helper")
         .env("PATH", bin_path().unwrap_or_default())
         .status()
         .await?;
     if !status.success() {
-        return Err(eyre!("carjack-btmgmt exited with {status}"));
+        return Err(eyre!("carjack-hci-helper exited with {status}"));
     }
     Ok(())
 }
 
-async fn start_iap2(
-    profiles: &mut (impl Stream<Item = ConnectRequest> + Unpin),
-) -> Result<Iap2<bluer::rfcomm::Stream>> {
-    let rq = profiles
+/// Carried across retry attempts by `backon`: the merged profile streams we accept inbound
+/// connections from, and the single outbound page (dropped, and so cancelled, once any link lands).
+struct LinkCtx {
+    profiles: Merge<ProfileHandle, ProfileHandle>,
+    dial: AbortOnDropHandle<()>,
+    device: Device,
+}
+
+/// Why an attempt to bring the iAP2 link up failed. Drives the `.when` retry predicate.
+#[derive(Error, Debug)]
+enum LinkAttemptError {
+    /// The profile stream ended: BlueZ has taken our registrations away, so no further connection
+    /// can ever arrive.
+    #[error("iAP2 profiles stream closed")]
+    ProfilesClosed,
+    #[error("iAP2 error: {0:?}")]
+    Iap2(#[from] Iap2Error),
+    #[error("Bluer error: {0:?}")]
+    Error(#[from] bluer::Error),
+}
+
+/// Wait for an inbound iAP2 profile connection, accept it, and bring the iAP2 link up on it.
+async fn attempt_iap2_link(
+    ctx: &mut LinkCtx,
+) -> Result<Iap2<bluer::rfcomm::Stream>, LinkAttemptError> {
+    tracing::debug!("Waiting for iAP2 connection requests");
+    let rq = ctx
+        .profiles
         .next()
         .await
-        .ok_or(eyre!("iAP2 profile stream closed"))?;
+        .ok_or(LinkAttemptError::ProfilesClosed)?;
+    ctx.dial.abort();
     tracing::debug!("Got connect request");
     let stream = rq.accept()?;
     tracing::debug!("Establishing iAP2 link");
@@ -139,16 +167,11 @@ pub async fn wireless_carplay(
     let _advertisement_handle = publish_advertisement(&adapter).await?;
 
     // Apply HCI-level CarPlay hacks so BR/EDR inquiry shows the CarPlay UUID
-    let adapter_name = adapter.name().to_string();
-    let adapter_index = adapter_name
-        .strip_prefix("hci")
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(0);
     tracing::trace!("Applying hci hacks");
     //We need cap_net_admin to write to the hci socket directly.
     //However adding that cap to this process is probably a security liability, and breaks
     //xdg-desktop-portal. So we offload the work to a seperate binary.
-    run_btmgmt_helper(adapter_index).await?;
+    run_hci_helper().await?;
 
     // let sdp_record = generate_iap2_sdp();
     let iap_accessory_handle = session
@@ -198,31 +221,49 @@ pub async fn wireless_carplay(
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
-    tracing::debug!("Waiting for iAP2 connection requests");
     let profiles = iap_accessory_handle.merge(iap_device_handle);
 
-    let iap2_connect_task = tokio::spawn(async {
-        (|mut profiles: Merge<ProfileHandle, ProfileHandle>| async {
-            let res = start_iap2(&mut profiles).await;
-            (profiles, res)
-        })
-        .retry(ConstantBuilder::new().without_max_times())
-        .context(profiles)
-        .await
-    });
+    // Page the car exactly once, then leave the radio alone. Some head units only ever run iAP2
+    // over an ACL link they originated (the CFMOTO bike: when our page wins, it opens RFCOMM ch 1
+    // on our link and DISCs without ever sending `FF 55` - `cfmoto_6.pcapng`), while others won't
+    // page us for a long time, if at all. A single attempt serves both: it still establishes the
+    // first bond, but unlike the old unbounded retry it doesn't keep the controller paging and
+    // starve our own page scan, so the car can reach us right after it fails.
+    let dialled = device.clone();
     let accessory_profile_connect_task = AbortOnDropHandle::new(tokio::spawn(async move {
-        (async || {
-            device
-                .connect_profile(&IAP_ACCESSORY_UUID)
-                .await
-                .tap_err(|e| tracing::warn!(e = ?e, "Unable to connect to accessory profile"))
-        })
-        .retry(ExponentialBuilder::new().without_max_times())
-        .await
+        match dialled.connect_profile(&IAP_ACCESSORY_UUID).await {
+            Ok(()) => tracing::debug!("Outbound accessory profile connect accepted"),
+            // Not fatal, and not worth retrying: the inbound path is still live, and the car may
+            // simply not be pageable yet. Whichever side lands a connection first wins.
+            Err(e) => tracing::info!(
+                e = ?e,
+                "Outbound accessory profile connect failed, waiting for the head unit to page us"
+            ),
+        }
     }));
 
-    let iap2 = iap2_connect_task.await?.1?;
-    accessory_profile_connect_task.abort();
+    //Retry our link unless our profiles start to return None.
+    let iap2: Iap2<rfcomm::Stream> = (|mut ctx: LinkCtx| async move {
+        let res = attempt_iap2_link(&mut ctx).await;
+        if let Err(LinkAttemptError::Iap2(e)) = &res {
+            tracing::warn!(?e, "Got iap2 error bringing up link, disconnecting");
+            let _ = &ctx.device.disconnect().await;
+        }
+        (ctx, res)
+    })
+    .retry(
+        ConstantBuilder::new()
+            .with_delay(ACCEPT_RETRY_DELAY)
+            .without_max_times(),
+    )
+    .context(LinkCtx {
+        profiles,
+        dial: accessory_profile_connect_task,
+        device,
+    })
+    .when(|e| !matches!(e, LinkAttemptError::ProfilesClosed))
+    .await
+    .1?;
     tracing::debug!("iAP2 link established");
     carplay::run_carplay_session(iap2, wifi_tx, ready_tx).await?;
     tracing::debug!("iAP lifecycle ended");
@@ -309,15 +350,17 @@ async fn prepare_device(device: Device) -> Result<Device> {
     let alias = device.alias().await.unwrap_or_default();
     let rssi = device.rssi().await.ok().flatten();
     let class = device.class().await.ok().flatten();
+    let was_bonded = device.is_paired().await.unwrap_or(false);
     tracing::info!(
         name = alias,
         address = ?device.address(),
         rssi,
         class = class.map(|c| format!("{c:#08x}")),
+        was_bonded,
         "Preparing configured head unit"
     );
 
-    if !device.is_paired().await.unwrap_or(false) {
+    if !was_bonded {
         // Not fatal: BlueZ often completes bonding as part of the profile connect that follows.
         if let Err(e) = device.pair().await {
             tracing::warn!(?e, "Pairing failed, continuing to the connection attempt");

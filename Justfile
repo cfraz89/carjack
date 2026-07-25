@@ -3,17 +3,17 @@ mod armbian
 
 [script]
 _setcap +flags="":
-    # Only the tiny `carjack-btmgmt` sidecar carries cap_net_admin (for the raw HCI mgmt socket).
+    # Only the tiny `carjack-hci-helper` sidecar carries cap_net_admin (for the raw HCI mgmt socket).
     # The main carjack binary stays unprivileged so xdg-desktop-portal can introspect it in
     # desktop mode (a capability-carrying process is /proc-locked to root under fs.suid_dumpable=2).
-    binary="target/debug/carjack-btmgmt"
-    case " {{flags}} " in *" --release "*|*" -r "*) binary="target/release/carjack-btmgmt";; esac
-    # [ -t 0 ] && { sudo -v || true; }   # prompt once to cache creds, only when interactive
-    sudo setcap cap_net_admin+ep "$binary"
+    binary="target/debug/carjack-hci-helper"
+    case " {{flags}} " in *" --release "*|*" -r "*) binary="target/release/carjack-hci-helper";; esac
+    run0 setcap cap_net_admin+ep "$binary"
+    echo "Gave cap_net_admin to ${binary}"
 
 toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }
 
-run +flags="": (build flags) (_setcap flags)
+run +flags="": (build flags)
     waydroid session stop && cargo run {{flags}} < /dev/null
 
 #Run the app until timeout, then kill it and restore the original wifi connection
@@ -39,7 +39,7 @@ test-run timeout="60":
     # `run` handles the toolbox re-exec itself now, so just call it directly.
     timeout "{{timeout}}s" just run || true
 
-build +flags="":
+build +flags="": && (_setcap flags)
     {{toolbox_build}}cargo build {{flags}} < /dev/null
 
 # Run a single cargo test filtered by name (e.g. `just test compositor`), in the toolbox (when

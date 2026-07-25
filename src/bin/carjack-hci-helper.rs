@@ -1,17 +1,21 @@
-//! `carjack-btmgmt` - a privileged one-shot sidecar for carjack.
+//! `carjack-hci-helper` - a privileged one-shot sidecar for carjack.
 //!
 //! It applies the two BR/EDR presentation tweaks a head unit needs to treat us as an iPhone:
 //!   1. add the CarPlay device UUID to the adapter's EIR (mgmt `ADD_UUID`), and
 //!   2. set an iPhone-like Class of Device (mgmt `SET_DEV_CLASS`).
+//!
 //! Both need a raw `AF_BLUETOOTH`/HCI control socket, which requires `CAP_NET_ADMIN`.
 //!
-//! Usage: `carjack-btmgmt <adapter-index>` (e.g. `0` for `hci0`). Exits 0 on success.
+//! Usage: `carjack-hci-helper` (no arguments). It resolves the adapter the same way carjack does,
+//! via `bluer`'s default adapter. Exits 0 on success.
 
-use std::mem;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::io::{Read, Write};
 use std::process::ExitCode;
+use std::time::Duration;
 
+use eyre::{Result, WrapErr, eyre};
 use libcarjack::uuid::CARPLAY_DEVICE_UUID;
+use socket2::{Domain, Protocol, SockAddr, SockAddrStorage, Socket, Type, socklen_t};
 
 const AF_BLUETOOTH: i32 = 31;
 const BTPROTO_HCI: i32 = 1;
@@ -34,111 +38,81 @@ struct SockAddrHci {
     channel: u16,
 }
 
-fn main() -> ExitCode {
-    let Some(index_arg) = std::env::args().nth(1) else {
-        eprintln!("usage: carjack-btmgmt <adapter-index>");
-        return ExitCode::from(2);
-    };
-    let adapter_index: u16 = match index_arg.parse() {
-        Ok(i) => i,
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("carjack-btmgmt: invalid adapter index {index_arg:?}: {e}");
-            return ExitCode::from(2);
+            eprintln!("carjack-hci-helper: {e:#}");
+            ExitCode::FAILURE
         }
-    };
+    }
+}
+
+async fn run() -> Result<()> {
+    let adapter_index = default_adapter_index().await?;
 
     // Add the CarPlay device UUID to the BR/EDR EIR: payload is the 16-byte UUID (LE) + a
     // service-visibility flag byte.
     let mut payload = CARPLAY_DEVICE_UUID.to_bytes_le().to_vec();
     payload.push(0x00);
-
-    if let Err(e) = send_mgmt_command(adapter_index, MGMT_OP_ADD_UUID, &payload) {
-        eprintln!("carjack-btmgmt: ADD_UUID failed: {e}");
-        return ExitCode::FAILURE;
-    }
+    send_mgmt_command(adapter_index, MGMT_OP_ADD_UUID, &payload).wrap_err("ADD_UUID failed")?;
 
     // Present an iPhone-like Class of Device. Without this the adapter keeps BlueZ's default class
     // (Computer); a head unit then gives us HFP/A2DP but never starts CarPlay - it opens the iAP
     // RFCOMM channel and drops it without ever sending the iAP1->iAP2 switch (FF 55 02 00 EE 10).
-    if let Err(e) = send_mgmt_command(adapter_index, MGMT_OP_SET_DEV_CLASS, &CARPLAY_DEV_CLASS) {
-        eprintln!("carjack-btmgmt: SET_DEV_CLASS failed: {e}");
-        return ExitCode::FAILURE;
-    }
+    send_mgmt_command(adapter_index, MGMT_OP_SET_DEV_CLASS, &CARPLAY_DEV_CLASS)
+        .wrap_err("SET_DEV_CLASS failed")?;
 
-    ExitCode::SUCCESS
+    Ok(())
+}
+
+/// Resolve the mgmt adapter index from BlueZ's default adapter, so we act on the same adapter the
+/// main process does. BlueZ names adapters `hci<N>` and the mgmt index is that `N`.
+async fn default_adapter_index() -> Result<u16> {
+    let session = bluer::Session::new().await?;
+    let adapter = session.default_adapter().await?;
+    let name = adapter.name();
+    name.strip_prefix("hci")
+        .and_then(|index| index.parse().ok())
+        .ok_or_else(|| eyre!("unexpected adapter name {name:?}, expected `hci<N>`"))
 }
 
 /// Open the HCI control socket, send one mgmt command, and wait (up to 5s) for the matching
 /// CmdComplete. Blocking - this process does nothing else.
 fn send_mgmt_command(adapter_index: u16, opcode: u16, payload: &[u8]) -> std::io::Result<()> {
-    let fd = unsafe { libc::socket(AF_BLUETOOTH, libc::SOCK_RAW, BTPROTO_HCI) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: socket() just handed us a fresh owned fd.
-    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    let raw = owned.as_raw_fd();
-
-    let addr = SockAddrHci {
-        family: AF_BLUETOOTH as u16,
-        dev: MGMT_INDEX_NONE,
-        channel: HCI_CHANNEL_CONTROL,
-    };
-    let rc = unsafe {
-        libc::bind(
-            raw,
-            &addr as *const SockAddrHci as *const libc::sockaddr,
-            mem::size_of::<SockAddrHci>() as u32,
-        )
-    };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-
-    // Bound wait for the response.
-    let tv = libc::timeval {
-        tv_sec: 5,
-        tv_usec: 0,
-    };
-    unsafe {
-        libc::setsockopt(
-            raw,
-            libc::SOL_SOCKET,
-            libc::SO_RCVTIMEO,
-            &tv as *const libc::timeval as *const _,
-            mem::size_of::<libc::timeval>() as u32,
-        );
-    }
+    let socket = Socket::new(
+        Domain::from(AF_BLUETOOTH),
+        Type::RAW,
+        Some(Protocol::from(BTPROTO_HCI)),
+    )?;
+    socket.bind(&hci_control_addr())?;
+    // Bound wait for the response; surfaces as EAGAIN/EWOULDBLOCK on expiry.
+    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
 
     let mut packet = Vec::with_capacity(6 + payload.len());
     packet.extend_from_slice(&opcode.to_le_bytes());
     packet.extend_from_slice(&adapter_index.to_le_bytes());
     packet.extend_from_slice(&(payload.len() as u16).to_le_bytes());
     packet.extend_from_slice(payload);
-
-    let mut written = 0usize;
-    while written < packet.len() {
-        let n = unsafe {
-            libc::write(
-                raw,
-                packet.as_ptr().add(written).cast(),
-                packet.len() - written,
-            )
-        };
-        if n < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        written += n as usize;
+    // mgmt is message-oriented: the kernel takes the whole command or none of it. A short write
+    // means it took none - which is how an *untrusted* socket is refused (the permission-denied
+    // path returns 0 rather than an error), i.e. we're missing CAP_NET_ADMIN.
+    let written = (&socket).write(&packet)?;
+    if written != packet.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "kernel accepted {written}/{} bytes of mgmt command {opcode:#06x} - \
+                 the HCI control socket is untrusted (missing cap_net_admin on this binary?)",
+                packet.len()
+            ),
+        ));
     }
 
     let mut buf = [0u8; 1024];
     loop {
-        let len = unsafe { libc::read(raw, buf.as_mut_ptr().cast(), buf.len()) };
-        if len < 0 {
-            // SO_RCVTIMEO surfaces the timeout as EAGAIN/EWOULDBLOCK.
-            return Err(std::io::Error::last_os_error());
-        }
-        let len = len as usize;
+        let len = (&socket).read(&mut buf)?;
         if len == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -173,5 +147,24 @@ fn send_mgmt_command(adapter_index: u16, opcode: u16, payload: &[u8]) -> std::io
             }
             return Ok(());
         }
+    }
+}
+
+/// `sockaddr_hci` bound to the mgmt control channel. The mgmt protocol addresses the adapter
+/// per-command (the index in the packet header), so the socket itself binds `HCI_DEV_NONE`.
+///
+/// This is the one spot `socket2` can't cover: it has no typed constructor for a Bluetooth
+/// sockaddr, so the storage has to be filled in by hand.
+fn hci_control_addr() -> SockAddr {
+    let mut storage = SockAddrStorage::zeroed();
+    // SAFETY: `SockAddrHci` is a `repr(C)` `sockaddr_hci`, smaller than `sockaddr_storage`, and we
+    // declare the matching length below - so the kernel reads exactly the bytes we wrote.
+    unsafe {
+        *storage.view_as::<SockAddrHci>() = SockAddrHci {
+            family: AF_BLUETOOTH as u16,
+            dev: MGMT_INDEX_NONE,
+            channel: HCI_CHANNEL_CONTROL,
+        };
+        SockAddr::new(storage, size_of::<SockAddrHci>() as socklen_t)
     }
 }
