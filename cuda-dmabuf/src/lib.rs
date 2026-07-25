@@ -18,9 +18,9 @@ use std::ptr;
 use std::sync::{Arc, Mutex};
 
 use eyre::{Result, eyre};
+use gst::glib::translate::ToGlibPtr;
 use gstreamer as gst;
 use gstreamer_video as gst_video;
-use gst::glib::translate::ToGlibPtr;
 
 mod ffi;
 
@@ -182,8 +182,17 @@ impl CudaImporter {
         }
         tracing::info!("cuda-dmabuf: importer ready");
 
-        let pool = Arc::new(CudaPool { gst_ctx: gst_cuda_ctx, free: Mutex::new(Vec::new()) });
-        Ok(CudaImporter { _drm: drm, egl_display, egl_ext, gst_cuda_ctx, pool })
+        let pool = Arc::new(CudaPool {
+            gst_ctx: gst_cuda_ctx,
+            free: Mutex::new(Vec::new()),
+        });
+        Ok(CudaImporter {
+            _drm: drm,
+            egl_display,
+            egl_ext,
+            gst_cuda_ctx,
+            pool,
+        })
     }
 
     /// `GstContext` to set on the encode pipeline so `nvh264enc` adopts our CUDA context (the one
@@ -236,7 +245,11 @@ impl CudaImporter {
                 ffi::eglGetError()
             }));
         }
-        let _img = ImageGuard { egl_ext: &self.egl_ext, dpy: self.egl_display, image };
+        let _img = ImageGuard {
+            egl_ext: &self.egl_ext,
+            dpy: self.egl_display,
+            image,
+        };
 
         // 2. Register with CUDA and map to a CUeglFrame (a CUarray for block-linear surfaces).
         let mut resource: *mut c_void = ptr::null_mut();
@@ -292,7 +305,11 @@ impl CudaImporter {
         }
 
         // 4. Wrap the pitched buffer as GstCudaMemory on our shared context.
-        let notify = Box::new(NotifyData { pool: self.pool.clone(), devptr, size });
+        let notify = Box::new(NotifyData {
+            pool: self.pool.clone(),
+            devptr,
+            size,
+        });
         let info_ptr: *const gst_video::ffi::GstVideoInfo = info.to_glib_none().0;
         let notify_ptr = Box::into_raw(notify);
         let mem = unsafe {

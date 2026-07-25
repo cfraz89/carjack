@@ -8,13 +8,13 @@
 //! the monitor (default `eDP-1`); `TEST_ZEROCOPY` (auto/true/false) picks the encode path.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use carjack::config::ZeroCopyMode;
 use carjack::encode::encode_pipewire_to_channel;
-use eyre::{eyre, Result};
+use eyre::{Result, eyre};
 use futures::StreamExt;
 use libcarjack::airplay::EncodedFrame;
 use tokio::sync::mpsc;
@@ -74,7 +74,8 @@ async fn desktop_pipewire_encodes() -> Result<()> {
     let (video_tx, mut video_rx) = mpsc::channel::<EncodedFrame>(64);
     let (dsize_tx, _dsize_rx) = tokio::sync::watch::channel::<Option<(u32, u32)>>(None);
     let _encoder = AbortOnDropHandle::new(tokio::spawn(async move {
-        if let Err(e) = encode_pipewire_to_channel(node_id, 1080, 600, mode, video_tx, dsize_tx).await
+        if let Err(e) =
+            encode_pipewire_to_channel(node_id, 1080, 600, mode, video_tx, dsize_tx).await
         {
             eprintln!("encoder error: {e}");
         }
@@ -104,9 +105,15 @@ async fn desktop_pipewire_encodes() -> Result<()> {
     // Keep the D-Bus proxies alive until here so the ScreenCast session doesn't close early.
     drop((sc, session, stream, conn));
 
-    assert!(n > 0, "no H264 produced from the desktop PipeWire stream ({mode:?})");
+    assert!(
+        n > 0,
+        "no H264 produced from the desktop PipeWire stream ({mode:?})"
+    );
     // Regression guard for the nvenc gop-size=30 + system-memory all-IDR quirk: a mostly-static
     // desktop must produce inter (P) frames, not an IDR every frame.
-    assert!(kf < n, "every frame was a keyframe ({kf}/{n}) - encoder isn't doing inter-prediction");
+    assert!(
+        kf < n,
+        "every frame was a keyframe ({kf}/{n}) - encoder isn't doing inter-prediction"
+    );
     Ok(())
 }

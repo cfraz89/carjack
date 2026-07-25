@@ -47,7 +47,9 @@ impl SessionTable {
     }
 
     pub fn find_type(&self, session_type: SessionType) -> Option<&SessionEntry> {
-        self.sessions.iter().find(|s| s.session_type == session_type)
+        self.sessions
+            .iter()
+            .find(|s| s.session_type == session_type)
     }
 }
 
@@ -111,9 +113,13 @@ impl SynPayload {
             let id = data[off];
             let raw_type = data[off + 1];
             let version = data[off + 2];
-            let session_type = SessionType::try_from(raw_type)
-                .unwrap_or(SessionType::ExternalAccessory);
-            sessions.push(SessionEntry { id, session_type, version });
+            let session_type =
+                SessionType::try_from(raw_type).unwrap_or(SessionType::ExternalAccessory);
+            sessions.push(SessionEntry {
+                id,
+                session_type,
+                version,
+            });
             off += 3;
         }
         Ok(SynPayload {

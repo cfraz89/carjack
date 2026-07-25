@@ -201,40 +201,6 @@ pub async fn wireless_carplay(
     tracing::debug!("Waiting for iAP2 connection requests");
     let profiles = iap_accessory_handle.merge(iap_device_handle);
 
-    // Dial the car's iAP profile in the background. This must NOT gate the inbound path: on the
-    // MYCAR the *car* opens the iAP RFCOMM channel to us and speaks first, and an iPhone's own
-    // outbound dial to the car gets DISCed (confirmed in iphonemycarcarplay.pklg). Awaiting the
-    // retry loop here used to stall us for up to ~140s - long past the ~200ms the car allows for
-    // the FF 55 echo - so the connection we actually want was dead before we ever read from it.
-    // let outbound_device = device.clone();
-    // let _outbound = AbortOnDropHandle::new(tokio::spawn(async move {
-    //     (|| async {
-    //         tokio::time::timeout(
-    //             Duration::from_secs(3),
-    //             outbound_device
-    //                 .connect_profile(&IAP_ACCESSORY_UUID)
-    //                 .map(|r| match r {
-    //                     Ok(()) => Ok(()),
-    //                     Err(e) if e.kind == bluer::ErrorKind::AlreadyConnected => {
-    //                         tracing::info!("Accessory profile already connected, proceeding");
-    //                         Ok(())
-    //                     }
-    //                     Err(e) => Err(eyre!(e)),
-    //                 }),
-    //         )
-    //         .await?
-    //     })
-    //     .retry(
-    //         ConstantBuilder::new()
-    //             .with_delay(Duration::from_millis(2000))
-    //             .with_max_times(OUTBOUND_CONNECT_ATTEMPTS),
-    //     )
-    //     .await
-    //     .unwrap_or_else(|e| {
-    //         tracing::warn!("Connecting profile failed with {e}, inbound path continues.");
-    //     });
-    // }));
-
     let iap2_connect_task = tokio::spawn(async {
         (|mut profiles: Merge<ProfileHandle, ProfileHandle>| async {
             let res = start_iap2(&mut profiles).await;
@@ -284,12 +250,7 @@ async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::Advertis
 //     async fn stop_discovery(&self) -> zbus::Result<()>;
 // }
 
-/// Resolve the configured head unit and get it ready to connect.
-///
-/// carjack connects to exactly the device named in `[bluetooth] device` - given as a MAC or as the
-/// advertised name. There is deliberately no survey-and-guess step: choosing a device by scoring
-/// cached BlueZ properties is what sent carjack paging a powered-off head unit it still held a
-/// stale bond for, while the real one sat discovered and ignored (`mycar_4.pcapng`).
+/// Resolve the configured accesory and get it ready to connect.
 async fn find_target_device(adapter: &Adapter, target: &str) -> Result<Device> {
     let wanted: Option<Address> = target.parse().ok();
 

@@ -26,8 +26,8 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - **iPhone pklg capture re-analyzed**: Found 62 iAP2 `FF 5A` packets and 4 `FF 55` switch commands. Extracted full protocol exchange: SYN→StartIdentification→IdentificationInformation→Auth→WiFiConfig→WirelessCarPlayUpdate. **Zero EA session messages** found — EA establishment likely happens over WiFi as part of AirPlay handshake, not Bluetooth.
 
 ### Active
-- **iAP2 never starts on the MYCAR bike — identity/CoD filter suspected** (from `mycar.pcapng`,
-  2026-07-21, carjack↔MYCAR-1234, vs `bluetoothd-hci-latest.pklg` iPhone reference):
+- **iAP2 never starts on the bike — identity/CoD filter suspected** (from `mycar.pcapng`,
+  2026-07-21, carjack↔head unit, vs `bluetoothd-hci-latest.pklg` iPhone reference):
   - carjack's whole capture has **zero `FF 5A` (iAP2) and zero `FF 55` (switch)** bytes. The iPhone
     ref has 61 and 12. carjack fails *before* iAP2 — earlier than the RTSP/AirPlay theory below.
   - The bike **fully sets up HFP (RFCOMM ch 13, AT commands) and A2DP/AVRCP** with carjack, but on
@@ -56,9 +56,9 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
   - **Ruled out this round:** car never SDP-queries carjack (not an SDP-record rejection); CoD/
     vendor/UUIDs all match. carjack sends **no iAP bytes at all** — its iAP2 stack waits to *receive*
     rather than sending a Link SYN / `FF 55` on connect. The reference `.pklg` is a **different head
-    unit** (TESTUNIT-5678), where the car spoke first after 580 ms — MYCAR behaves differently, so we
-    can't assume its first-speaker/timing from that capture.
-  - **RESOLVED by the iPhone↔MYCAR capture** (`iphonemycarcarplay.pklg`, 2026-07-25) — a *working*
+    unit** (the old bench test rig), where the car spoke first after 580 ms — the bike behaves
+    differently, so we can't assume its first-speaker/timing from that capture.
+  - **RESOLVED by the iPhone↔head-unit capture** (`iphonemycarcarplay.pklg`, 2026-07-25) — a *working*
     CarPlay session on **this** bike. Three sessions in it; only the third gets iAP2:
     | | Session A (t≈275) | Session B (t≈394) | **Session C (t≈412)** |
     |---|---|---|---|
@@ -104,7 +104,7 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - **`mycar_4.pcapng` (2026-07-25): carjack was connecting to the WRONG DEVICE.** Capture has zero
   RFCOMM/SDP/BR-EDR ACL - only BLE. carjack issued `Create Connection` over and over to
   `aa:bb:cc:dd:ee:02` (and `aa:bb:cc:dd:ee:03`), each returning **Page Timeout (0x04)** after ~5.1 s,
-  while the bike (`MYCAR-1234`, `aa:bb:cc:dd:ee:ff`, RSSI −59, class `0x240408`, advertising both
+  while the bike (`aa:bb:cc:dd:ee:ff`, RSSI −59, class `0x240408`, advertising both
   `ec884348-…` and `…deca-caff`) sat discovered and ignored. Those targets are BLE-only random
   addresses - unpageable over BR/EDR. Cause chain in `src/wireless.rs`:
   1. `CARPLAY_DEVICE_NAME` is unset (it's commented out in `.env`), so `matches_carplay_device`
@@ -118,8 +118,8 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
   car-initiated session C in the iPhone capture was to an already-bonded iPhone). So carjack must
   land the first outbound connection + bond; only then does the inbound path become available.
   carjack was also in near-continuous inquiry+page (t=13→43 s) which starves page scan.
-  **The identity filter alone is NOT enough:** the stale bonded entries *look* right. `TESTUNIT-5678`
-  (`aa:bb:cc:dd:ee:02`, the old test rig, powered off) still reports class `0x00240418`, a cached
+  **The identity filter alone is NOT enough:** the stale bonded entries *look* right. The old bench
+  test rig (`aa:bb:cc:dd:ee:02`, powered off) still reports class `0x00240418`, a cached
   RSSI of -61, **and** both `ec884348-…` and `…deca-caff`. Worse, `bluer::discover_devices` replays
   every known device as `DeviceAdded` *before* any genuine discovery hit, so both the pre-check loop
   and the discovery loop meet it first.
@@ -127,7 +127,7 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
   filter, reachability probe, live-sighting-only detection, RSSI ranking) are all gone - the target
   head unit is now **configured**, not guessed:
   - `[bluetooth] device` in `config.toml`, accepting a **MAC** (`AA:BB:CC:DD:EE:FF`) or an
-    **advertised name** (`MYCAR-1234`). Env `CARJACK.BLUETOOTH.DEVICE`, flag `--bt-device`,
+    **advertised name**. Env `CARJACK.BLUETOOTH.DEVICE`, flag `--bt-device`,
     normal precedence (flag > env > file). `Config::bluetooth_device()` returns `None` when
     unset/blank and `main` errors out at startup with a message naming all three ways to set it.
   - `wireless::find_target_device` replaces `pair_available_accessory` + `is_candidate_accessory` +
@@ -137,17 +137,17 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
     during the profile connect) and trusts.
   - The legacy bespoke `CARPLAY_DEVICE_NAME` env var is gone, folded into the config system.
   **Why it had to go - measured (2026-07-25):** BlueZ **never clears a stale RSSI**. The powered-off
-  `TESTUNIT-5678` still reported `-61` after a full 12 s discovery pass and still listed the CarPlay
+  old bench test rig still reported `-61` after a full 12 s discovery pass and still listed the CarPlay
   UUIDs + a BR/EDR class, i.e. it was indistinguishable from a present device by any cached property,
   and `bluer::discover_devices` replays known addresses *ahead* of live hits so it was met first.
   (A live discovery *event* is a valid presence signal - that device emitted zero across a 15 s scan -
   but with an explicit target none of that inference is needed.)
-  Note: the old commented `.env` line read `MYCAR-1234`, missing the `Y` - it would never have
-  matched. `.env` now sets `CARJACK.BLUETOOTH.DEVICE=MYCAR-1234` (correct spelling), with the MAC
+  Note: the old commented `.env` line had a typo'd name - it would never have
+  matched. `.env` now sets `CARJACK.BLUETOOTH.DEVICE` to the correct name, with the MAC
   as a commented alternative.
 
 ### Blocked
-- Nothing blocked on captures any more - the iPhone↔MYCAR reference answered the open questions.
+- Nothing blocked on captures any more - the iPhone↔head-unit reference answered the open questions.
 
 ## Next Move
 1. **Revert the connect-out change** in `src/wireless.rs`: drop the 40× `connect_profile(&IAP_ACCESSORY_UUID)`
@@ -170,7 +170,7 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - `iap2-proto/src/iap2.rs`: `Iap2Codec::decode()` — byte-at-a-time skip implemented.
 - `carjack.log`: Previous test run log showing codec skip messages but no AirPlay RTSP exchange.
 - `bluetoothd-hci-latest.pklg`: iPhone HCI capture with full iAP2 exchange up to WiFi config + post-config updates. No EA session messages found.
-- `mycar.pcapng`: carjack↔MYCAR bike BT HCI capture (2026-07-21) showing HFP+A2DP succeed but iAP2 never starts (no `FF 55`/`FF 5A`); basis for the CoD-filter hypothesis.
+- `mycar.pcapng`: carjack↔bike BT HCI capture (2026-07-21) showing HFP+A2DP succeed but iAP2 never starts (no `FF 55`/`FF 5A`); basis for the CoD-filter hypothesis.
 - `mycar_2.pcapng` / `mycar_3.pcapng` (in `~/Documents/carjack/`): carjack↔bike, 2026-07-24 - before/after the connect-out change.
-- **`iphonemycarcarplay.pklg`**: the key reference - a real iPhone doing *working* CarPlay on this same MYCAR bike (2026-07-25). Shows the car opening iAP ch1 inbound and sending `FF 55` first, the iPhone's outbound dial being rejected, and the iPhone's HFP identity answers.
+- **`iphonemycarcarplay.pklg`**: the key reference - a real iPhone doing *working* CarPlay on this same bike (2026-07-25). Shows the car opening iAP ch1 inbound and sending `FF 55` first, the iPhone's outbound dial being rejected, and the iPhone's HFP identity answers.
 - `src/bin/carjack-btmgmt.rs`: privileged sidecar — now sets both the CarPlay EIR UUID (`ADD_UUID`) and an iPhone-like Class of Device (`SET_DEV_CLASS`, `CARPLAY_DEV_CLASS`).

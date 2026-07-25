@@ -355,7 +355,9 @@ pub struct ControlMessageSet {
 #[deku(ctx = "endian: Endian", ctx_default = "Endian::Big", endian = "endian")]
 pub struct ControlMessage {
     pub som: u16,
-    #[deku(update = "6 + self.parameters.iter().map(|p| p.total_length as usize).sum::<usize>() as u16")]
+    #[deku(
+        update = "6 + self.parameters.iter().map(|p| p.total_length as usize).sum::<usize>() as u16"
+    )]
     pub total_length: u16,
     pub message_id: ControlMessageId,
     #[deku(bytes_read = "total_length.saturating_sub(6)")]

@@ -206,8 +206,7 @@ processes, and restores whatever NetworkManager connection was active beforehand
   `just build` / `just test <name>` / `shot.sh`, which re-exec into it.
 - **`no head unit configured`**: `[bluetooth] device` is unset. Required since device
   auto-selection was removed. Set it in `~/.config/carjack/config.toml`, or pass
-  `--bt-device <MAC|NAME>`, or set `CARJACK.BLUETOOTH.DEVICE` (`.env` already sets it to
-  `MYCAR-1234`).
+  `--bt-device <MAC|NAME>`, or set `CARJACK.BLUETOOTH.DEVICE` (`.env` already sets it).
 - **Screenshot is black / `sample-sum=0` with a client**: the client failed to start under Wayland.
   The driver's client inherits only `WAYLAND_DISPLAY`; check the command runs standalone, and note
   GPU clients (Waydroid) need 20–30 s to boot — raise `--frames`.

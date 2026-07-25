@@ -5,14 +5,6 @@
 //!   2. set an iPhone-like Class of Device (mgmt `SET_DEV_CLASS`).
 //! Both need a raw `AF_BLUETOOTH`/HCI control socket, which requires `CAP_NET_ADMIN`.
 //!
-//! We keep that capability out of the main `carjack` process on purpose. Under `fs.suid_dumpable=2`
-//! (the hardened default on Fedora and friends) a process that gains a capability at exec has its
-//! `/proc/<pid>` reparented to root and made non-dumpable. In `source = "desktop"` mode that breaks
-//! xdg-desktop-portal: it runs as the user and identifies its D-Bus caller by opening
-//! `/proc/<pid>/root`, which it then can't do - ScreenCast/RemoteDesktop fails with
-//! "Unable to open /proc/<pid>/root". So only this sidecar is `setcap cap_net_admin+ep`; carjack
-//! execs it for this one operation and stays unprivileged (and portal-introspectable).
-//!
 //! Usage: `carjack-btmgmt <adapter-index>` (e.g. `0` for `hci0`). Exits 0 on success.
 
 use std::mem;

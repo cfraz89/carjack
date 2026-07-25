@@ -57,7 +57,9 @@ impl<S: Stream> Syn<'_, S> {
 
         let ack_packet = tokio::time::timeout(Duration::from_secs(5), self.0.receive_packet())
             .await
-            .map_err(|_| Iap2Error::Timeout(String::from("Timeout waiting for ACK after SYN+ACK")))??;
+            .map_err(|_| {
+                Iap2Error::Timeout(String::from("Timeout waiting for ACK after SYN+ACK"))
+            })??;
 
         if ack_packet.header.control.syn || !ack_packet.header.control.ack {
             return Err(Iap2Error::UnexpectedPacket(
@@ -71,9 +73,18 @@ impl<S: Stream> Syn<'_, S> {
         for s in accessory_sessions.sessions {
             table.add(s);
         }
-        for s in [SessionEntry { id: 0, session_type: SessionType::Control, version: 1 },
-                  SessionEntry { id: 2, session_type: SessionType::ExternalAccessory, version: 1 }]
-        {
+        for s in [
+            SessionEntry {
+                id: 0,
+                session_type: SessionType::Control,
+                version: 1,
+            },
+            SessionEntry {
+                id: 2,
+                session_type: SessionType::ExternalAccessory,
+                version: 1,
+            },
+        ] {
             table.add(s);
         }
         tracing::debug!(?table, "SYN exchange complete");

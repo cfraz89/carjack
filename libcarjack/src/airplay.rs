@@ -15,7 +15,7 @@ use catplay_carplay::rtsp_frame::HttpStatus;
 use catplay_carplay::screen::tx::{ScreenTransmitError, ScreenTransmitSink};
 use catplay_carplay::video::{AvccConfig, AvccConfigExtended, EncodedVideoFrame, Pts};
 use catplay_hap::HomekitStorageFile;
-use eyre::{Result, eyre};
+use eyre::{eyre, Result};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -61,7 +61,12 @@ pub async fn connect_airplay(
     let disp_uuid = disp.uuid.clone();
     tracing::info!("Car display: {width}x{height} @ {max_fps} fps, uuid={disp_uuid}");
 
-    Ok(AirPlayConnection { tx, width, height, max_fps })
+    Ok(AirPlayConnection {
+        tx,
+        width,
+        height,
+        max_fps,
+    })
 }
 
 pub async fn run_video_stream(
@@ -69,7 +74,12 @@ pub async fn run_video_stream(
     mut video_rx: mpsc::Receiver<EncodedFrame>,
     touch_tx: mpsc::Sender<TouchEvent>,
 ) -> Result<()> {
-    let AirPlayConnection { tx, width, height, max_fps } = conn;
+    let AirPlayConnection {
+        tx,
+        width,
+        height,
+        max_fps,
+    } = conn;
 
     // CarPlay resource arbitration: claim the main screen for us (the controller) via a
     // ModesChanged command BEFORE setting up the screen stream. This ordering is mandatory
@@ -253,7 +263,12 @@ fn parse_touch_report(bytes: &[u8], touching: &mut bool) -> Option<TouchEvent> {
         (false, false) => return None,
     };
     *touching = tip;
-    Some(TouchEvent { event_type, slot: 0, x, y })
+    Some(TouchEvent {
+        event_type,
+        slot: 0,
+        x,
+        y,
+    })
 }
 
 /// Abort a spawned task when the guard is dropped.
@@ -279,21 +294,30 @@ mod tests {
         let mut touching = false;
 
         // First contact -> Down at (0x018a, 0x00cd) = (394, 205).
-        let down = parse_touch_report(&[0, 1, 0x8a, 0x01, 0xcd, 0x00, 1, 0, 0, 0, 0, 0], &mut touching)
-            .expect("down");
+        let down = parse_touch_report(
+            &[0, 1, 0x8a, 0x01, 0xcd, 0x00, 1, 0, 0, 0, 0, 0],
+            &mut touching,
+        )
+        .expect("down");
         assert!(matches!(down.event_type, TouchEventType::Down));
         assert_eq!((down.x, down.y), (394.0, 205.0));
         assert!(touching);
 
         // Still touching, moved -> Motion at (0x020f, 0x0114) = (527, 276).
-        let mv = parse_touch_report(&[0, 1, 0x0f, 0x02, 0x14, 0x01, 1, 0, 0, 0, 0, 0], &mut touching)
-            .expect("motion");
+        let mv = parse_touch_report(
+            &[0, 1, 0x0f, 0x02, 0x14, 0x01, 1, 0, 0, 0, 0, 0],
+            &mut touching,
+        )
+        .expect("motion");
         assert!(matches!(mv.event_type, TouchEventType::Motion));
         assert_eq!((mv.x, mv.y), (527.0, 276.0));
 
         // tip=0 -> Up (a real lift-off report).
-        let up = parse_touch_report(&[0, 0, 0xe9, 0x02, 0xba, 0x01, 1, 0, 0, 0, 0, 0], &mut touching)
-            .expect("up");
+        let up = parse_touch_report(
+            &[0, 0, 0xe9, 0x02, 0xba, 0x01, 1, 0, 0, 0, 0, 0],
+            &mut touching,
+        )
+        .expect("up");
         assert!(matches!(up.event_type, TouchEventType::Up));
         assert!(!touching);
 

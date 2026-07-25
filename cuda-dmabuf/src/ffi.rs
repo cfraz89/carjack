@@ -144,8 +144,7 @@ unsafe extern "C" {
 
 // ---------- EGL extension entry points (fetched via eglGetProcAddress) ----------
 
-type EglGetPlatformDisplayExtFn =
-    unsafe extern "C" fn(u32, *mut c_void, *const i32) -> *mut c_void;
+type EglGetPlatformDisplayExtFn = unsafe extern "C" fn(u32, *mut c_void, *const i32) -> *mut c_void;
 type EglCreateImageKhrFn =
     unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *mut c_void, *const i32) -> *mut c_void;
 type EglDestroyImageKhrFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> u32;
@@ -176,12 +175,12 @@ impl EglExt {
                 get_platform_display: std::mem::transmute::<*mut c_void, EglGetPlatformDisplayExtFn>(
                     get_ext(b"eglGetPlatformDisplayEXT\0")?,
                 ),
-                create_image: std::mem::transmute::<*mut c_void, EglCreateImageKhrFn>(
-                    get_ext(b"eglCreateImageKHR\0")?,
-                ),
-                destroy_image: std::mem::transmute::<*mut c_void, EglDestroyImageKhrFn>(
-                    get_ext(b"eglDestroyImageKHR\0")?,
-                ),
+                create_image: std::mem::transmute::<*mut c_void, EglCreateImageKhrFn>(get_ext(
+                    b"eglCreateImageKHR\0",
+                )?),
+                destroy_image: std::mem::transmute::<*mut c_void, EglDestroyImageKhrFn>(get_ext(
+                    b"eglDestroyImageKHR\0",
+                )?),
             })
         }
     }
