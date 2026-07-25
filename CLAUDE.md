@@ -104,9 +104,15 @@ Both share `establish_carplay`
 only in the video source and where touch goes.
 
 Desktop mode (`src/portal.rs`, ashpd): `start_remote_desktop` opens a portal
-ScreenCast + RemoteDesktop session once at startup (consent dialog first run;
-`PersistMode::Application` remembers it) and yields a PipeWire node id;
-`encode::encode_pipewire_to_channel` scales/re-times it to the car (unlike the
+ScreenCast + RemoteDesktop session once at startup and yields a PipeWire node id.
+Consent is prompted only on the first run: `PersistMode::Application` **plus** a
+restore token, saved to `~/.local/state/carjack/portal-restore-token` (0600) and
+passed back to *both* `select_devices` and `select_sources` next run - the persist
+mode alone persists nothing, and the screencast half needs its own token or the
+source picker reappears every launch. Portals may rotate the token, so whatever
+`Start` returns is re-saved each session; a token the portal rejects is deleted
+and the session retried once (prompting). Delete that file to force a fresh
+consent dialog. `encode::encode_pipewire_to_channel` scales/re-times it to the car (unlike the
 internal path - the desktop isn't the car's resolution), and touch is injected
 back via `RemoteDesktop::notify_touch_*`. `[graphics] zerocopy` picks the encode
 path (`build_pipewire_encode`) **based on the GPU that renders the desktop** - so
