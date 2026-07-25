@@ -13,6 +13,7 @@ edition = "2024"
 name = "carjack"
 version = "0.1.0"
 edition.workspace = true
+default-run = "carjack"
 
 [dependencies]
 nmrs = "3.4.0"
@@ -60,3 +61,9 @@ clap = { version = "4.6.2", features = ["derive"] }
 serde_json = "1.0.151"
 ashpd = { version = "0.13", default-features = false, features = ["remote_desktop", "screencast", "tokio"] }
 zbus = { version = "5.18.0", features = ["tokio"] }
+
+# Agent-facing driver for the `run-carjack` skill: brings the compositor up and writes a frame to
+# PNG. Lives beside the skill it documents rather than in `examples/` so the pair stays together.
+[[example]]
+name = "screenshot"
+path = ".claude/skills/run-carjack/screenshot.rs"

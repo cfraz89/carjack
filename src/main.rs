@@ -102,6 +102,15 @@ async fn main() -> Result<()> {
 
     let config = Config::load(&Cli::parse())?;
 
+    // Fail fast and loudly: without a target there is nothing to connect to, and carjack no longer
+    // guesses one. Checked here so both source paths get it before any GPU/compositor setup.
+    if config.bluetooth_device().is_none() {
+        return Err(eyre!(
+            "no head unit configured - set [bluetooth] device (its MAC or advertised name) in \
+             config.toml, or pass --bt-device, or set CARJACK.BLUETOOTH.DEVICE"
+        ));
+    }
+
     match config.source {
         Source::App => run_app(config).await,
         Source::Desktop => run_desktop(config).await,
@@ -125,7 +134,10 @@ async fn run_app(config: Config) -> Result<()> {
     // zerocopy=auto falls back to software, or zerocopy=true errors out).
     let render_node = carjack::config::resolve_render_node(&config.graphics.drm_device)?;
     let backend = encode::resolve_backend(config.graphics.zerocopy, &render_node)?;
-    tracing::info!("Render node: {render_node}, encode backend: {}", backend.describe());
+    tracing::info!(
+        "Render node: {render_node}, encode backend: {}",
+        backend.describe()
+    );
 
     // If we've seen a car before, start the compositor at its cached resolution rather than the
     // config default - so the app (even a non-resizable one like Waydroid) can boot at the right
@@ -134,10 +146,19 @@ async fn run_app(config: Config) -> Result<()> {
     let cached = cache.last_props();
     let (start_w, start_h, start_fps) = match cached {
         Some(p) => (p.width, p.height, p.fps),
-        None => (config.display.width, config.display.height, config.display.fps),
+        None => (
+            config.display.width,
+            config.display.height,
+            config.display.fps,
+        ),
     };
-    let compositor =
-        Compositor::start(render_node, backend.is_zero_copy(), start_w, start_h, start_fps)?;
+    let compositor = Compositor::start(
+        render_node,
+        backend.is_zero_copy(),
+        start_w,
+        start_h,
+        start_fps,
+    )?;
     let mut app = DesktopApp::new(
         config.desktop_command().to_owned(),
         compositor.socket_name.clone(),
@@ -203,6 +224,7 @@ async fn run_desktop(config: Config) -> Result<()> {
     );
     // `[graphics] zerocopy` here selects the desktop encode path: GL (GPU) vs software convert.
     let zerocopy = config.graphics.zerocopy;
+    let bt_device = config.bluetooth_device().unwrap_or_default().to_owned();
 
     loop {
         tokio::select! {
@@ -210,7 +232,7 @@ async fn run_desktop(config: Config) -> Result<()> {
                 tracing::info!("Ctrl-C received, shutting down");
                 return Ok(());
             }
-            result = run_desktop_session(&rd, zerocopy) => {
+            result = run_desktop_session(&rd, zerocopy, &bt_device) => {
                 match result {
                     Ok(()) => {
                         tracing::info!("Session ended cleanly, exiting");
@@ -243,7 +265,7 @@ struct Established {
 
 /// Run the Bluetooth -> WiFi -> AirPlay flow and return once AirPlay is connected (so the caller
 /// knows the car's display and can wire up the video source + input). Shared by both source modes.
-async fn establish_carplay() -> Result<Established> {
+async fn establish_carplay(bt_device: &str) -> Result<Established> {
     let (touch_tx, touch_rx) = mpsc::channel::<TouchEvent>(64);
     let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCredentials>(4);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
@@ -260,7 +282,11 @@ async fn establish_carplay() -> Result<Established> {
     // AbortOnDropHandle guarantees the task (and its BlueZ resources) is torn down when the
     // returned handle is dropped (e.g. before a session restart) rather than detached.
     let mut carplay_handle = AbortOnDropHandle::new(tokio::spawn(wireless_carplay(
-        wifi_tx, ready_tx, bt_mac_tx, car_addr_tx,
+        bt_device.to_owned(),
+        wifi_tx,
+        ready_tx,
+        bt_mac_tx,
+        car_addr_tx,
     )));
 
     let mut wifi_handle: Option<tokio::task::JoinHandle<Result<CarWifi>>> = None;
@@ -322,7 +348,13 @@ async fn establish_carplay() -> Result<Established> {
 
     // Connect AirPlay to learn the car's display size + refresh.
     let conn = libcarjack::airplay::connect_airplay(peer_addr, remote_homekit_id).await?;
-    Ok(Established { conn, carplay_handle, touch_tx, touch_rx, car_addr_rx })
+    Ok(Established {
+        conn,
+        carplay_handle,
+        touch_tx,
+        touch_rx,
+        car_addr_rx,
+    })
 }
 
 /// `source = app`: reconfigure the compositor to the car's display, encode its frames, and
@@ -334,8 +366,13 @@ async fn run_session(
     app: &mut DesktopApp,
     cache: &mut DisplayCache,
 ) -> Result<()> {
-    let Established { conn, mut carplay_handle, touch_tx, mut touch_rx, car_addr_rx } =
-        establish_carplay().await?;
+    let Established {
+        conn,
+        mut carplay_handle,
+        touch_tx,
+        mut touch_rx,
+        car_addr_rx,
+    } = establish_carplay(config.bluetooth_device().unwrap_or_default()).await?;
 
     // Reconfigure the already-running compositor (and its client) to exactly match the car's size
     // and rate - so it renders at the car's resolution, no scaling needed downstream.
@@ -430,9 +467,15 @@ async fn run_session(
 async fn run_desktop_session(
     rd: &portal::RemoteDesktopStream,
     zerocopy: carjack::config::ZeroCopyMode,
+    bt_device: &str,
 ) -> Result<()> {
-    let Established { conn, mut carplay_handle, touch_tx, mut touch_rx, car_addr_rx: _ } =
-        establish_carplay().await?;
+    let Established {
+        conn,
+        mut carplay_handle,
+        touch_tx,
+        mut touch_rx,
+        car_addr_rx: _,
+    } = establish_carplay(bt_device).await?;
     let (width, height) = (conn.width, conn.height);
     tracing::info!("Streaming desktop to car at {width}x{height}");
     // The portal maps touch in *logical* coords, but pipewiresrc reports *physical* pixels - divide
@@ -448,10 +491,16 @@ async fn run_desktop_session(
     // queue) keeps latency low - a deep buffer just fills once and adds a permanent delay.
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(4);
     // The encoder reports the desktop's real frame size here; touch is scaled from car space to it.
-    let (desktop_size_tx, desktop_size_rx) = tokio::sync::watch::channel::<Option<(u32, u32)>>(None);
+    let (desktop_size_tx, desktop_size_rx) =
+        tokio::sync::watch::channel::<Option<(u32, u32)>>(None);
     let node_id = rd.node_id();
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_pipewire_to_channel(
-        node_id, width, height, zerocopy, video_tx, desktop_size_tx,
+        node_id,
+        width,
+        height,
+        zerocopy,
+        video_tx,
+        desktop_size_tx,
     )));
     let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx);
     tokio::pin!(video);

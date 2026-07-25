@@ -1,130 +1,126 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     time::Duration,
 };
 
-use backon::{ConstantBuilder, Retryable};
+use backon::{ConstantBuilder, ExponentialBuilder, Retryable, RetryableWithContext};
 use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
-    Device, DiscoveryFilter, Session,
+    Address, Device, DiscoveryFilter, Session,
     adv::{Advertisement, Type},
     agent::Agent,
-    rfcomm::{self, Role},
+    rfcomm::{self, ConnectRequest, ProfileHandle, Role},
 };
 use eyre::{Result, eyre};
-use futures::FutureExt;
-use iap2_proto::{config::LinkConfig, error::Iap2Error, iap2::Iap2};
+use futures::Stream;
+use iap2_proto::iap2::Iap2;
+use libcarjack::carplay;
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
     carplay_session::WifiCredentials,
-    uuid::{
-        CARPLAY_ACCESSORY_UUID, CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID, IAP2_UUID,
-    },
+    uuid::{CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID, IAP2_UUID},
 };
+use tap::{Tap, TapFallible};
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::StreamExt;
-use uuid::Uuid;
+use tokio_stream::{StreamExt, adapters::Merge};
+use tokio_util::task::AbortOnDropHandle;
 
-use libcarjack::carplay;
+const IAP_CHANNEL: u16 = 1;
 
-const IAP_CHANNEL: u16 = 19;
+/// How long to wait for the configured head unit to show up in discovery before giving up on this
+/// session. The caller retries, so this only bounds a single attempt.
+const DISCOVERY_WAIT: Duration = Duration::from_secs(60);
 
+// fn generate_iap2_sdp() -> String {
+//     format!(
+//         r#"<?xml version="1.0" encoding="UTF-8" ?>
+// <record>
+//     <attribute id="0x0001">
+//         <sequence>
+//             <uuid value="{}"/>
+//         </sequence>
+//     </attribute>
+//     <attribute id="0x0004">
+//         <sequence>
+//             <sequence>
+//                 <uuid value="0x0100"/>
+//             </sequence>
+//             <sequence>
+//                 <uuid value="0x0003"/>
+//                 <uint8 value="{}"/>
+//             </sequence>
+//         </sequence>
+//     </attribute>
+//     <attribute id="0x0009">
+//         <sequence>
+//             <sequence>
+//                 <uuid value="0x1101"/>
+//                 <uint16 value="0x0102"/>
+//             </sequence>
+//         </sequence>
+//     </attribute>
+//     <attribute id="0x0005">
+//         <sequence>
+//             <uuid value="0x1002"/>
+//         </sequence>
+//     </attribute>
+//     <attribute id="0x0008">
+//         <uint8 value="0xFF"/>
+//     </attribute>
+//     <attribute id="0x0100">
+//         <text value="Wireless iAP"/>
+//     </attribute>
+// </record>"#,
+//         IAP_ACCESSORY_UUID, IAP_CHANNEL
+//     )
+// }
 
-fn generate_iap2_sdp() -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8" ?>
-<record>
-    <attribute id="0x0001">
-        <sequence>
-            <uuid value="{}"/>
-        </sequence>
-    </attribute>
-    <attribute id="0x0004">
-        <sequence>
-            <sequence>
-                <uuid value="0x0100"/>
-            </sequence>
-            <sequence>
-                <uuid value="0x0003"/>
-                <uint8 value="{}"/>
-            </sequence>
-        </sequence>
-    </attribute>
-    <attribute id="0x0009">
-        <sequence>
-            <sequence>
-                <uuid value="0x1101"/>
-                <uint16 value="0x0102"/>
-            </sequence>
-        </sequence>
-    </attribute>
-    <attribute id="0x0005">
-        <sequence>
-            <uuid value="0x1002"/>
-        </sequence>
-    </attribute>
-    <attribute id="0x0008">
-        <uint8 value="0xFF"/>
-    </attribute>
-    <attribute id="0x0100">
-        <text value="Wireless iAP"/>
-    </attribute>
-</record>"#,
-        IAP_ACCESSORY_UUID, IAP_CHANNEL
-    )
+fn bin_path() -> Option<OsString> {
+    let current_exe = std::env::current_exe()
+        .tap_err(|e| tracing::warn!("Unable to get path of current binary: {e}"))
+        .ok()?;
+    let path = std::env::var_os("PATH")?;
+    let paths = std::env::split_paths(&path)
+        .chain(std::iter::once(current_exe.parent()?.to_path_buf()))
+        .tap(|i| tracing::trace!(paths = ?i, "paths"));
+    std::env::join_paths(paths)
+        .tap_err(|e| tracing::warn!("Unable to join paths: {e}"))
+        .ok()
 }
 
-
-const CARPLAY_HCI_CLASS: [u8; 2] = [0x20, 0x04];
-
-async fn apply_carplay_hci_hacks(adapter_index: u16) {
-    // Adding the CarPlay UUID to the BR/EDR EIR needs a raw HCI mgmt socket, which needs
-    // CAP_NET_ADMIN. We keep that capability OFF the main process (a capability-carrying process
-    // is /proc-locked to root under fs.suid_dumpable=2, which stops xdg-desktop-portal from
-    // introspecting us in desktop mode) and instead exec a tiny setcap'd helper binary that does
-    // just this one thing and exits. Best-effort: warn and continue if it isn't there / fails.
-    match run_btmgmt_helper(adapter_index).await {
-        Ok(()) => tracing::debug!("Added CarPlay EIR UUID to BR/EDR adapter"),
-        Err(e) => tracing::warn!(
-            ?e,
-            "Failed to add CarPlay EIR UUID (helper unavailable / needs cap_net_admin), continuing"
-        ),
-    }
-}
-
-/// Exec the `carjack-btmgmt` sidecar (found next to our own binary) to add the CarPlay EIR UUID.
-/// The sidecar carries `cap_net_admin`; we don't.
+/// Exec the `carjack-btmgmt` sidecar (found next to our own binary) to apply the BR/EDR mgmt tweaks
+/// (add the CarPlay EIR UUID and set an iPhone-like Class of Device). The sidecar carries
+/// `cap_net_admin`; we don't.
 async fn run_btmgmt_helper(adapter_index: u16) -> Result<()> {
-    let exe = std::env::current_exe()?;
-    let helper = exe
-        .parent()
-        .ok_or_else(|| eyre!("current exe has no parent dir"))?
-        .join("carjack-btmgmt");
-    let status = tokio::process::Command::new(&helper)
+    let status = tokio::process::Command::new("carjack-btmgmt")
         .arg(adapter_index.to_string())
+        .env("PATH", bin_path().unwrap_or_default())
         .status()
-        .await
-        .map_err(|e| eyre!("failed to spawn {}: {e}", helper.display()))?;
+        .await?;
     if !status.success() {
         return Err(eyre!("carjack-btmgmt exited with {status}"));
     }
     Ok(())
+}
 
-    // // Set Class of Device to match CarPlay accessory (catplay sends [0x20, 0x04], reversed)
-    // let mut class = CARPLAY_HCI_CLASS;
-    // class.reverse();
-    // if let Err(e) = send_mgmt_command(adapter_index, MGMT_OP_SET_DEV_CLASS, &class).await {
-    //     tracing::warn!(
-    //         ?e,
-    //         "Failed to set CarPlay device class (may need root), continuing"
-    //     );
-    // } else {
-    //     tracing::debug!("Set CarPlay device class");
-    // }
+async fn start_iap2(
+    profiles: &mut (impl Stream<Item = ConnectRequest> + Unpin),
+) -> Result<Iap2<bluer::rfcomm::Stream>> {
+    let rq = profiles
+        .next()
+        .await
+        .ok_or(eyre!("iAP2 profile stream closed"))?;
+    tracing::debug!("Got connect request");
+    let stream = rq.accept()?;
+    tracing::debug!("Establishing iAP2 link");
+    let iap2 = Iap2::start(stream).await?;
+    Ok(iap2)
 }
 
 pub async fn wireless_carplay(
+    target: String,
     wifi_tx: mpsc::Sender<WifiCredentials>,
     ready_tx: oneshot::Sender<()>,
     bt_mac_tx: oneshot::Sender<String>,
@@ -149,16 +145,20 @@ pub async fn wireless_carplay(
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(0);
     tracing::trace!("Applying hci hacks");
-    apply_carplay_hci_hacks(adapter_index).await;
+    //We need cap_net_admin to write to the hci socket directly.
+    //However adding that cap to this process is probably a security liability, and breaks
+    //xdg-desktop-portal. So we offload the work to a seperate binary.
+    run_btmgmt_helper(adapter_index).await?;
 
-    let sdp_record = generate_iap2_sdp();
+    // let sdp_record = generate_iap2_sdp();
     let iap_accessory_handle = session
         .register_profile(rfcomm::Profile {
             uuid: IAP_ACCESSORY_UUID,
             name: Some(String::from("Wireless iAP")),
             role: Some(Role::Client),
-            auto_connect: Some(true),
+            auto_connect: Some(false),
             require_authentication: Some(true),
+            require_authorization: Some(false),
             ..Default::default()
         })
         .await?;
@@ -168,7 +168,7 @@ pub async fn wireless_carplay(
             name: Some(String::from("Wireless iAP")),
             role: Some(Role::Server),
             channel: Some(IAP_CHANNEL),
-            service_record: Some(sdp_record),
+            // service_record: Some(sdp_record),
             require_authentication: Some(true),
             require_authorization: Some(false),
             ..Default::default()
@@ -188,7 +188,7 @@ pub async fn wireless_carplay(
         })
         .await;
 
-    let device = pair_available_accessory(&adapter).await?;
+    let device = find_target_device(&adapter, &target).await?;
     // Surface the car's MAC (known now, early) so the caller can look up its cached display and
     // size the compositor / launch the app before AirPlay reports the display.
     let _ = car_addr_tx.send(device.address().to_string());
@@ -199,57 +199,64 @@ pub async fn wireless_carplay(
     }
 
     tracing::debug!("Waiting for iAP2 connection requests");
-    let mut profiles = iap_accessory_handle.merge(iap_device_handle);
-    let acceptance = tokio::spawn(async move {
-        match profiles.next().await {
-            Some(rq) => {
-                tracing::info!("Got connect request");
-                let stream = rq.accept().map_err(|e| std::io::Error::from(e))?;
-                Ok((stream, profiles))
-            }
-            None => Err(Iap2Error::ChannelClosed),
-        }
-    });
+    let profiles = iap_accessory_handle.merge(iap_device_handle);
 
-    (|| async {
-        tokio::time::timeout(
-            Duration::from_secs(3),
+    // Dial the car's iAP profile in the background. This must NOT gate the inbound path: on the
+    // MYCAR the *car* opens the iAP RFCOMM channel to us and speaks first, and an iPhone's own
+    // outbound dial to the car gets DISCed (confirmed in iphonemycarcarplay.pklg). Awaiting the
+    // retry loop here used to stall us for up to ~140s - long past the ~200ms the car allows for
+    // the FF 55 echo - so the connection we actually want was dead before we ever read from it.
+    // let outbound_device = device.clone();
+    // let _outbound = AbortOnDropHandle::new(tokio::spawn(async move {
+    //     (|| async {
+    //         tokio::time::timeout(
+    //             Duration::from_secs(3),
+    //             outbound_device
+    //                 .connect_profile(&IAP_ACCESSORY_UUID)
+    //                 .map(|r| match r {
+    //                     Ok(()) => Ok(()),
+    //                     Err(e) if e.kind == bluer::ErrorKind::AlreadyConnected => {
+    //                         tracing::info!("Accessory profile already connected, proceeding");
+    //                         Ok(())
+    //                     }
+    //                     Err(e) => Err(eyre!(e)),
+    //                 }),
+    //         )
+    //         .await?
+    //     })
+    //     .retry(
+    //         ConstantBuilder::new()
+    //             .with_delay(Duration::from_millis(2000))
+    //             .with_max_times(OUTBOUND_CONNECT_ATTEMPTS),
+    //     )
+    //     .await
+    //     .unwrap_or_else(|e| {
+    //         tracing::warn!("Connecting profile failed with {e}, inbound path continues.");
+    //     });
+    // }));
+
+    let iap2_connect_task = tokio::spawn(async {
+        (|mut profiles: Merge<ProfileHandle, ProfileHandle>| async {
+            let res = start_iap2(&mut profiles).await;
+            (profiles, res)
+        })
+        .retry(ConstantBuilder::new().without_max_times())
+        .context(profiles)
+        .await
+    });
+    let accessory_profile_connect_task = AbortOnDropHandle::new(tokio::spawn(async move {
+        (async || {
             device
                 .connect_profile(&IAP_ACCESSORY_UUID)
-                .map(|r| match r {
-                    Ok(()) => Ok(()),
-                    Err(e) if e.kind == bluer::ErrorKind::AlreadyConnected => {
-                        tracing::info!("Accessory profile already connected, proceeding");
-                        Ok(())
-                    }
-                    Err(e) => Err(eyre!(e)),
-                }),
-        )
-        .await?
-    })
-    .retry(
-        ConstantBuilder::new()
-            .with_delay(Duration::from_millis(500))
-            .with_max_times(40),
-    )
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!("Connecting profile failed with {e}, proceeding anyway.");
-    });
+                .await
+                .tap_err(|e| tracing::warn!(e = ?e, "Unable to connect to accessory profile"))
+        })
+        .retry(ExponentialBuilder::new().without_max_times())
+        .await
+    }));
 
-    let (stream, _profiles) = match tokio::time::timeout(Duration::from_secs(30), acceptance).await
-    {
-        Ok(joined) => joined??,
-        Err(_) => {
-            return Err(eyre!(
-                "Timed out waiting for accessory Bluetooth connection"
-            ));
-        }
-    };
-    tracing::debug!("Establishing iAP2 link");
-
-    let iap2 = Iap2::start(stream, LinkConfig::default()).await?;
-
+    let iap2 = iap2_connect_task.await?.1?;
+    accessory_profile_connect_task.abort();
     tracing::debug!("iAP2 link established");
     carplay::run_carplay_session(iap2, wifi_tx, ready_tx).await?;
     tracing::debug!("iAP lifecycle ended");
@@ -277,66 +284,84 @@ async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::Advertis
 //     async fn stop_discovery(&self) -> zbus::Result<()>;
 // }
 
-async fn pair_available_accessory(adapter: &Adapter) -> Result<Device> {
-    //This ensures we aren't already discovering when we start the process
-    // let connection = zbus::Connection::system().await?;
-    // let proxy = BluezProxy::new(&connection).await?;
-    // proxy.stop_discovery().await?;
+/// Resolve the configured head unit and get it ready to connect.
+///
+/// carjack connects to exactly the device named in `[bluetooth] device` - given as a MAC or as the
+/// advertised name. There is deliberately no survey-and-guess step: choosing a device by scoring
+/// cached BlueZ properties is what sent carjack paging a powered-off head unit it still held a
+/// stale bond for, while the real one sat discovered and ignored (`mycar_4.pcapng`).
+async fn find_target_device(adapter: &Adapter, target: &str) -> Result<Device> {
+    let wanted: Option<Address> = target.parse().ok();
+
+    // Whatever BlueZ already knows about (bonded from a previous run, or currently connected).
+    for addr in adapter.device_addresses().await? {
+        let device = adapter.device(addr)?;
+        if device_matches(&device, target, wanted).await {
+            tracing::info!(%target, ?addr, "Found configured head unit in BlueZ's device list");
+            return prepare_device(device).await;
+        }
+    }
+
+    // Otherwise wait for it to show up. This is discovery aimed at one known target, not a survey:
+    // every device that isn't the configured one is ignored outright.
     adapter
         .set_discovery_filter(DiscoveryFilter {
             discoverable: true,
             transport: bluer::DiscoveryTransport::BrEdr,
-            uuids: [CARPLAY_ACCESSORY_UUID].into(),
             rssi: Some(-100),
             ..DiscoveryFilter::default()
         })
         .await?;
-
-    tracing::info!("Looking for compatible devices...");
-
-    // An already-paired/connected accessory (e.g. it auto-reconnected from a prior session)
-    // never fires a fresh DeviceAdded event, so check the devices BlueZ already knows first.
-    for addr in adapter.device_addresses().await? {
-        let device = adapter.device(addr)?;
-        if is_candidate_accessory(&device).await && try_prepare_accessory(&device).await {
-            return Ok(device);
-        }
-    }
+    tracing::info!(%target, "Waiting for the configured head unit to appear");
 
     let mut device_events = adapter.discover_devices_with_changes().await?;
-    while let Some(event) = device_events.next().await {
-        let DeviceAdded(addr) = event else { continue };
-        let device = adapter.device(addr)?;
-        if is_candidate_accessory(&device).await && try_prepare_accessory(&device).await {
-            return Ok(device);
+    let found = tokio::time::timeout(DISCOVERY_WAIT, async {
+        while let Some(event) = device_events.next().await {
+            let DeviceAdded(addr) = event else { continue };
+            let device = adapter.device(addr)?;
+            if device_matches(&device, target, wanted).await {
+                return Ok(device);
+            }
         }
+        Err(eyre!(
+            "Bluetooth discovery ended without finding '{target}'"
+        ))
+    })
+    .await
+    .map_err(|_| eyre!("Timed out waiting for Bluetooth device '{target}'"))??;
+
+    tracing::info!(%target, address = ?found.address(), "Discovered configured head unit");
+    prepare_device(found).await
+}
+
+/// Whether this device is the configured target, by address if the selector parsed as a MAC,
+/// otherwise by advertised name.
+async fn device_matches(device: &Device, target: &str, wanted: Option<Address>) -> bool {
+    match wanted {
+        Some(addr) => device.address() == addr,
+        None => device.alias().await.map(|a| a == target).unwrap_or(false),
     }
-    Err(eyre!("No more device events"))
 }
 
-/// Whether a device looks like our target CarPlay accessory (reachable and name-matching).
-async fn is_candidate_accessory(device: &Device) -> bool {
-    let reachable = device.rssi().await.ok().flatten().is_some()
-        || device.is_connected().await.unwrap_or(false);
-    reachable && matches_carplay_device(device).await.unwrap_or(true)
-}
-
-/// Log, pair (if needed) and trust the accessory. Returns whether it's ready to use.
-async fn try_prepare_accessory(device: &Device) -> bool {
+/// Pair (if needed) and trust the target, then hand it back.
+async fn prepare_device(device: Device) -> Result<Device> {
     let alias = device.alias().await.unwrap_or_default();
     let rssi = device.rssi().await.ok().flatten();
-    tracing::info!(name = alias, address = ?device.address(), rssi, "Attempting connection");
+    let class = device.class().await.ok().flatten();
+    tracing::info!(
+        name = alias,
+        address = ?device.address(),
+        rssi,
+        class = class.map(|c| format!("{c:#08x}")),
+        "Preparing configured head unit"
+    );
 
     if !device.is_paired().await.unwrap_or(false) {
+        // Not fatal: BlueZ often completes bonding as part of the profile connect that follows.
         if let Err(e) = device.pair().await {
-            tracing::warn!(?e, "Pairing failed, trying to proceed anyway");
+            tracing::warn!(?e, "Pairing failed, continuing to the connection attempt");
         }
     }
     let _ = device.set_trusted(true).await;
-    true
-}
-
-async fn matches_carplay_device(device: &Device) -> Result<bool> {
-    let carplay_device_name = std::env::var("CARPLAY_DEVICE_NAME")?;
-    Ok(device.alias().await? == carplay_device_name)
+    Ok(device)
 }

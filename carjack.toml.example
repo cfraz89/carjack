@@ -17,6 +17,16 @@
 #                intel-media-driver), then GL convert/scale, then software; false = software.
 source = "app"
 
+[bluetooth]
+# REQUIRED. The head unit to connect to, as either its Bluetooth MAC or its advertised name.
+# carjack connects to exactly this device and nothing else - it does not scan and guess, because
+# picking by cached BlueZ properties meant a powered-off head unit with a stale bond could win
+# over the one actually in the vehicle.
+#   device = "AA:BB:CC:DD:EE:FF"   # by MAC (exact, and survives a name change)
+#   device = "MYCAR-1234"       # by advertised name
+# Also settable as `carjack --bt-device <MAC|NAME>` or CARJACK.BLUETOOTH.DEVICE.
+device = "MYCAR-1234"
+
 [graphics]
 # Which GPU to render *and* encode on (they must be the same for zero-copy). One of:
 #   "auto"                  - pick automatically, preferring an encode-capable GPU

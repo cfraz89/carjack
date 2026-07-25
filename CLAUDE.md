@@ -28,6 +28,10 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   overridable by dotted `CARJACK.<config.path>` env vars (`.env` sets these; note
   the prefix separator is a dot, so `CARJACK.SOURCE`, `CARJACK.APP.COMMAND`) and
   launch flags (`carjack --help`); config module is `src/config.rs`.
+  **`[bluetooth] device` is required** - the head unit's MAC or advertised name
+  (`CARJACK.BLUETOOTH.DEVICE` / `--bt-device`). carjack connects to exactly that
+  device and errors out at startup if it isn't set; there is no scan-and-guess
+  fallback (see the note under the iAP2 section).
 - just test-run [timeout] - **use this instead of `just run`/bare `cargo run`
   for any live/manual testing.** carjack drives the real host NetworkManager and
   BlueZ over D-Bus - including from inside toolbox, which shares the host's
@@ -39,13 +43,29 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 - To exercise the compositor standalone without a car: `just test compositor`
   (the `tests/compositor.rs` integration test) brings it up, runs a client, and
   checks the composited frames contain client content and drive the encode path.
-  `CARJACK.APP.COMMAND` overrides the test client; `CARJACK_TEST_FRAMES` (read
-  directly, not via config) caps the frames sampled. It needs host GPU/DRM at runtime.
+  `CARJACK_DESKTOP_CMD` overrides the test client and `CARJACK_TEST_FRAMES` caps
+  the frames sampled - both read as bare env vars, *not* via config (so
+  `CARJACK.APP.COMMAND` does **not** affect the test; verified 2026-07-25).
+  It needs host GPU/DRM at runtime. Note the brightness assertion is vacuous in
+  zero-copy mode: dmabuf frames aren't CPU-readable so the test hardcodes
+  `max_brightness`, and a client that paints nothing still passes. To actually
+  see what gets composited use `/run-carjack` (`.claude/skills/run-carjack/`),
+  which forces the SHM path and writes a PNG.
+- To *see* carjack's output without a car: `.claude/skills/run-carjack/shot.sh
+  --out /tmp/carjack.png` - the `/run-carjack` skill. carjack has no window, so
+  this is the only way to eyeball what the car would receive.
 
 ## CarPlay / iAP2 protocol notes
 
 - WiFi connectivity is handled only via NetworkManager (`nmrs`) - there was a
   `nl80211.rs`/`iw` fallback path, it was removed; don't re-add it.
+- The target head unit is **configured, never auto-detected** (`[bluetooth]
+  device`, MAC or advertised name). `wireless::find_target_device` looks it up in
+  BlueZ's known devices, else waits for it in a discovery aimed at that one
+  device. The old scan-and-score selection was removed: BlueZ never clears a
+  bonded device's cached RSSI/UUIDs, so a powered-off head unit looked exactly
+  like a present one and won, leaving carjack paging a dead address (Page
+  Timeout) while the real unit sat discovered and ignored.
 - Two Bluetooth RFCOMM profiles are registered: `IAP_ACCESSORY_UUID`
   (`Role::Client`, `auto_connect=false`) and `IAP_DEVICE_UUID` (`Role::Server`,
   channel=1). `connect_profile(&IAP_ACCESSORY_UUID)` is what actually triggers
