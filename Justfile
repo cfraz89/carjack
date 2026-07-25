@@ -18,7 +18,7 @@ run +flags="": (build flags)
 
 #Run the app until timeout, then kill it and restore the original wifi connection
 [script('bash')]
-test-run timeout="60":
+test-run timeout="60": build
     set -uo pipefail
     original=""
     cleanup() {
@@ -36,8 +36,15 @@ test-run timeout="60":
     original=$(nmcli -t -f NAME,TYPE,ACTIVE connection show --active 2>/dev/null | awk -F: '$2!="loopback" && $3=="yes" {print $1; exit}')
     echo "Active connection before test: ${original:-none}" >&2
 
-    # `run` handles the toolbox re-exec itself now, so just call it directly.
-    timeout "{{timeout}}s" just run || true
+    # Deliberately NOT `just run` here: that re-runs the `build` recipe, whose `_setcap` step
+    # shells out to `run0`, and `run0` wants a PTY. `timeout` (without --foreground) puts its
+    # command in a *new process group*, which is a background group for the terminal - so a
+    # PTY-touching child there takes SIGTTIN/SIGTTOU and **stops**, wedging the terminal with
+    # Ctrl-C dead. Building as a recipe dependency keeps `run0` in the foreground group, and
+    # stops a cold compile from eating the timeout budget. Keep these two lines in sync with
+    # the `run` recipe above.
+    waydroid session stop || true
+    timeout --kill-after=5s "{{timeout}}s" cargo run < /dev/null || true
 
 build +flags="": && (_setcap flags)
     {{toolbox_build}}cargo build {{flags}} < /dev/null
