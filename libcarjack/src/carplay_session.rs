@@ -3,9 +3,7 @@ use iap2_proto::{
     error::Iap2Error,
     iap2::{Iap2, Stream},
     ops::{
-        control::{
-            ControlMessage, ControlMessageId, ControlMessageSet, GetParam, ParameterId,
-        },
+        control::{ControlMessage, ControlMessageId, ControlMessageSet, GetParam, ParameterId},
         ea::EaFrame,
     },
     packet::ControlByte,

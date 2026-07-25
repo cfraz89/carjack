@@ -92,7 +92,11 @@ async fn main() -> Result<()> {
 
     // Resolve the render node exactly the way `main` does, so this picks the same GPU carjack
     // would use. Everything else about the encode backend is irrelevant here.
-    let cfg = Config::load(&Cli::parse_from(["carjack", "--bt-device", "screenshot-unused"]))?;
+    let cfg = Config::load(&Cli::parse_from([
+        "carjack",
+        "--bt-device",
+        "screenshot-unused",
+    ]))?;
     let node = carjack::config::resolve_render_node(&cfg.graphics.drm_device)?;
     println!("render node: {node}");
 
@@ -167,7 +171,8 @@ async fn main() -> Result<()> {
     }
     drop(comp);
 
-    let (score, data, w, h) = best.ok_or_else(|| eyre!("no frames captured from the compositor"))?;
+    let (score, data, w, h) =
+        best.ok_or_else(|| eyre!("no frames captured from the compositor"))?;
     println!("captured {seen} frames, best sample-sum={score} at {w}x{h}");
     if score < 10_000 {
         println!(

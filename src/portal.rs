@@ -45,7 +45,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ScaleState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             if interface == "wl_output" {
                 // v2+ carries the `scale` event.
                 registry.bind::<wl_output::WlOutput, (), Self>(name, version.min(2), qh, ());
@@ -128,11 +133,7 @@ impl RemoteDesktopStream {
             }
             TouchEventType::Up => {
                 self.remote_desktop
-                    .notify_touch_up(
-                        &self.session,
-                        event.slot,
-                        NotifyTouchUpOptions::default(),
-                    )
+                    .notify_touch_up(&self.session, event.slot, NotifyTouchUpOptions::default())
                     .await?;
             }
         }
@@ -148,11 +149,17 @@ impl RemoteDesktopStream {
 /// stream's pixel space. The desktop is scaled *down* to the car's resolution for streaming, so
 /// touch has to be scaled back *up*. Passes through unchanged if the stream size is unknown or the
 /// car size is degenerate.
-fn scale_touch(x: f64, y: f64, stream_size: Option<(f64, f64)>, car_size: (u32, u32)) -> (f64, f64) {
+fn scale_touch(
+    x: f64,
+    y: f64,
+    stream_size: Option<(f64, f64)>,
+    car_size: (u32, u32),
+) -> (f64, f64) {
     match stream_size {
-        Some((sw, sh)) if car_size.0 > 0 && car_size.1 > 0 => {
-            (x * sw / f64::from(car_size.0), y * sh / f64::from(car_size.1))
-        }
+        Some((sw, sh)) if car_size.0 > 0 && car_size.1 > 0 => (
+            x * sw / f64::from(car_size.0),
+            y * sh / f64::from(car_size.1),
+        ),
         _ => (x, y),
     }
 }
@@ -177,10 +184,16 @@ mod tests {
         // 1080x600 car -> 1920x1080 desktop stream.
         let stream = Some((1920.0, 1080.0));
         // centre stays centre
-        assert_eq!(scale_touch(540.0, 300.0, stream, (1080, 600)), (960.0, 540.0));
+        assert_eq!(
+            scale_touch(540.0, 300.0, stream, (1080, 600)),
+            (960.0, 540.0)
+        );
         // corners map to the stream's corners
         assert_eq!(scale_touch(0.0, 0.0, stream, (1080, 600)), (0.0, 0.0));
-        assert_eq!(scale_touch(1080.0, 600.0, stream, (1080, 600)), (1920.0, 1080.0));
+        assert_eq!(
+            scale_touch(1080.0, 600.0, stream, (1080, 600)),
+            (1920.0, 1080.0)
+        );
         // unknown stream size or degenerate car size -> pass through
         assert_eq!(scale_touch(500.0, 250.0, None, (1080, 600)), (500.0, 250.0));
         assert_eq!(scale_touch(500.0, 250.0, stream, (0, 0)), (500.0, 250.0));

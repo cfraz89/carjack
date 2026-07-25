@@ -92,7 +92,11 @@ mod tests {
         let mut file = CacheFile::default();
         file.displays.insert(
             "AA:BB:CC:DD:EE:FF".into(),
-            DisplayProps { width: 1080, height: 600, fps: 30 },
+            DisplayProps {
+                width: 1080,
+                height: 600,
+                fps: 30,
+            },
         );
         file.last = Some("AA:BB:CC:DD:EE:FF".into());
         let json = serde_json::to_vec(&file).unwrap();
@@ -100,7 +104,11 @@ mod tests {
         assert_eq!(back.last.as_deref(), Some("AA:BB:CC:DD:EE:FF"));
         assert_eq!(
             back.displays.get("AA:BB:CC:DD:EE:FF"),
-            Some(&DisplayProps { width: 1080, height: 600, fps: 30 })
+            Some(&DisplayProps {
+                width: 1080,
+                height: 600,
+                fps: 30
+            })
         );
     }
 

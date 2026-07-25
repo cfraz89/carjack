@@ -1,6 +1,6 @@
+use crate::carplay_session::{CarplaySession, WifiCredentials};
 use eyre::Result;
 use iap2_proto::iap2::Iap2;
-use crate::carplay_session::{CarplaySession, WifiCredentials};
 use tokio::sync::{mpsc, oneshot};
 
 pub async fn run_carplay_session(

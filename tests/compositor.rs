@@ -7,14 +7,14 @@
 //! builds first, then `cargo test compositor`). `CARJACK_DESKTOP_CMD` overrides the test client
 //! to validate the real desktop app; `CARJACK_TEST_FRAMES` caps how many frames to sample.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use carjack::compositor::{CapturedFrame, Compositor};
 use carjack::config::{Cli, Config};
-use carjack::encode::{encode_h264_to_channel, resolve_backend, EncodeBackend};
+use carjack::encode::{EncodeBackend, encode_h264_to_channel, resolve_backend};
 use clap::Parser;
-use eyre::{eyre, Result};
+use eyre::{Result, eyre};
 use libcarjack::airplay::EncodedFrame;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
@@ -31,6 +31,11 @@ fn resolve_gpu() -> Result<(String, EncodeBackend)> {
 
 #[tokio::test]
 async fn compositor_frames_contain_client_content() -> Result<()> {
+    // The test (and the compositor/encode paths it drives) log via tracing; without a subscriber
+    // `cargo test -- --nocapture` shows nothing, including which encode backend was selected.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
     let (node, backend) = resolve_gpu()?;
     let comp = Compositor::start(node, backend.is_zero_copy(), 1280, 720, 30)?;
     tracing::info!("compositor started, socket={:?}", comp.socket_name);
@@ -62,7 +67,11 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
         while let Some(f) = video_rx.recv().await {
             let n = encoded2.fetch_add(1, Ordering::Relaxed) + 1;
             if n % 30 == 1 {
-                tracing::info!("encoded AU #{n} ({} bytes, keyframe={})", f.data.len(), f.config.is_some());
+                tracing::info!(
+                    "encoded AU #{n} ({} bytes, keyframe={})",
+                    f.data.len(),
+                    f.config.is_some()
+                );
             }
         }
     }));
@@ -71,7 +80,8 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
     let mut checked = 0;
     let mut max_brightness = 0u64;
     // ~30fps, so frames ≈ seconds*30. GPU clients like Waydroid take a while to boot.
-    let budget: u64 = std::env::var("CARJACK_TEST_FRAMES").ok()
+    let budget: u64 = std::env::var("CARJACK_TEST_FRAMES")
+        .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(90);
     while checked < budget {
@@ -83,7 +93,12 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
         };
         checked += 1;
         match &*frame {
-            CapturedFrame::Shm { data, width, height, .. } => {
+            CapturedFrame::Shm {
+                data,
+                width,
+                height,
+                ..
+            } => {
                 // Sample colour to confirm the client actually rendered (not just black clear).
                 // Sum only R/G/B per pixel - NOT the 4th (X) byte, which is opaque 255 padding
                 // in BGRx and would make even a pure-black frame score non-zero.
@@ -109,9 +124,17 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
     let _ = child.kill();
 
     let encoded_total = encoded.load(Ordering::Relaxed);
-    tracing::info!("compositor OK: {checked} frames reached the stream, {encoded_total} encoded AUs");
-    assert!(encoded_total > 0, "encoder produced no output - the encode pipeline didn't work");
-    assert!(max_brightness > 10_000, "frames stayed black - client never rendered into the compositor");
+    tracing::info!(
+        "compositor OK: {checked} frames reached the stream, {encoded_total} encoded AUs"
+    );
+    assert!(
+        encoded_total > 0,
+        "encoder produced no output - the encode pipeline didn't work"
+    );
+    assert!(
+        max_brightness > 10_000,
+        "frames stayed black - client never rendered into the compositor"
+    );
     Ok(())
 }
 
@@ -126,7 +149,11 @@ async fn reconfigure_switches_frame_size() -> Result<()> {
 
     // First frame should be at the start size.
     let start = wait_for_frame_size(&mut rx).await?;
-    assert_eq!(start, (1280, 720), "initial frame was not at the start size");
+    assert_eq!(
+        start,
+        (1280, 720),
+        "initial frame was not at the start size"
+    );
 
     // Reconfigure to a different size + refresh; frames must switch to it.
     comp.reconfigure(800, 480, 60)?;
@@ -150,7 +177,10 @@ async fn wait_for_frame_size(
 ) -> Result<(u32, u32)> {
     use smithay::backend::allocator::Buffer as _;
     rx.changed().await?;
-    let frame = rx.borrow_and_update().clone().ok_or_else(|| eyre!("frame was None"))?;
+    let frame = rx
+        .borrow_and_update()
+        .clone()
+        .ok_or_else(|| eyre!("frame was None"))?;
     Ok(match &*frame {
         CapturedFrame::Shm { width, height, .. } => (*width, *height),
         CapturedFrame::Dmabuf(d) => (d.width(), d.height()),

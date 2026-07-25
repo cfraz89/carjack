@@ -3,14 +3,17 @@ use std::time::{Duration, Instant};
 
 use catplay_carplay::ctrl::CarPlayCtrlServer;
 use catplay_util::EventSleeper;
-use eyre::{Result, eyre};
+use eyre::{eyre, Result};
 use uuid::Uuid;
 
 /// Advertise `_carplay-ctrl._tcp` via mDNS, wait for the car's `ctrl-int/1/connect` invite,
 /// and correlate it against the car's own `_airplay._tcp` Bonjour record to learn its real
 /// AirPlay address and HomeKit pairing id (rather than guessing the WiFi gateway IP and
 /// skipping HomeKit pair-verify fast-path).
-pub async fn wait_for_carplay_ctrl_probe(iface: &str, bonjour_id: &str) -> Result<(SocketAddr, Option<Uuid>)> {
+pub async fn wait_for_carplay_ctrl_probe(
+    iface: &str,
+    bonjour_id: &str,
+) -> Result<(SocketAddr, Option<Uuid>)> {
     const PORT: u16 = 8082;
 
     let mut ctrl_server = CarPlayCtrlServer::new(bonjour_id, PORT, iface)
@@ -22,13 +25,10 @@ pub async fn wait_for_carplay_ctrl_probe(iface: &str, bonjour_id: &str) -> Resul
 
     loop {
         if let Some(invite) = ctrl_server.pop_invite() {
-            let addr = invite
-                .entry
-                .meta
-                .addrs
-                .first()
-                .copied()
-                .ok_or_else(|| eyre!("CarPlay invite had no AirPlay address in Bonjour record"))?;
+            let addr =
+                invite.entry.meta.addrs.first().copied().ok_or_else(|| {
+                    eyre!("CarPlay invite had no AirPlay address in Bonjour record")
+                })?;
             tracing::info!(
                 "Got CarPlay ctrl invite; AirPlay peer at {addr}, pi={:?}",
                 invite.entry.data.pi

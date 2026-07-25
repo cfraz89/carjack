@@ -28,6 +28,7 @@ use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::backend::renderer::{Bind, ExportMem, ImportDma};
 use smithay::desktop::{PopupManager, Space, Window, WindowSurfaceType};
 use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
@@ -35,7 +36,9 @@ use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
-use smithay::reexports::calloop::{self, EventLoop, Interest, LoopSignal, Mode as CalloopMode, PostAction};
+use smithay::reexports::calloop::{
+    self, EventLoop, Interest, LoopSignal, Mode as CalloopMode, PostAction,
+};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_buffer;
@@ -62,7 +65,6 @@ use smithay::{
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat,
     delegate_shm, delegate_xdg_shell,
 };
-use smithay::backend::renderer::utils::on_commit_buffer_handler;
 
 /// One composited desktop frame for the encoder.
 pub enum CapturedFrame {
@@ -142,7 +144,14 @@ impl Compositor {
             .name("carjack-compositor".into())
             .spawn(move || {
                 if let Err(e) = run(
-                    render_node, zero_copy, width, height, fps, frame_tx, touch_rx, control_rx,
+                    render_node,
+                    zero_copy,
+                    width,
+                    height,
+                    fps,
+                    frame_tx,
+                    touch_rx,
+                    control_rx,
                     &ready_tx,
                 ) {
                     let _ = ready_tx.send(Err(e));
@@ -180,7 +189,12 @@ impl Compositor {
     pub fn reconfigure(&self, width: u32, height: u32, fps: u32) -> Result<bool> {
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
         self.control_tx
-            .send(ReconfigureRequest { width, height, fps, ack: ack_tx })
+            .send(ReconfigureRequest {
+                width,
+                height,
+                fps,
+                ack: ack_tx,
+            })
             .map_err(|e| eyre!("send reconfigure to compositor: {e}"))?;
         ack_rx
             .recv()
@@ -217,8 +231,7 @@ fn make_renderer(gbm: &RenderDevice) -> Result<GlesRenderer> {
     // is made current here and never shared across threads.
     let egl_display =
         unsafe { EGLDisplay::new(gbm.clone()) }.map_err(|e| eyre!("create EGLDisplay: {e}"))?;
-    let egl_context =
-        EGLContext::new(&egl_display).map_err(|e| eyre!("create EGLContext: {e}"))?;
+    let egl_context = EGLContext::new(&egl_display).map_err(|e| eyre!("create EGLContext: {e}"))?;
     let renderer =
         unsafe { GlesRenderer::new(egl_context) }.map_err(|e| eyre!("create GlesRenderer: {e}"))?;
     Ok(renderer)
@@ -307,14 +320,18 @@ impl State {
             // shares the fds; cycling the pool keeps us from overwriting a buffer the encoder
             // is still reading.
             let buf = self.render_pool[idx].clone();
-            let _ = self.frame_tx.send(Some(Arc::new(CapturedFrame::Dmabuf(buf))));
+            let _ = self
+                .frame_tx
+                .send(Some(Arc::new(CapturedFrame::Dmabuf(buf))));
             self.pool_idx = (idx + 1) % self.render_pool.len();
         } else {
             // Read the framebuffer back into system memory (GPU->CPU copy) - what the software
             // encode path needs. Works with any modifier (GL readback, not a dmabuf mmap).
-            let region =
-                Rectangle::<i32, BufferCoord>::from_size((self.width, self.height).into());
-            match self.renderer.copy_framebuffer(&fb, region, Fourcc::Argb8888) {
+            let region = Rectangle::<i32, BufferCoord>::from_size((self.width, self.height).into());
+            match self
+                .renderer
+                .copy_framebuffer(&fb, region, Fourcc::Argb8888)
+            {
                 Ok(mapping) => match self.renderer.map_texture(&mapping) {
                     Ok(bytes) => {
                         let _ = self.frame_tx.send(Some(Arc::new(CapturedFrame::Shm {
@@ -336,7 +353,9 @@ impl State {
         let now = self.start_time.elapsed();
         let output = self.output.clone();
         self.space.elements().for_each(|window| {
-            window.send_frame(&output, now, Some(Duration::ZERO), |_, _| Some(output.clone()))
+            window.send_frame(&output, now, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            })
         });
         self.space.refresh();
         self.popups.cleanup();
@@ -347,10 +366,18 @@ impl State {
     /// after startup). Reallocates the render pool at the new size, updates the output mode + the
     /// render-timer period, and reconfigures mapped clients to the new fullscreen size. Runs on
     /// the compositor thread. Returns the error as a `String` so it can cross the ack channel.
-    fn reconfigure(&mut self, width: u32, height: u32, fps: u32) -> std::result::Result<bool, String> {
+    fn reconfigure(
+        &mut self,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> std::result::Result<bool, String> {
         let fps = if fps == 0 { TARGET_FPS as u32 } else { fps };
         let frame_interval = Duration::from_micros(1_000_000 / fps as u64);
-        if self.width == width as i32 && self.height == height as i32 && self.frame_interval == frame_interval {
+        if self.width == width as i32
+            && self.height == height as i32
+            && self.frame_interval == frame_interval
+        {
             return Ok(false); // already at these parameters
         }
         tracing::info!("compositor: reconfiguring to {width}x{height} @ {fps}fps");
@@ -373,9 +400,16 @@ impl State {
         self.frame_interval = frame_interval;
 
         // Update the output mode (size + refresh) and rebuild the size-specific damage tracker.
-        let mode = Mode { size: (width as i32, height as i32).into(), refresh: fps as i32 * 1000 };
-        self.output
-            .change_current_state(Some(mode), Some(Transform::Normal), None, Some((0, 0).into()));
+        let mode = Mode {
+            size: (width as i32, height as i32).into(),
+            refresh: fps as i32 * 1000,
+        };
+        self.output.change_current_state(
+            Some(mode),
+            Some(Transform::Normal),
+            None,
+            Some((0, 0).into()),
+        );
         self.output.set_preferred(mode);
         self.damage_tracker = OutputDamageTracker::from_output(&self.output);
 
@@ -411,13 +445,36 @@ impl State {
         match event.event_type {
             TouchEventType::Down => {
                 let focus = self.surface_under(loc);
-                tracing::debug!("inject_touch DOWN slot={} ({},{}) focus={}", event.slot, event.x, event.y, focus.is_some());
-                touch.down(self, focus, &DownEvent { slot, location: loc, serial, time });
+                tracing::debug!(
+                    "inject_touch DOWN slot={} ({},{}) focus={}",
+                    event.slot,
+                    event.x,
+                    event.y,
+                    focus.is_some()
+                );
+                touch.down(
+                    self,
+                    focus,
+                    &DownEvent {
+                        slot,
+                        location: loc,
+                        serial,
+                        time,
+                    },
+                );
                 touch.frame(self);
             }
             TouchEventType::Motion => {
                 let focus = self.surface_under(loc);
-                touch.motion(self, focus, &MotionEvent { slot, location: loc, time });
+                touch.motion(
+                    self,
+                    focus,
+                    &MotionEvent {
+                        slot,
+                        location: loc,
+                        time,
+                    },
+                );
                 touch.frame(self);
             }
             TouchEventType::Up => {
@@ -428,11 +485,13 @@ impl State {
     }
 
     fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
-        self.space.element_under(pos).and_then(|(window, location)| {
-            window
-                .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                .map(|(s, p)| (s, (p + location).to_f64()))
-        })
+        self.space
+            .element_under(pos)
+            .and_then(|(window, location)| {
+                window
+                    .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                    .map(|(s, p)| (s, (p + location).to_f64()))
+            })
     }
 }
 
@@ -486,9 +545,20 @@ fn run(
         let gbm_buffer = allocator
             .create_buffer(width, height, Fourcc::Argb8888, &modifiers)
             .map_err(|e| eyre!("allocate render buffer: {e}"))?;
-        render_pool.push(gbm_buffer.export().map_err(|e| eyre!("export dmabuf: {e}"))?);
+        render_pool.push(
+            gbm_buffer
+                .export()
+                .map_err(|e| eyre!("export dmabuf: {e}"))?,
+        );
     }
-    tracing::info!("compositor: encode path = {}", if zero_copy { "zero-copy dmabuf" } else { "CPU readback" });
+    tracing::info!(
+        "compositor: encode path = {}",
+        if zero_copy {
+            "zero-copy dmabuf"
+        } else {
+            "CPU readback"
+        }
+    );
 
     let mut event_loop: EventLoop<State> =
         EventLoop::try_new().map_err(|e| eyre!("create event loop: {e}"))?;
@@ -527,8 +597,16 @@ fn run(
         },
     );
     let _output_global = output.create_global::<State>(&dh);
-    let mode = Mode { size: (width as i32, height as i32).into(), refresh: fps as i32 * 1000 };
-    output.change_current_state(Some(mode), Some(Transform::Normal), None, Some((0, 0).into()));
+    let mode = Mode {
+        size: (width as i32, height as i32).into(),
+        refresh: fps as i32 * 1000,
+    };
+    output.change_current_state(
+        Some(mode),
+        Some(Transform::Normal),
+        None,
+        Some((0, 0).into()),
+    );
     output.set_preferred(mode);
 
     let mut space = Space::default();
@@ -600,32 +678,35 @@ fn run(
     let mut stat_render_max = Duration::ZERO;
     let mut stat_since = std::time::Instant::now();
     loop_handle
-        .insert_source(Timer::from_duration(frame_interval), move |_, _, state: &mut State| {
-            let render_start = std::time::Instant::now();
-            state.render_and_publish();
-            let now = std::time::Instant::now();
+        .insert_source(
+            Timer::from_duration(frame_interval),
+            move |_, _, state: &mut State| {
+                let render_start = std::time::Instant::now();
+                state.render_and_publish();
+                let now = std::time::Instant::now();
 
-            stat_count += 1;
-            stat_render_max = stat_render_max.max(now - render_start);
-            let elapsed = now - stat_since;
-            if elapsed >= Duration::from_secs(5) {
-                tracing::info!(
-                    "compositor: {:.1} fps rendered (target {}), worst render {:.1}ms",
-                    stat_count as f64 / elapsed.as_secs_f64(),
-                    (1_000_000 / state.frame_interval.as_micros().max(1)),
-                    stat_render_max.as_secs_f64() * 1000.0,
-                );
-                stat_count = 0;
-                stat_render_max = Duration::ZERO;
-                stat_since = now;
-            }
+                stat_count += 1;
+                stat_render_max = stat_render_max.max(now - render_start);
+                let elapsed = now - stat_since;
+                if elapsed >= Duration::from_secs(5) {
+                    tracing::info!(
+                        "compositor: {:.1} fps rendered (target {}), worst render {:.1}ms",
+                        stat_count as f64 / elapsed.as_secs_f64(),
+                        (1_000_000 / state.frame_interval.as_micros().max(1)),
+                        stat_render_max.as_secs_f64() * 1000.0,
+                    );
+                    stat_count = 0;
+                    stat_render_max = Duration::ZERO;
+                    stat_since = now;
+                }
 
-            next_deadline += state.frame_interval;
-            if next_deadline <= now {
-                next_deadline = now + state.frame_interval;
-            }
-            TimeoutAction::ToInstant(next_deadline)
-        })
+                next_deadline += state.frame_interval;
+                if next_deadline <= now {
+                    next_deadline = now + state.frame_interval;
+                }
+                TimeoutAction::ToInstant(next_deadline)
+            },
+        )
         .map_err(|e| eyre!("insert render timer: {e}"))?;
 
     let loop_signal = event_loop.get_signal();
@@ -663,7 +744,10 @@ fn run(
         "compositor: up and listening"
     );
     ready_tx
-        .send(Ok(Ready { socket_name, loop_signal }))
+        .send(Ok(Ready {
+            socket_name,
+            loop_signal,
+        }))
         .map_err(|_| eyre!("compositor: caller dropped before ready"))?;
 
     event_loop
@@ -690,11 +774,11 @@ impl CompositorHandler for State {
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
-            if let Some(window) = self
-                .space
-                .elements()
-                .find(|w| w.toplevel().map(|t| t.wl_surface() == &root).unwrap_or(false))
-            {
+            if let Some(window) = self.space.elements().find(|w| {
+                w.toplevel()
+                    .map(|t| t.wl_surface() == &root)
+                    .unwrap_or(false)
+            }) {
                 window.on_commit();
             }
         }
@@ -731,12 +815,25 @@ impl XdgShellHandler for State {
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
-        let _ = self.popups.track_popup(smithay::desktop::PopupKind::Xdg(surface));
+        let _ = self
+            .popups
+            .track_popup(smithay::desktop::PopupKind::Xdg(surface));
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat, _serial: smithay::utils::Serial) {}
+    fn grab(
+        &mut self,
+        _surface: PopupSurface,
+        _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        _serial: smithay::utils::Serial,
+    ) {
+    }
 
-    fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
+    fn reposition_request(
+        &mut self,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
+    ) {
         surface.with_pending_state(|state| {
             state.geometry = positioner.get_geometry();
             state.positioner = positioner;
@@ -754,7 +851,12 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: smithay::input::pointer::CursorImageStatus) {}
+    fn cursor_image(
+        &mut self,
+        _seat: &Seat<Self>,
+        _image: smithay::input::pointer::CursorImageStatus,
+    ) {
+    }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let dh = &self.display_handle;

@@ -83,7 +83,7 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   (`audio_output_formats`, `limitedUI`, `oemIconVisible`, `rightHandDrive`) -
   real head units omit them and upstream's strict deserialize crashed on that.
   Revert to `catplay-labs/catplay` once that lands upstream.
-- Hardware quirk: the test head unit (paired as "TESTUNIT-5678") degrades into an
+- Hardware quirk: the test head unit (whichever `[bluetooth] device` names) degrades into an
   "aggressive reconnect" state (iAP2 handshake won't complete /
   `ProfileUnavailable` / already-connected errors) after several rapid reconnect
   cycles during iteration. A power cycle clears it - don't spend time debugging
@@ -120,15 +120,16 @@ a watch channel), not the portal's `stream.size()` - the latter is often missing
 HiDPI-physical (e.g. a 3456x2160 panel), which left touch landing in the top-left
 corner.
 `config::desktop_render_driver()` finds it from the card with a connected display
-(`/sys/class/drm/card*-<conn>/status`). If it's NVIDIA -> prefer GL/NVENC; else ->
-prefer the dmabuf postproc (VA-API/v4l2); fall through to the other if the preferred
-elements are missing, then software. The paths:
+(`/sys/class/drm/card*-<conn>/status`) and the `HW_BACKENDS` row whose `drivers`
+match is tried first; the others stay as fallbacks (in table order), then software.
+Each row's `desktop` field is its GPU chain, `desktop_memory` the memory feature it
+hands the encoder:
 - **VA-API / v4l2** (Intel/AMD/Qualcomm): `pipewiresrc ! vapostproc|v4l2convert !
-  videorate ! caps(memory:DMABuf) ! vah264enc|v4l2h264enc`, via the shared
-  `HW_BACKENDS` - the postproc imports the dmabuf and does convert+scale on the GPU,
-  genuine zero-copy. **Verified** on Intel via `tests/desktop.rs`. `run_desktop`
-  sets `GST_VA_ALL_DRIVERS=1` (the gst `va` plugin skips the iGPU otherwise on a
-  hybrid box); needs the iGPU's VA driver (`intel-media-driver`) on the run host.
+  videorate ! caps(memory:DMABuf) ! vah264enc|v4l2h264enc` - the postproc imports
+  the dmabuf and does convert+scale on the GPU, genuine zero-copy. **Verified** on
+  Intel via `tests/desktop.rs`. `run_desktop` sets `GST_VA_ALL_DRIVERS=1` (the gst
+  `va` plugin skips the iGPU otherwise on a hybrid box); needs the iGPU's VA driver
+  (`intel-media-driver`) on the run host.
 - **NVIDIA GL**: `pipewiresrc ! glupload ! glcolorconvert ! glcolorscale !
   videorate ! nvh264enc`. Convert/scale on the GPU, but the *final* GL->CUDA handoff
   currently downloads to system memory (interop fails with
@@ -136,13 +137,13 @@ elements are missing, then software. The paths:
   zero-copy. True NVIDIA zero-copy would need a direct dmabuf->CUDA EGL import like
   `cuda-dmabuf` (only fits a same-GPU NVIDIA desktop; this gst build lacks a CUDA
   scaler anyway).
-- **Software**: `videorate ! videoscale ! videoconvert`.
+- **Software**: `videorate ! videoscale ! videoconvert ! <software encoder>`.
 
 `videorate` is memory-agnostic (`video/x-raw(ANY)`) so it re-times inside the GPU
-chain. When the encoder ends up on *system memory* (the GL/software paths feeding
-`nvh264enc`), the path uses `DEFAULT_ENCODER_DESKTOP` (`gop-size=60`, not 30): nvenc
-emits an IDR *every frame* with `gop-size=30` on system memory specifically (fine on
-the internal CUDA path). `tests/desktop.rs` drives GNOME's internal
+chain. Note the `cuda` row's `gop-size=60`: when nvenc ends up fed *system memory*
+(the GL path's final handoff downloads) it emits an IDR *every frame* at
+`gop-size=30` specifically, so 60 is the one value that behaves on every path - which
+is why one `encoder` string per row is enough. `tests/desktop.rs` drives GNOME's internal
 `org.gnome.Mutter.ScreenCast` D-Bus API to exercise all this without a car or a
 portal-consent dialog. `[app]`, `[display]`, and the display cache don't apply.
 Needs a desktop session with a portal backend (not the headless deployment device).
@@ -220,25 +221,55 @@ compositor is started in the matching mode (`is_zero_copy()`), so the frame
 variant always matches the pipeline. Two families:
 
 - **Zero-copy**: the compositor forwards its rendered dmabuf and
-  `resolve_backend` picks a same-GPU hardware backend (auto-probed, or forced
-  via `CARPLAY_ENCODE_BACKEND=cuda|vaapi|v4l2`):
-  - **NVIDIA** (`cuda`): the `cuda-dmabuf` crate imports the block-linear dmabuf
-    via EGL + `cuGraphicsEGLRegisterImage`, de-tiles it GPU->GPU into pitched
-    `GstCudaMemory`, and pushes straight into `nvh264enc`. This exists because
-    `glupload`/`vapostproc` **can't** import NVIDIA's tiled surface.
+  `resolve_backend` picks a same-GPU hardware backend - a row of the single
+  `HW_BACKENDS` table, probed in order (or forced via
+  `CARPLAY_ENCODE_BACKEND=cuda|vaapi|v4l2`, which applies to the desktop path
+  too). A row carries both video sources' chains (`import`/`postproc` for the
+  compositor, `desktop`/`desktop_memory` for the portal) plus its tuned encoder,
+  so **adding a platform = one row**:
+  - **NVIDIA** (`cuda`, `import: Cuda`, no postproc): the `cuda-dmabuf` crate
+    imports the block-linear dmabuf via EGL + `cuGraphicsEGLRegisterImage`,
+    de-tiles it GPU->GPU into pitched `GstCudaMemory`, and pushes straight into
+    `nvh264enc`. This exists because `glupload`/`vapostproc` **can't** import
+    NVIDIA's tiled surface. It's the only backend that can fail *after* its
+    elements probe OK (its CUDA context is bound to the render node), in which
+    case probing falls through to the next row.
   - **Intel/AMD** (`vaapi`): `appsrc(DMABuf) ! vapostproc ! vah264enc`.
   - **Qualcomm/embedded** (`v4l2`):
     `appsrc(DMABuf) ! v4l2convert ! v4l2h264enc`. Untested off-device; keyframe
-    control is a best guess to revisit. vaapi/v4l2 rows live in `HW_BACKENDS`;
-    adding a platform = one row.
+    control is a best guess to revisit.
+  - **Vulkan is deliberately NOT a row** (evaluated 2026-07-26, gst 1.28.5). It's
+    the obvious vendor-neutral candidate, and the encoder does exist
+    (`vulkanh264enc`, registered per-device as `vulkanh264device<N>enc` when a
+    machine has several GPUs - so it can't even be named by a static table entry).
+    But: (1) `vulkanupload` accepts only system memory / `memory:VulkanBuffer`, no
+    `memory:DMABuf`, so feeding it the compositor's dmabuf needs a CPU roundtrip -
+    strictly worse than the cuda/vaapi rows it would compete with; (2)
+    `... ! vulkanupload ! vulkancolorconvert ! vulkanh264enc` **SIGSEGVs during
+    preroll** on the NVIDIA dev box, both with the encoder's own device and with the
+    loader pinned to a single ICD (`VK_LOADER_DRIVERS_SELECT`), so it's not a
+    cross-device handoff. `vulkanupload ! vulkancolorconvert` to NV12 VulkanImage on
+    its own works fine - the crash is the encoder. Revisit when `vulkanupload` grows
+    dmabuf import; that's the change that would make a Vulkan row worth having (one
+    row replacing vaapi+v4l2 on the embedded target).
 - **Software**: the compositor reads the frame back to a `Vec` (one CPU copy)
   and `encode.rs` runs `appsrc(video/x-raw) ! videoconvert ! encoder`.
   `videoscale`/`videorate` were removed: the compositor already renders at the
   car's exact resolution and the feeder pushes a steady rate, so there's nothing
   to scale or re-time. `videoconvert` stays - most encoders (e.g. `x264enc`)
-  won't accept the compositor's BGRx.
+  won't accept the compositor's BGRx. The encoder is `DEFAULT_SW_ENCODER`
+  (`x264enc speed-preset=ultrafast tune=zerolatency`, CBR, `key-int-max=30`),
+  then `SW_ENCODER_FALLBACKS` (`openh264enc`), and finally - if the box has *no*
+  CPU H264 encoder, which is the case on the NVIDIA dev machine - a `HW_BACKENDS`
+  encoder fed system memory (each row's `encoder` is tuned to hold up there too, so
+  it's used as-is). `zerocopy=false` means "no zero-copy import", not "don't
+  touch the GPU", so that fallback is a feature, not a bug; watch the warning it
+  logs if you expected a CPU encode.
 
-Anti-stutter / low-latency (all in `encode.rs`, overridable via `CARPLAY_ENCODER`):
+Anti-stutter / low-latency (all in `encode.rs`). `CARPLAY_ENCODER` (a gst-launch
+style `"name prop=val ..."` string) replaces the encoder on **every** path -
+hardware rows included, not just software - so it can also break a hardware chain's
+caps negotiation; that's the escape hatch's price:
 - The encode feeder pushes on the compositor's frame production
   (`frame_rx.changed()`), **not** a second independent timer - two ~30fps clocks
   beat and periodically dup/drop a frame. The compositor render timer rearms to
@@ -247,10 +278,13 @@ Anti-stutter / low-latency (all in `encode.rs`, overridable via `CARPLAY_ENCODER
 - The CUDA de-tile buffers are pooled (`CudaPool` in `cuda-dmabuf`) so `import`
   reuses device memory instead of `cuMemAlloc`/`cuMemFree` per frame; buffers
   return to the pool via the GstCudaMemory free callback.
-- `DEFAULT_ENCODER` is tuned for real-time: `gop-size=30` (~1s keyframes, not a
-  fraction of a second - frequent IDRs are large and burst the car's WiFi);
-  `tune=ultra-low-latency` + `bframes=0` + `rc-lookahead=0` + `zerolatency` (no
-  reorder/lookahead delay); `rc-mode=cbr bitrate=12000` (steady, link-friendly).
+- Every backend's encoder (the `encoder` field of its `HW_BACKENDS` row, and
+  `DEFAULT_SW_ENCODER`) is tuned the same way for real-time: ~1s keyframes
+  (`gop-size`/`key-int-max=30`, not a fraction of a second - frequent IDRs are
+  large and burst the car's WiFi); no reorder/lookahead delay (`bframes=0`, plus
+  `tune=ultra-low-latency`/`rc-lookahead=0`/`zerolatency` on nvenc,
+  `speed-preset=ultrafast tune=zerolatency` on x264); and CBR at 12 Mbit/s
+  (steady, link-friendly) rather than the encoders' spiky defaults.
 - A leaky `queue` (`leaky=downstream`, `max-size-buffers=3`) sits after the
   appsrc so a momentary encode/WiFi stall drops the oldest frame instead of
   growing latency.

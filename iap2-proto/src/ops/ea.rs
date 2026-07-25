@@ -28,6 +28,12 @@ impl EaFrame {
         };
         let offset = if data.len() >= 2 { 2 } else { 0 };
         let rest = Bytes::copy_from_slice(&data[offset..]);
-        Ok((EaFrame { transfer_id, data: rest }, &[]))
+        Ok((
+            EaFrame {
+                transfer_id,
+                data: rest,
+            },
+            &[],
+        ))
     }
 }
