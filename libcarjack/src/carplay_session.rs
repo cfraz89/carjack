@@ -1,7 +1,7 @@
 use deku::prelude::*;
 use iap2_proto::{
     error::Iap2Error,
-    iap2::{Iap2, Stream},
+    iap2::{Iap2, Stream, LINK_SESSION_ID},
     ops::{
         control::{ControlMessage, ControlMessageId, ControlMessageSet, GetParam, ParameterId},
         ea::EaFrame,
@@ -103,7 +103,7 @@ impl<S: Stream> CarplaySession<S> {
                         // packet during that sequence confuses some accessories.
                         if self.ready_tx.is_none() {
             self.iap2
-                .send_packet(ControlByte::with_ack(), 1, Vec::new())
+                .send_packet(ControlByte::with_ack(), LINK_SESSION_ID, Vec::new())
                 .await.tap_err(|e| tracing::warn!("Keep-alive send error: {e}"))?
                         }
                     }
@@ -113,16 +113,7 @@ impl<S: Stream> CarplaySession<S> {
 
     async fn do_identification(&mut self) -> Result<(), Iap2Error> {
         tracing::debug!("Sending StartIdentification");
-        let payload = ControlMessage::start_identification()
-            .to_bytes()
-            .expect("serialize ControlMessage");
-        tracing::debug!("StartIdentification payload: {:?}", payload);
-        let ctrl = ControlByte {
-            ack: true,
-            ..Default::default()
-        };
-        self.iap2.send_packet(ctrl, 1, payload).await?;
-        Ok(())
+        self.send_ctrl(ControlMessage::start_identification()).await
     }
 
     fn generate_challenge() -> [u8; 20] {
@@ -176,8 +167,9 @@ impl<S: Stream> CarplaySession<S> {
 
     async fn send_ctrl(&self, message: ControlMessage) -> Result<(), Iap2Error> {
         let payload = message.to_bytes()?;
+        let session_id = self.iap2.control_session_id().await?;
         self.iap2
-            .send_packet(ControlByte::with_ack(), 1, payload)
+            .send_packet(ControlByte::with_ack(), session_id, payload)
             .await
     }
 

@@ -378,15 +378,11 @@ impl ControlMessage {
         }
     }
 
+    /// StartIdentification carries no parameters - it is purely the device telling the
+    /// accessory to send its IdentificationInformation. An iPhone's is 6 bytes on the
+    /// wire (`4040 0006 1d00`); the identity fields belong to the accessory's reply.
     pub fn start_identification() -> Self {
-        Self::new(
-            ControlMessageId::StartIdentification,
-            vec![
-                Parameter::new(ParameterId::DISPLAY_NAME, "CarJack"),
-                Parameter::new(ParameterId::VERSION, 0x01020000u32),
-                Parameter::new(ParameterId::FEATURES, 0x0001u16),
-            ],
-        )
+        Self::new(ControlMessageId::StartIdentification, vec![])
     }
 
     pub fn identification_accepted() -> Self {

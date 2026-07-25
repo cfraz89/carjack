@@ -4,9 +4,9 @@ use backon::{ConstantBuilder, Retryable};
 
 use crate::{
     error::Iap2Error,
-    iap2::{Iap2, Stream},
+    iap2::{Iap2, Stream, LINK_SESSION_ID},
     packet::ControlByte,
-    stream::{SessionEntry, SessionTable, SessionType, SynPayload},
+    stream::{SessionTable, SessionType, SynPayload},
 };
 use tap::prelude::*;
 
@@ -52,7 +52,9 @@ impl<S: Stream> Syn<'_, S> {
             ack: true,
             ..Default::default()
         };
-        self.0.send_packet(control, 0, our_syn.to_bytes()).await?;
+        self.0
+            .send_packet(control, LINK_SESSION_ID, our_syn.to_bytes())
+            .await?;
         tracing::debug!("Sent SYN+ACK, waiting for ACK");
 
         let ack_packet = tokio::time::timeout(Duration::from_secs(5), self.0.receive_packet())
@@ -69,23 +71,20 @@ impl<S: Stream> Syn<'_, S> {
         }
         tracing::debug!("Received ACK, handshake complete");
 
+        // The accessory's SYN is the sole authority on which session IDs exist and what
+        // type each one is - we must address our messages to *its* numbering. Do not
+        // inject entries of our own here: SessionTable::add replaces by id, so a
+        // hardcoded {id:2, ExternalAccessory} silently overwrote the CFMOTO head unit's
+        // real {id:2, Control} and left us sending identification on a session that did
+        // not exist (see summary.md, cfmoto_5.pcapng).
         let mut table = SessionTable::new();
         for s in accessory_sessions.sessions {
             table.add(s);
         }
-        for s in [
-            SessionEntry {
-                id: 0,
-                session_type: SessionType::Control,
-                version: 1,
-            },
-            SessionEntry {
-                id: 2,
-                session_type: SessionType::ExternalAccessory,
-                version: 1,
-            },
-        ] {
-            table.add(s);
+        if table.find_type(SessionType::Control).is_none() {
+            return Err(Iap2Error::ControlSessionError(
+                "Accessory SYN declared no control session",
+            ));
         }
         tracing::debug!(?table, "SYN exchange complete");
         Ok(table)
