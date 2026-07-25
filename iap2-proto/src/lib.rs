@@ -1,4 +1,3 @@
-pub mod config;
 pub mod error;
 pub mod iap2;
 pub mod ops;

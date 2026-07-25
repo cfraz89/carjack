@@ -1,7 +1,5 @@
 //! carjack runtime configuration, loaded from a TOML file (see [`Config::load`]), overridable by
-//! `CARJACK_*` environment variables and CLI flags. Also resolves the configured DRM device
-//! selector to a concrete render node.
-
+//! `CARJACK_*` environment variables and CLI flags.
 use std::path::{Path, PathBuf};
 
 use eyre::{Result, eyre};
@@ -11,12 +9,18 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// What to stream: the `[app] command` in carjack's own compositor, or the user's existing
-    /// desktop via the xdg-desktop-portal RemoteDesktop/ScreenCast.
     pub source: Source,
     pub graphics: Graphics,
     pub display: Display,
     pub app: App,
+    pub bluetooth: Bluetooth,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+/// Which head unit to connect to.
+pub struct Bluetooth {
+    pub device: String,
 }
 
 /// Video source: run our own app, or capture the existing desktop via the portal.
@@ -181,6 +185,10 @@ pub struct Cli {
     /// Override [app] resizable.
     #[arg(long, action = clap::ArgAction::Set, value_name = "BOOL")]
     pub resizable: Option<bool>,
+
+    /// Override [bluetooth] device: the head unit's MAC or advertised name.
+    #[arg(long, value_name = "MAC|NAME")]
+    pub bt_device: Option<String>,
 }
 
 impl Config {
@@ -242,12 +250,21 @@ impl Config {
         if let Some(v) = cli.resizable {
             cfg.app.resizable = v;
         }
+        if let Some(v) = &cli.bt_device {
+            cfg.bluetooth.device = v.clone();
+        }
         Ok(cfg)
     }
 
     /// The desktop command to launch, if any.
     pub fn desktop_command(&self) -> &str {
         self.app.command.trim()
+    }
+
+    /// The configured head unit (MAC or name), or `None` if unset.
+    pub fn bluetooth_device(&self) -> Option<&str> {
+        let device = self.bluetooth.device.trim();
+        (!device.is_empty()).then_some(device)
     }
 }
 
@@ -473,6 +490,10 @@ mod tests {
         env.insert("CARJACK.GRAPHICS.ZEROCOPY".to_string(), "false".to_string());
         env.insert("CARJACK.APP.COMMAND".to_string(), "foo".to_string());
         env.insert("CARJACK.DISPLAY.WIDTH".to_string(), "800".to_string());
+        env.insert(
+            "CARJACK.BLUETOOTH.DEVICE".to_string(),
+            "MYCAR-1234".to_string(),
+        );
         let cfg: Config = config::Config::builder()
             .add_source(
                 config::Environment::with_prefix("CARJACK")
@@ -488,6 +509,26 @@ mod tests {
         assert_eq!(cfg.graphics.zerocopy, ZeroCopyMode::Off);
         assert_eq!(cfg.desktop_command(), "foo");
         assert_eq!(cfg.display.width, 800);
+        assert_eq!(cfg.bluetooth_device(), Some("MYCAR-1234"));
+    }
+
+    #[test]
+    fn bt_device_flag_overrides_and_blank_is_none() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["carjack", "--bt-device", "AA:BB:CC:DD:EE:FF"]);
+        let cfg = Config::load(&cli).unwrap();
+        assert_eq!(cfg.bluetooth_device(), Some("AA:BB:CC:DD:EE:FF"));
+
+        // Unset (and whitespace-only) reads as "no target", which `main` rejects at startup rather
+        // than falling back to picking a device itself.
+        let blank = Config {
+            bluetooth: Bluetooth {
+                device: "   ".into(),
+            },
+            ..Config::default()
+        };
+        assert_eq!(blank.bluetooth_device(), None);
+        assert_eq!(Config::default().bluetooth_device(), None);
     }
 
     #[test]

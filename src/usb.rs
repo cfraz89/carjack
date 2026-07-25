@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use color_eyre::Result;
 use eyre::eyre;
 use libcarjack::{carplay_peripheral::CARJACK_PERIPHERAL, usb_schema};
@@ -10,7 +11,6 @@ use usb_gadget::{
             TransferType,
         },
         hid::Hid,
-
     },
     udcs,
 };

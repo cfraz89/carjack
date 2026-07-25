@@ -1,23 +1,23 @@
-use std::os::fd::{AsRawFd, AsFd};
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;
 
 use catplay_carplay::video::{AnnexBIter, AvccConfig, NalType};
 use eyre::{Result, eyre};
+use futures::StreamExt;
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use gstreamer_allocators::prelude::*;
 use gstreamer_allocators::DmaBufAllocator;
+use gstreamer_allocators::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
-use futures::StreamExt;
-use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::Buffer as _;
+use smithay::backend::allocator::dmabuf::Dmabuf;
 use tokio::sync::{mpsc, watch};
 use tokio_util::task::AbortOnDropHandle;
 
-use libcarjack::airplay::EncodedFrame;
 use crate::compositor::CapturedFrame;
 use crate::config::ZeroCopyMode;
+use libcarjack::airplay::EncodedFrame;
 
 /// Zero-copy `AsRef<[u8]>` view of an SHM frame's pixels, so re-pushing the same frame (the
 /// repeater does 30x/sec) is just an `Arc` refcount bump rather than a full memcpy each tick.
@@ -89,7 +89,9 @@ impl EncodeBackend {
 pub fn resolve_backend(mode: ZeroCopyMode, render_node: &str) -> Result<EncodeBackend> {
     let _ = gst::init();
     match mode {
-        ZeroCopyMode::Off => Ok(EncodeBackend { kind: BackendKind::Software }),
+        ZeroCopyMode::Off => Ok(EncodeBackend {
+            kind: BackendKind::Software,
+        }),
         ZeroCopyMode::Force => match try_zero_copy(render_node) {
             Some(kind) => Ok(EncodeBackend { kind }),
             None => Err(eyre!(
@@ -104,7 +106,9 @@ pub fn resolve_backend(mode: ZeroCopyMode, render_node: &str) -> Result<EncodeBa
                     "zerocopy=auto: no zero-copy backend available on {render_node}, \
                      falling back to SOFTWARE encode"
                 );
-                Ok(EncodeBackend { kind: BackendKind::Software })
+                Ok(EncodeBackend {
+                    kind: BackendKind::Software,
+                })
             }
         },
     }
@@ -115,7 +119,11 @@ pub fn resolve_backend(mode: ZeroCopyMode, render_node: &str) -> Result<EncodeBa
 /// then the dmabuf-importing HW backends. Returns `None` if none are usable.
 fn try_zero_copy(render_node: &str) -> Option<BackendKind> {
     let forced = std::env::var("CARPLAY_ENCODE_BACKEND").ok();
-    let want = |name: &str| forced.as_deref().is_none_or(|f| f.eq_ignore_ascii_case(name));
+    let want = |name: &str| {
+        forced
+            .as_deref()
+            .is_none_or(|f| f.eq_ignore_ascii_case(name))
+    };
 
     if want("cuda") && element_available("nvh264enc") {
         match cuda_dmabuf::CudaImporter::new(render_node) {
@@ -182,16 +190,6 @@ pub async fn encode_h264_to_channel(
     let (encoder, feeder) = build_backend(&pipeline, &queue, &backend)?;
     tracing::info!("Encode backend: {}", backend.describe());
 
-    // Feed the encoder directly off the compositor's frame production: push each frame as it's
-    // published, rather than re-sampling the latest on a *separate* timer. The compositor renders
-    // on its own steady timer even for a static screen (so there's always a fresh frame ~every
-    // frame-period, and the car never sees a >1s gap), which means a second timer here only
-    // *beats* against it - the two clocks drift and periodically double/drop a frame, which is
-    // exactly the stutter. Driving off `changed()` inherits the compositor's smooth cadence.
-    //
-    // The `watch` channel is latest-wins, so if the compositor ever outpaces the encoder we just
-    // skip intermediate frames rather than backing up. No `videorate`/`videoscale` downstream -
-    // the compositor already renders at the car's exact resolution and rate.
     let _frame_feeder = AbortOnDropHandle::new(tokio::spawn(async move {
         let appsrc = src;
         let mut frame_rx = frame_rx;
@@ -205,7 +203,15 @@ pub async fn encode_h264_to_channel(
                 continue;
             };
             let buffer = match (&feeder, &*frame) {
-                (FrameFeeder::Shm, CapturedFrame::Shm { width, height, gst_format, .. }) => {
+                (
+                    FrameFeeder::Shm,
+                    CapturedFrame::Shm {
+                        width,
+                        height,
+                        gst_format,
+                        ..
+                    },
+                ) => {
                     if !caps_set {
                         appsrc.set_caps(Some(
                             &gst::Caps::builder("video/x-raw")
@@ -315,7 +321,9 @@ pub async fn encode_pipewire_to_channel(
                             desktop_size_tx.send_if_modified(|cur| {
                                 let next = Some((w as u32, h as u32));
                                 if *cur != next {
-                                    tracing::info!("desktop stream size {w}x{h} (touch scales to this)");
+                                    tracing::info!(
+                                        "desktop stream size {w}x{h} (touch scales to this)"
+                                    );
                                     *cur = next;
                                     true
                                 } else {
@@ -354,8 +362,8 @@ fn build_pipewire_encode(
     // The configured (default) encoder - used by the GL and software paths (the HW backends bring
     // their own vendor encoder).
     let default_encoder = || -> Result<(String, gst::Element)> {
-        let desc =
-            std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from(DEFAULT_ENCODER_DESKTOP));
+        let desc = std::env::var("CARPLAY_ENCODER")
+            .unwrap_or_else(|_| String::from(DEFAULT_ENCODER_DESKTOP));
         let (name, props) = parse_encoder_string(&desc)?;
         let enc = mk(&name, "encoder")?;
         for (k, v) in &props {
@@ -398,13 +406,17 @@ fn build_pipewire_encode(
         for (k, v) in b.props {
             encoder.set_property_from_str(k, v);
         }
-        pipeline.add_many([&postproc, &rate, &encoder]).map_err(|_| eyre!("add hw elements"))?;
+        pipeline
+            .add_many([&postproc, &rate, &encoder])
+            .map_err(|_| eyre!("add hw elements"))?;
         gst::Element::link_many([src, &postproc, &rate]).map_err(|_| eyre!("link hw chain"))?;
         rate.link_filtered(&encoder, &caps(Some("memory:DMABuf")))
             .map_err(|_| eyre!("link hw-encoder"))?;
         tracing::info!(
             "Encode source: desktop ZERO-COPY hardware '{}' ({} ! {})",
-            b.name, b.postproc, b.encoder
+            b.name,
+            b.postproc,
+            b.encoder
         );
         Ok(Some(encoder))
     };
@@ -444,8 +456,11 @@ fn build_pipewire_encode(
             driver.as_deref().unwrap_or("unknown"),
             if is_nvidia { "GL/NVENC" } else { "VA-API/v4l2" },
         );
-        let attempts: [&dyn Fn() -> Result<Option<gst::Element>>; 2] =
-            if is_nvidia { [&build_gl, &build_hw] } else { [&build_hw, &build_gl] };
+        let attempts: [&dyn Fn() -> Result<Option<gst::Element>>; 2] = if is_nvidia {
+            [&build_gl, &build_hw]
+        } else {
+            [&build_hw, &build_gl]
+        };
         for attempt in attempts {
             if let Some(encoder) = attempt()? {
                 return Ok(encoder);
@@ -468,8 +483,7 @@ fn build_pipewire_encode(
     pipeline
         .add_many([&rate, &scale, &convert, &encoder])
         .map_err(|_| eyre!("add sw elements"))?;
-    gst::Element::link_many([src, &rate, &scale, &convert])
-        .map_err(|_| eyre!("link sw chain"))?;
+    gst::Element::link_many([src, &rate, &scale, &convert]).map_err(|_| eyre!("link sw chain"))?;
     convert
         .link_filtered(&encoder, &caps(None))
         .map_err(|_| eyre!("link convert-encoder"))?;
@@ -510,11 +524,20 @@ async fn drive_h264_pipeline(
     let appsink = mk("appsink", "sink")?;
     appsink.set_property("sync", false);
 
-    pipeline.add(&h264parse).map_err(|_| eyre!("add h264parse"))?;
-    pipeline.add(&sink_queue).map_err(|_| eyre!("add sink_queue"))?;
+    pipeline
+        .add(&h264parse)
+        .map_err(|_| eyre!("add h264parse"))?;
+    pipeline
+        .add(&sink_queue)
+        .map_err(|_| eyre!("add sink_queue"))?;
     pipeline.add(&appsink).map_err(|_| eyre!("add appsink"))?;
-    encoder.link(&h264parse).map_err(|_| eyre!("link encoder-parse"))?;
-    h264parse.link(&sink_queue).map_err(|_| eyre!("link parse-queue"))?;
+    tracing::debug!(?pipeline, "Gstreamer pipeline");
+    encoder
+        .link(&h264parse)
+        .map_err(|_| eyre!("link encoder-parse"))?;
+    h264parse
+        .link(&sink_queue)
+        .map_err(|_| eyre!("link parse-queue"))?;
     sink_queue
         .link_filtered(&appsink, &output_caps)
         .map_err(|_| eyre!("link queue-sink"))?;
@@ -632,9 +655,7 @@ fn build_backend(
     backend: &EncodeBackend,
 ) -> Result<(gst::Element, FrameFeeder)> {
     match &backend.kind {
-        BackendKind::Software => {
-            Ok((build_software_chain(pipeline, tail)?, FrameFeeder::Shm))
-        }
+        BackendKind::Software => Ok((build_software_chain(pipeline, tail)?, FrameFeeder::Shm)),
         BackendKind::Cuda(importer) => {
             // Share our CUDA context with nvh264enc so the imported GstCudaMemory and the encoder
             // live on the same context. Must be set before the encoder is added to the bin (the
@@ -650,34 +671,17 @@ fn build_backend(
     }
 }
 
-/// Default encoder + settings, tuned for real-time streaming to the car (overridable via
-/// `CARPLAY_ENCODER`). Rationale, since the defaults matter for smoothness:
-/// - `gop-size=30` (~1s keyframe interval) instead of a fraction of a second: a keyframe (IDR) is
-///   a large frame, and emitting one every few frames produces periodic bursts that congest the
-///   car's WiFi - a major stutter source. The car requests an IDR on connect/loss anyway.
-/// - `tune=ultra-low-latency` + `bframes=0` + `rc-lookahead=0` + `zerolatency`: no frame
-///   reordering and no lookahead buffering, so encoded frames come out immediately (kills "lag").
-/// - `rc-mode=cbr` + fixed `bitrate`: a steady, predictable bitrate the WiFi link can sustain,
-///   rather than nvenc's automatic (spiky) rate control.
-/// - `preset=p4`: the modern medium preset (used together with `tune`).
-const DEFAULT_ENCODER: &str = "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=cbr \
-    bitrate=12000 gop-size=30 bframes=0 rc-lookahead=0 zerolatency=true aud=true";
-
-/// Desktop-path encoder default: identical to [`DEFAULT_ENCODER`] except `gop-size=60`. The
-/// desktop path always ends up feeding `nvh264enc` *system memory* (the GL path downloads for the
-/// encoder handoff), and on system memory nvenc emits an IDR *every* frame with `gop-size=30`
-/// specifically - an nvenc quirk (it's fine with the internal path's CUDA memory, and fine with
-/// other gop-sizes). 60 (~2s) sidesteps it while still giving periodic keyframes. Verified via
-/// `tests/desktop.rs` against a real GNOME ScreenCast stream.
-const DEFAULT_ENCODER_DESKTOP: &str = "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=cbr \
+const DEFAULT_CUDA_ENCODER: &str = "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=cbr \
     bitrate=12000 gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true aud=true";
+
+const DEFAULT_SW_ENCODER: &std = "";
 
 /// NVIDIA: `appsrc(CUDAMemory) ! nvh264enc`. The importer already produced GstCudaMemory buffers
 /// on the encoder's context, so nvh264enc consumes them directly (internal RGB->NV12). No
 /// glupload - NVIDIA won't hand its block-linear surface back as a GL texture.
 fn build_cuda_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Result<gst::Element> {
     let enc_desc =
-        std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from(DEFAULT_ENCODER));
+        std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from(DEFAULT_CUDA_ENCODER));
     let (enc_name, enc_props) = parse_encoder_string(&enc_desc)?;
     let encoder = gst::ElementFactory::make(&enc_name)
         .name("encoder")
@@ -687,7 +691,9 @@ fn build_cuda_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Result
         encoder.set_property_from_str(key, val);
     }
     pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
-    src_tail.link(&encoder).map_err(|_| eyre!("link src-encoder"))?;
+    src_tail
+        .link(&encoder)
+        .map_err(|_| eyre!("link src-encoder"))?;
     tracing::info!("Encode backend: zero-copy NVIDIA CUDA (dmabuf -> GstCudaMemory ! {enc_name})");
     Ok(encoder)
 }
@@ -713,11 +719,17 @@ fn build_dmabuf_hw_chain(
     }
     pipeline.add(&postproc).map_err(|_| eyre!("add postproc"))?;
     pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
-    src_tail.link(&postproc).map_err(|_| eyre!("link src-postproc"))?;
-    postproc.link(&encoder).map_err(|_| eyre!("link postproc-encoder"))?;
+    src_tail
+        .link(&postproc)
+        .map_err(|_| eyre!("link src-postproc"))?;
+    postproc
+        .link(&encoder)
+        .map_err(|_| eyre!("link postproc-encoder"))?;
     tracing::info!(
         "Encode backend: zero-copy hardware '{}' ({} ! {})",
-        b.name, b.postproc, b.encoder
+        b.name,
+        b.postproc,
+        b.encoder
     );
     Ok(encoder)
 }
@@ -735,8 +747,8 @@ fn build_software_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Re
             .build()
             .map_err(|_| eyre!("failed to create {label} ({name})"))
     };
-    let enc_desc = std::env::var("CARPLAY_ENCODER")
-        .unwrap_or_else(|_| String::from(DEFAULT_ENCODER));
+    let enc_desc =
+        std::env::var("CARPLAY_ENCODER").unwrap_or_else(|_| String::from(DEFAULT_SW_ENCODER));
     let (enc_name, enc_props) = parse_encoder_string(&enc_desc)?;
     let encoder = gst::ElementFactory::make(&enc_name)
         .name("encoder")
@@ -748,8 +760,12 @@ fn build_software_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Re
     let convert = mk("videoconvert", "videoconvert")?;
     pipeline.add(&convert).map_err(|_| eyre!("add convert"))?;
     pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
-    src_tail.link(&convert).map_err(|_| eyre!("link src-convert"))?;
-    convert.link(&encoder).map_err(|_| eyre!("link convert-encoder"))?;
+    src_tail
+        .link(&convert)
+        .map_err(|_| eyre!("link src-convert"))?;
+    convert
+        .link(&encoder)
+        .map_err(|_| eyre!("link convert-encoder"))?;
     tracing::info!("Encode backend: software (videoconvert ! {enc_name})");
     Ok(encoder)
 }
@@ -805,11 +821,16 @@ fn first_plane(dmabuf: &Dmabuf) -> Option<cuda_dmabuf::DmabufPlane> {
 fn wrap_dmabuf(allocator: &DmaBufAllocator, dmabuf: &Dmabuf) -> Result<gst::Buffer> {
     let (width, height) = (dmabuf.width(), dmabuf.height());
     let mut buffer = gst::Buffer::new();
-    let bm = buffer.get_mut().ok_or_else(|| eyre!("buffer not uniquely owned"))?;
+    let bm = buffer
+        .get_mut()
+        .ok_or_else(|| eyre!("buffer not uniquely owned"))?;
     let mut offsets = Vec::new();
     let mut strides = Vec::new();
     for (fd, (offset, stride)) in dmabuf.handles().zip(dmabuf.offsets().zip(dmabuf.strides())) {
-        let owned = fd.as_fd().try_clone_to_owned().map_err(|e| eyre!("dup dmabuf fd: {e}"))?;
+        let owned = fd
+            .as_fd()
+            .try_clone_to_owned()
+            .map_err(|e| eyre!("dup dmabuf fd: {e}"))?;
         let size = (stride as usize) * (height as usize) + offset as usize;
         let mem = unsafe {
             allocator

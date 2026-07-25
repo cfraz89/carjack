@@ -8,7 +8,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_util::codec::{Decoder, Encoder, Framed};
 
-use crate::config::LinkConfig;
 use crate::error::Iap2Error;
 use crate::ops::{switch::perform_switch, syn::Syn};
 use crate::packet::{Checksumable, ControlByte, Header, Packet};
@@ -71,14 +70,16 @@ pub struct Iap2<T> {
     seq: AtomicU8,
     ack: AtomicU8,
     pub session_table: Mutex<SessionTable>,
-    pub config: LinkConfig,
 }
 
 pub trait Stream: AsyncWriteExt + AsyncReadExt + Unpin {}
 impl<S: AsyncWriteExt + AsyncReadExt + Unpin> Stream for S {}
 
+//Yoinked from iap2-rs
+const INITIAL_SEQ: u8 = 0x9D;
+
 impl<S: Stream> Iap2<S> {
-    pub async fn start(mut stream: S, config: LinkConfig) -> Result<Self, Iap2Error> {
+    pub async fn start(mut stream: S) -> Result<Self, Iap2Error> {
         perform_switch(&mut stream).await?;
 
         let framed = Framed::new(stream, Iap2Codec);
@@ -87,10 +88,9 @@ impl<S: Stream> Iap2<S> {
         let iap2 = Iap2 {
             sink: Mutex::new(sink),
             stream: Mutex::new(stream),
-            seq: AtomicU8::new(config.initial_seq),
+            seq: AtomicU8::new(INITIAL_SEQ),
             ack: AtomicU8::new(0),
             session_table: Mutex::new(SessionTable::new()),
-            config,
         };
         let table = Syn(&iap2).perform().await?;
         *iap2.session_table.lock().await = table;

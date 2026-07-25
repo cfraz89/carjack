@@ -1,8 +1,9 @@
 //! `carjack-btmgmt` - a privileged one-shot sidecar for carjack.
 //!
-//! It does exactly one thing: add the CarPlay device UUID to a Bluetooth adapter's BR/EDR EIR
-//! (mgmt `ADD_UUID`) so a head unit sees us as a CarPlay device. That requires opening a raw
-//! `AF_BLUETOOTH`/HCI control socket, which requires `CAP_NET_ADMIN`.
+//! It applies the two BR/EDR presentation tweaks a head unit needs to treat us as an iPhone:
+//!   1. add the CarPlay device UUID to the adapter's EIR (mgmt `ADD_UUID`), and
+//!   2. set an iPhone-like Class of Device (mgmt `SET_DEV_CLASS`).
+//! Both need a raw `AF_BLUETOOTH`/HCI control socket, which requires `CAP_NET_ADMIN`.
 //!
 //! We keep that capability out of the main `carjack` process on purpose. Under `fs.suid_dumpable=2`
 //! (the hardened default on Fedora and friends) a process that gains a capability at exec has its
@@ -25,6 +26,14 @@ const BTPROTO_HCI: i32 = 1;
 const HCI_CHANNEL_CONTROL: u16 = 3;
 const MGMT_INDEX_NONE: u16 = 0xffff;
 const MGMT_OP_ADD_UUID: u16 = 0x0010;
+const MGMT_OP_SET_DEV_CLASS: u16 = 0x000E;
+
+/// `SET_DEV_CLASS` takes `[major, minor]` (2 bytes), NOT the raw 3-byte CoD - the kernel derives
+/// the service-class byte from the enabled UUIDs. `[0x02, 0x0c]` = Phone / Smartphone, i.e. the low
+/// two bytes of a real iPhone's `0x7a020c`. NOTE: bluetoothd owns the adapter class (see
+/// `/etc/bluetooth/main.conf` `[General] Class`) and will re-assert it, so this raw write is
+/// best-effort / mostly redundant when bluetoothd is running.
+const CARPLAY_DEV_CLASS: [u8; 2] = [0x02, 0x0c];
 
 #[repr(C)]
 struct SockAddrHci {
@@ -51,13 +60,20 @@ fn main() -> ExitCode {
     let mut payload = CARPLAY_DEVICE_UUID.to_bytes_le().to_vec();
     payload.push(0x00);
 
-    match send_mgmt_command(adapter_index, MGMT_OP_ADD_UUID, &payload) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("carjack-btmgmt: ADD_UUID failed: {e}");
-            ExitCode::FAILURE
-        }
+    if let Err(e) = send_mgmt_command(adapter_index, MGMT_OP_ADD_UUID, &payload) {
+        eprintln!("carjack-btmgmt: ADD_UUID failed: {e}");
+        return ExitCode::FAILURE;
     }
+
+    // Present an iPhone-like Class of Device. Without this the adapter keeps BlueZ's default class
+    // (Computer); a head unit then gives us HFP/A2DP but never starts CarPlay - it opens the iAP
+    // RFCOMM channel and drops it without ever sending the iAP1->iAP2 switch (FF 55 02 00 EE 10).
+    if let Err(e) = send_mgmt_command(adapter_index, MGMT_OP_SET_DEV_CLASS, &CARPLAY_DEV_CLASS) {
+        eprintln!("carjack-btmgmt: SET_DEV_CLASS failed: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    ExitCode::SUCCESS
 }
 
 /// Open the HCI control socket, send one mgmt command, and wait (up to 5s) for the matching
@@ -88,7 +104,10 @@ fn send_mgmt_command(adapter_index: u16, opcode: u16, payload: &[u8]) -> std::io
     }
 
     // Bound wait for the response.
-    let tv = libc::timeval { tv_sec: 5, tv_usec: 0 };
+    let tv = libc::timeval {
+        tv_sec: 5,
+        tv_usec: 0,
+    };
     unsafe {
         libc::setsockopt(
             raw,
