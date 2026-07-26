@@ -28,6 +28,8 @@ use tokio::sync::{Semaphore, TryAcquireError, mpsc, oneshot};
 use tokio_stream::{StreamExt, adapters::Merge};
 use tokio_util::task::AbortOnDropHandle;
 
+use crate::wifi_connect::get_wifi_mac;
+
 const IAP_CHANNEL: u16 = 1;
 
 /// How long to wait for the configured head unit to show up in discovery before giving up on this
@@ -174,7 +176,6 @@ pub async fn wireless_carplay(
     target: String,
     wifi_tx: mpsc::Sender<WifiCredentials>,
     ready_tx: oneshot::Sender<()>,
-    bt_mac_tx: oneshot::Sender<String>,
     car_addr_tx: oneshot::Sender<String>,
 ) -> Result<()> {
     let session = Session::new().await?;
@@ -186,15 +187,8 @@ pub async fn wireless_carplay(
     let identity = DeviceIdentity {
         name: String::from("carjack"),
         transport_identifier: adapter.address().await?.to_string(),
-        wifi_mac: crate::wifi_connect::local_wifi_mac().unwrap_or_else(|| {
-            tracing::warn!("No wireless interface found; reporting an empty WiFi MAC to the car");
-            String::new()
-        }),
+        wifi_mac: get_wifi_mac().await?,
     };
-    // Reuse this adapter's address rather than opening a second concurrent bluer::Session
-    // later just to look it up - that stepped on BlueZ's handling of the RFCOMM profile
-    // this session already owns and reset the connection.
-    let _ = bt_mac_tx.send(adapter.address().await?.to_string());
     let _advertisement_handle = publish_advertisement(&adapter).await?;
 
     // Apply HCI-level CarPlay config so BR/EDR inquiry shows the CarPlay UUID
