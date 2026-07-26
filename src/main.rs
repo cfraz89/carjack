@@ -2,6 +2,8 @@ use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
 use std::time::Duration;
 
+use backon::{ConstantBuilder, Retryable};
+use enclose::enclose;
 use eyre::{Result, eyre};
 use libcarjack::carplay_session::{TouchEvent, WifiCredentials};
 use tokio::signal::unix::{SignalKind, signal};
@@ -18,7 +20,7 @@ use carjack::encode::{self, Bitrate, EncodeBackend};
 use clap::Parser;
 
 use crate::{
-    wifi_connect::{CarWifi, connect_to_car_wifi},
+    wifi_connect::{CarWifi, connect_to_car_wifi, wait_for_link_local},
     wireless::wireless_carplay,
 };
 
@@ -318,6 +320,49 @@ fn with_scope_id(addr: std::net::SocketAddr, iface: &str) -> std::net::SocketAdd
     }
 }
 
+/// How hard to try one AirPlay endpoint before moving on to the next. The car repeats its WiFi
+/// configuration for ~15s after handing it over, so there is room to retry - and giving up costs
+/// a full Bluetooth teardown and reconnect cycle, which is far more disruptive than waiting.
+const AIRPLAY_CONNECT_ATTEMPTS: usize = 4;
+const AIRPLAY_CONNECT_DELAY: Duration = Duration::from_millis(500);
+
+/// Connect to the first AirPlay endpoint that answers, retrying each before falling through to
+/// the next. `candidates` is best-first: the address the car named, then the plain gateway.
+async fn connect_airplay_endpoints(
+    candidates: &[std::net::SocketAddr],
+    remote_homekit_id: Option<uuid::Uuid>,
+) -> Result<libcarjack::airplay::AirPlayConnection> {
+    let mut last_error = None;
+    for &addr in candidates {
+        tracing::info!("Connecting to AirPlay endpoint {addr}");
+        let attempt =
+            enclose!(
+                (addr)
+                    || async move {
+                        libcarjack::airplay::connect_airplay(addr, remote_homekit_id).await
+                    }
+            )
+            .retry(
+                ConstantBuilder::new()
+                    .with_delay(AIRPLAY_CONNECT_DELAY)
+                    .with_max_times(AIRPLAY_CONNECT_ATTEMPTS),
+            )
+            .notify(|e, delay| {
+                tracing::warn!("AirPlay connect to {addr} failed ({e}); retry in {delay:?}")
+            })
+            .await;
+
+        match attempt {
+            Ok(conn) => return Ok(conn),
+            Err(e) => {
+                tracing::warn!("AirPlay endpoint {addr} never came up: {e}");
+                last_error = Some(e);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| eyre!("No AirPlay endpoint to connect to")))
+}
+
 /// Run the Bluetooth -> WiFi -> AirPlay flow and return once AirPlay is connected (so the caller
 /// knows the car's display and can wire up the video source + input). Shared by both source modes.
 async fn establish_carplay(bt_device: &str) -> Result<Established> {
@@ -388,11 +433,32 @@ async fn establish_carplay(bt_device: &str) -> Result<Established> {
 
     //In testing, the bike sent us its airplay address, so we use that. It doesn't seem to
     //invite us on mdns anyway, so only advertise on that if we aren't given the address outright
-    let (peer_addr, remote_homekit_id) = match airplay_hint {
-        Some(addr) => {
-            let addr = with_scope_id(addr, &car_wifi.iface);
-            tracing::info!("Connecting to AirPlay endpoint given by the car: {addr}");
-            (addr, None)
+    let (candidates, remote_homekit_id) = match airplay_hint {
+        Some(hint) => {
+            let addr = with_scope_id(hint, &car_wifi.iface);
+            tracing::info!("AirPlay endpoint given by the car: {addr}");
+            // A link-local destination is only reachable from a link-local source on the same
+            // link, and the kernel won't use one that is still tentative - see
+            // `wait_for_link_local`. Not fatal if it never turns up: fall through and let the
+            // connect attempt (and then the gateway) decide.
+            if addr.is_ipv6()
+                && let Err(e) = wait_for_link_local(&car_wifi.iface).await
+            {
+                tracing::warn!(
+                    "No usable link-local address on {}: {e} - trying anyway, then the gateway",
+                    car_wifi.iface
+                );
+            }
+            // On the bike the AirPlay receiver *is* the access point: the link-local address in
+            // 0x4301 and the DHCP gateway resolve to the same MAC, so the gateway is the same
+            // endpoint reached by another route - and one that needs no link-local source at
+            // all. That makes it the natural fallback when IPv6 won't come up.
+            let gateway = std::net::SocketAddr::new(car_wifi.gateway, hint.port());
+            let mut candidates = vec![addr];
+            if gateway != addr {
+                candidates.push(gateway);
+            }
+            (candidates, None)
         }
         None => {
             tracing::info!("Car WiFi connected, waiting for car probe...");
@@ -400,17 +466,20 @@ async fn establish_carplay(bt_device: &str) -> Result<Established> {
             // /ctrl-int/1/connect, and use its matching _airplay._tcp Bonjour record for the
             // real peer address + HomeKit id.
             match wait_for_carplay_ctrl_probe(&car_wifi.iface, &car_wifi.iface_mac).await {
-                Ok(result) => result,
+                Ok((addr, homekit_id)) => (vec![addr], homekit_id),
                 Err(e) => {
                     tracing::warn!("CarPlay Ctrl probe failed, falling back to gateway: {e}");
-                    (std::net::SocketAddr::new(car_wifi.gateway, 7000), None)
+                    (
+                        vec![std::net::SocketAddr::new(car_wifi.gateway, 7000)],
+                        None,
+                    )
                 }
             }
         }
     };
 
     // Connect AirPlay to learn the car's display size + refresh.
-    let conn = libcarjack::airplay::connect_airplay(peer_addr, remote_homekit_id).await?;
+    let conn = connect_airplay_endpoints(&candidates, remote_homekit_id).await?;
     Ok(Established {
         conn,
         carplay_handle,

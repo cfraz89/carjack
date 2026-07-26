@@ -26,6 +26,56 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - **iPhone pklg capture re-analyzed**: Found 62 iAP2 `FF 5A` packets and 4 `FF 55` switch commands. Extracted full protocol exchange: SYN→StartIdentification→IdentificationInformation→Auth→WiFiConfig→WirelessCarPlayUpdate. **Zero EA session messages** found — EA establishment likely happens over WiFi as part of AirPlay handshake, not Bluetooth.
 
 ### Active
+- **`cfmoto_11.pcapng` (2026-07-26 22:43, BT + WiFi in one capture): the whole iAP2 handshake now
+  runs clean in ~1s and the car hands over credentials — but the AirPlay connect dies instantly,
+  in a race with IPv6 duplicate-address detection. Fixed; not yet retested against the bike.**
+  - **Everything up to the handover is healthy.** At t=8.24 the switch command, then SYN →
+    identification → `aa00`/`aa06`/`aa02`/`aa03`/`aa05` auth → `4300` → `4301` at t=9.05. Sequence
+    numbers behave (keepalives repeat `0xa6` without consuming a number), the car acks everything,
+    and `ea00` fires exactly once. The `0x4301` TLVs decode as expected: ssid `CFMOTO-999700`,
+    passphrase `12345678`, channel 157, address `fe80::9083:8eff:feef:a7d3`, port 7000.
+  - **The failure, to the millisecond:**
+
+        16.348  DHCP ACK           IPv4 up (us .152, car .94)
+        16.471  ARP announce       NetworkManager marks the connection ACTIVATED
+        16.576  NS from ::         DAD starts on our new fe80::d819:2e6:a304:3de0 (TENTATIVE)
+        16.587  Sent DISC Ch=2     carjack tears the iAP2 RFCOMM channel down   <- 11 ms later
+        17.584  MLD from fe80::…   DAD done, the address is finally usable
+
+    `connect_to_car_wifi` returns as soon as **IPv4** finishes — NM does not wait for IPv6. carjack
+    then connects straight to the car's **link-local** address, but our own link-local is still
+    tentative for another ~1s, and the kernel will not select a tentative address as a source for a
+    link-local destination. `connect()` fails immediately with `EADDRNOTAVAIL`, which is why there
+    is **not one TCP packet and not one neighbour solicitation for `fe80::9083:8eff:feef:a7d3` in
+    the whole capture** — the connect never reached the wire.
+  - Then `?` on `connect_airplay` propagates, `AbortOnDropHandle` drops the carplay task → RFCOMM
+    DISC at 16.587 → full ACL teardown at 18.87 → `Create Connection` at 18.89 → a fresh SDP/AVRCP
+    handshake at 21.7–22.9 as the session loop restarts. One transient connect error costs an
+    entire Bluetooth reconnect cycle.
+  - It was definitely the connect and not WiFi setup: `connect_to_car_wifi` wraps everything in
+    `.retry()`, so a fast error there would show up as four activations over ~6s (four DHCP
+    cycles); there is exactly one. Everything between it and `connect_airplay` is infallible.
+  - **So the `cfmoto_10` fix was right, it just fired ~1s too early.** The old gateway-guess path
+    burned 15s probing first, which incidentally hid this.
+  - **Fixed, three parts:**
+    1. `wifi_connect::wait_for_link_local` polls **rtnetlink** (`RTM_GETADDR`, filtered to the
+       interface index) until a `fe80::/10` address on the car's interface is neither `Tentative`
+       nor `Dadfailed` — 250 ms × 16, so ~4s of headroom against a 1s DAD. The full 32-bit flag set
+       arrives in the `IFA_FLAGS` **attribute**; the header byte only holds the low eight bits, so
+       the attribute wins wherever both are present (verified against a live kernel dump: every
+       IPv6 address carries `Flags(...)`, and the settled link-local reads `Permanent |
+       Noprefixroute`).
+    2. **IPv4 gateway fallback.** On this unit the AirPlay receiver *is* the AP — the `0x4301`
+       link-local and the DHCP gateway resolve to the same MAC (`92:83:8e:ef:a7:d3` =
+       `192.168.199.94`) — so the gateway is the same endpoint by another route, and one needing no
+       link-local source at all. `establish_carplay` now builds a best-first candidate list
+       (car-named address, then gateway) instead of a single address.
+    3. **Retry.** `connect_airplay_endpoints` retries each candidate with `backon`
+       (`ConstantBuilder`, 500 ms × 4) before falling through to the next, so a transient failure no
+       longer costs a Bluetooth reconnect. The car repeats `0x4301` for ~15s, so there is budget.
+  - Tests: four unit tests over the flag/address parsing (`IFA_FLAGS` beating the header byte,
+    tentative/dadfailed rejection, IPv4 and global-scope v6 ignored) plus an `#[ignore]`d live check
+    (`CARJACK_TEST_IFACE=… cargo test --bin carjack -- --ignored`) that runs the real netlink dump.
 - **`cfmoto_10.pcapng` (2026-07-26, BT + WiFi in one capture): the link layer is FIXED and the
   whole iAP2 handshake is now clean. What is left is a standoff on WiFi — the car waits for us
   to connect to the AirPlay address it gave us, and we wait for it to invite us.**
