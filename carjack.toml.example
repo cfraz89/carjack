@@ -5,14 +5,16 @@
 # Precedence (highest wins): launch flag > CARJACK_* env var > this file > default.
 #   flags:    carjack --drm-device nvidia --zerocopy auto --width 800 --command "..." (see --help)
 #   env vars: CARJACK.SOURCE, CARJACK.GRAPHICS.DRM_DEVICE, CARJACK.GRAPHICS.ZEROCOPY,
+#             CARJACK.GRAPHICS.BITRATE,
 #             CARJACK.DISPLAY.WIDTH, CARJACK.APP.COMMAND, ...  (CARJACK + `.` + config path)
 
 # What to stream:
 #   "app"      - run [app] command in carjack's own headless compositor (default)
-#   "desktop"  - capture your existing desktop via xdg-desktop-portal (ScreenCast) and inject
-#                input via RemoteDesktop. Needs a running desktop session with a portal backend;
-#                [app], [display], and the display cache are ignored. A consent dialog appears on
-#                first run. [graphics] zerocopy still applies: auto/true prefers VA-API/v4l2 GPU
+#   "desktop"  - capture your existing desktop via xdg-desktop-portal (ScreenCast; consent dialog
+#                on first run) and inject touch back over libei, which - unlike the portal's
+#                NotifyTouch* methods - maps correctly on a scaled/HiDPI monitor. Needs a running
+#                desktop session; [app], [display], and the display cache are ignored.
+#                [graphics] zerocopy still applies: auto/true prefers VA-API/v4l2 GPU
 #                zero-copy on the GPU that renders the desktop (needs that GPU's VA driver, e.g.
 #                intel-media-driver), then GL convert/scale, then software; false = software.
 source = "app"
@@ -41,6 +43,12 @@ drm_device = "auto"
 #   true     - require zero-copy; error out at startup if it can't be set up
 #   false    - software encode only
 zerocopy = "auto"
+
+# Target video bitrate in kbit/s, applied as CBR to whichever H264 encoder is selected (hardware or
+# software). The car's WiFi link is the bottleneck, so aiming too high shows up as stutter rather
+# than as detail - raise it only if the picture looks soft and the stream stays smooth.
+# Also settable as `carjack --bitrate <KBPS>` or CARJACK.GRAPHICS.BITRATE.
+bitrate = 3000   # 3 Mbit/s
 
 [display]
 # Initial compositor size/rate, used before the car reports its real display over AirPlay.

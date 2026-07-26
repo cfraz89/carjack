@@ -97,28 +97,70 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 
 `source = "app"` (default) streams carjack's own compositor running `[app]
 command`; `source = "desktop"` streams the user's *existing* desktop via
-xdg-desktop-portal. `main.rs` branches on
-it: `run_app` (compositor + app + display cache, below) or `run_desktop` (portal).
+xdg-desktop-portal (capture) plus libei (touch). `main.rs` branches on
+it: `run_app` (compositor + app + display cache, below) or `run_desktop`.
 Both share `establish_carplay`
 (the BT -> WiFi -> AirPlay handshake) and the per-session select loop; they differ
 only in the video source and where touch goes.
 
-Desktop mode (`src/portal.rs`, ashpd): `start_remote_desktop` opens a portal
-ScreenCast + RemoteDesktop session once at startup (consent dialog first run;
-`PersistMode::Application` remembers it) and yields a PipeWire node id;
-`encode::encode_pipewire_to_channel` scales/re-times it to the car (unlike the
-internal path - the desktop isn't the car's resolution), and touch is injected
-back via `RemoteDesktop::notify_touch_*`. `[graphics] zerocopy` picks the encode
-path (`build_pipewire_encode`) **based on the GPU that renders the desktop** - so
-the encoder runs on the same GPU the ScreenCast dmabuf lives on (encoding an
-Intel/AMD desktop on NVIDIA, or vice-versa, would be a cross-GPU copy).
-Touch is injected back via `RemoteDesktop::notify_touch_*`, but the car sends touch
-in *its* (scaled-down) display pixels while the portal wants the desktop *stream's*
-pixels - so `send_touch` scales car coords up by `desktop_size / car_size`. The
-desktop size is the encoder's *negotiated pipewiresrc frame size* (reported back via
-a watch channel), not the portal's `stream.size()` - the latter is often missing or
-HiDPI-physical (e.g. a 3456x2160 panel), which left touch landing in the top-left
-corner.
+Desktop mode uses **xdg-desktop-portal** for capture (`src/portal.rs`, ashpd):
+`start_remote_desktop` opens a ScreenCast + RemoteDesktop session once at startup
+(consent dialog on first run; `PersistMode::Application` remembers it) and yields a
+PipeWire node id. `encode::encode_pipewire_to_channel` scales/re-times it to the car
+(unlike the internal path - the desktop isn't the car's resolution). `[graphics]
+zerocopy` picks the encode path (`build_pipewire_encode`) **based on the GPU that
+renders the desktop**, so the encoder runs on the same GPU the ScreenCast dmabuf lives
+on (encoding an Intel/AMD desktop on NVIDIA, or vice-versa, would be a cross-GPU copy).
+
+**Touch goes over libei, not the portal's D-Bus methods** (`src/libei.rs`, the `reis`
+crate). The portal still opens the session; `RemoteDesktop.ConnectToEIS` (portal API
+v2) hands back an EI socket and input travels over that. Why, measured on GNOME 50 /
+mutter 50.1 with a 3456x2160 panel at scale 2 (2026-07-26): through `NotifyTouch*`
+three coordinate spaces disagree - `pipewiresrc` delivers the **physical buffer**
+(3456x2160), the stream's advertised `size` is **logical** (1728x1080), and Mutter's
+`meta_screen_cast_monitor_stream_transform_position` **divides** whatever it's given by
+the monitor scale (whenever DisplayConfig's `layout-mode` is `logical`, i.e. normally).
+xdg-desktop-portal's `check_position` validates against the *advertised* size, so
+logical coords get halved by Mutter and physical coords come back `"Invalid position"`:
+on a scaled monitor **no** coordinate both validates and lands right. libei has no such
+validation layer - an `ei_device` advertises **regions** in logical pixels and touch is
+addressed within one - so `send_touch` scales car coords into the region and adds its
+offset, with **no display-scale division** (adding one is what halved touch before).
+The region is picked by matching the video stream's `mapping_id` (that is what the id
+is for), which also makes multi-monitor correct. The `NotifyTouch*` path survives only
+as a fallback for portals older than API v2, where it scales to the advertised size and
+clamps just inside it (the check is exclusive, and CarPlay reports touch *at* the edge).
+
+Two hard-won gotchas in that path, both verified live:
+- **Ask for `DeviceType::Pointer`** in `SelectDevices` even though carjack only injects
+  touch. Mutter's `add_viewport_devices` opens with
+  `g_return_if_fail (eis_seat_has_capability (seat, EIS_DEVICE_CAP_POINTER_ABSOLUTE))`,
+  so Keyboard|Touchscreen alone yields a keyboard and *nothing else* - libei touch just
+  never becomes available (the assertion shows up in gnome-shell's journal).
+- **Never emit an out-of-order touch.** Mutter's EIS `release_slot` is a `g_assert` on
+  the slot being acquired, so an `up` for a slot that isn't down **aborts gnome-shell
+  and takes the whole session down** (it did, during this work). A duplicate `down`
+  leaks slots until `acquire_slot` fails, and a `motion` for an unknown id moves slot 0
+  - the wrong finger. `SlotTracker` filters every event against the compositor's
+  believed state, is cleared whenever a device pauses/is removed/disconnects (Mutter
+  drops its slots then), and `EiTouch::release_all` (called from `run_desktop` when a
+  car session ends) lifts anything still held so a car vanishing mid-gesture can't leave
+  a finger stuck down.
+`portal::display_scale()` is now only used to *detect* the advertised-logical /
+delivered-physical mismatch and warn once on the D-Bus fallback. It reads the scale from
+**`wp_fractional_scale_manager_v1::get_fractional_scale`** (`preferred_scale` is a
+numerator over 120, so 1.5 arrives exactly), with `wl_output.scale` as a fallback for
+compositors lacking the protocol - that one is an integer, so a 1.5 desktop reports 2.
+Gotcha: the scale is *per surface* and Mutter only sends `preferred_scale` once the
+surface has a **role**, so the probe surface gets an `xdg_toplevel` (no role = no event,
+ever). It never gets a buffer, so it can't map and no window appears.
+`portal::tests::portal_session_uses_libei` is the live check (`#[ignore]`, needs a human
+for the consent dialog): it asserts touch landed on libei, logs the regions, and with
+`CARJACK_TEST_INJECT=1` injects a tap and verifies the EI connection survived it.
+Landing accuracy was confirmed separately by aiming the session's absolute pointer at
+the car view's top-left corner and watching GNOME's hot corner fire (and *not* fire for
+a centre aim).
+
 `config::desktop_render_driver()` finds it from the card with a connected display
 (`/sys/class/drm/card*-<conn>/status`) and the `HW_BACKENDS` row whose `drivers`
 match is tried first; the others stay as fallbacks (in table order), then software.
@@ -146,7 +188,8 @@ chain. Note the `cuda` row's `gop-size=60`: when nvenc ends up fed *system memor
 is why one `encoder` string per row is enough. `tests/desktop.rs` drives GNOME's internal
 `org.gnome.Mutter.ScreenCast` D-Bus API to exercise all this without a car or a
 portal-consent dialog. `[app]`, `[display]`, and the display cache don't apply.
-Needs a desktop session with a portal backend (not the headless deployment device).
+Needs a live desktop session with a portal backend (so: not the headless deployment
+device), and a compositor with an EIS implementation for touch.
 
 ## Internal compositor (`src/compositor.rs`)
 
@@ -236,8 +279,10 @@ variant always matches the pipeline. Two families:
     case probing falls through to the next row.
   - **Intel/AMD** (`vaapi`): `appsrc(DMABuf) ! vapostproc ! vah264enc`.
   - **Qualcomm/embedded** (`v4l2`):
-    `appsrc(DMABuf) ! v4l2convert ! v4l2h264enc`. Untested off-device; keyframe
-    control is a best guess to revisit.
+    `appsrc(DMABuf) ! v4l2convert ! v4l2h264enc`. Untested off-device. Rate control
+    goes through `extra-controls` (V4L2 controls) rather than encoder properties:
+    `video_bitrate_mode=1` (CBR) + `video_bitrate` in bit/s. Keyframe interval is
+    still left at the driver's default - a best guess to revisit on the device.
   - **Vulkan is deliberately NOT a row** (evaluated 2026-07-26, gst 1.28.5). It's
     the obvious vendor-neutral candidate, and the encoder does exist
     (`vulkanh264enc`, registered per-device as `vulkanh264device<N>enc` when a
@@ -283,8 +328,16 @@ caps negotiation; that's the escape hatch's price:
   (`gop-size`/`key-int-max=30`, not a fraction of a second - frequent IDRs are
   large and burst the car's WiFi); no reorder/lookahead delay (`bframes=0`, plus
   `tune=ultra-low-latency`/`rc-lookahead=0`/`zerolatency` on nvenc,
-  `speed-preset=ultrafast tune=zerolatency` on x264); and CBR at 12 Mbit/s
-  (steady, link-friendly) rather than the encoders' spiky defaults.
+  `speed-preset=ultrafast tune=zerolatency` on x264); and CBR at `[graphics]
+  bitrate` (steady, link-friendly) rather than the encoders' spiky defaults.
+- **Bitrate is configurable** (`[graphics] bitrate` / `CARJACK.GRAPHICS.BITRATE` /
+  `--bitrate`, in kbit/s, default **3000**). Each encoder description spells the
+  unit it wants as a `{kbps}`/`{bps}` placeholder (openh264enc and the v4l2
+  `extra-controls` take bit/s, everything else kbit/s) and `Bitrate::apply`
+  substitutes it, so a new row just needs the right placeholder - a unit test
+  fails if a row hardcodes a rate instead. `CARPLAY_ENCODER` replaces the whole
+  description, so an override only gets the configured bitrate if it spells the
+  placeholder itself.
 - A leaky `queue` (`leaky=downstream`, `max-size-buffers=3`) sits after the
   appsrc so a momentary encode/WiFi stall drops the oldest frame instead of
   growing latency.

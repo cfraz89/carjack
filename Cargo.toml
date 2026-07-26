@@ -48,8 +48,11 @@ gstreamer = "0.24"
 gstreamer-app = "0.24"
 smithay = { version = "0.7.0", default-features = false, features = ["backend_egl", "backend_gbm", "renderer_gl", "wayland_frontend", "desktop"] }
 # Wayland *client* (separate from smithay's server side) - used only in desktop mode to read the
-# output scale from whatever compositor is running, for HiDPI touch mapping.
+# output scale from whatever compositor is running, for HiDPI touch mapping. `wayland-protocols`
+# (client side, staging) is there for `wp_fractional_scale_v1`, which reports the *exact* scale
+# (wl_output's is rounded to an integer).
 wayland-client = "0.31"
+wayland-protocols = { version = "0.32", default-features = false, features = ["client", "staging"] }
 gstreamer-allocators = "0.24"
 gstreamer-video = { version = "0.24", features = ["v1_24"] }
 cuda-dmabuf = { path = "cuda-dmabuf" }
@@ -66,6 +69,7 @@ zbus = { version = "5.18.0", features = ["tokio"] }
 thiserror = "2.0.19"
 ipnet = "2.12.0"
 enclose = "1.2.1"
+reis = { version = "0.7.0", features = ["tokio"] }
 
 # Agent-facing driver for the `run-carjack` skill: brings the compositor up and writes a frame to
 # PNG. Lives beside the skill it documents rather than in `examples/` so the pair stays together.

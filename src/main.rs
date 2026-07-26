@@ -14,7 +14,7 @@ use libcarjack::carplay_ctrl::wait_for_carplay_ctrl_probe;
 use carjack::compositor::Compositor;
 use carjack::config::{Cli, Config, Source};
 use carjack::display_cache::{DisplayCache, DisplayProps};
-use carjack::encode::{self, EncodeBackend};
+use carjack::encode::{self, Bitrate, EncodeBackend};
 use clap::Parser;
 
 use crate::{
@@ -22,6 +22,7 @@ use crate::{
     wireless::wireless_carplay,
 };
 
+mod libei;
 mod portal;
 mod usb;
 mod wifi_connect;
@@ -231,7 +232,8 @@ async fn run_app(config: Config) -> Result<()> {
     exit
 }
 
-/// `source = desktop`: stream the user's existing desktop via xdg-desktop-portal.
+/// `source = desktop`: stream the user's existing desktop via xdg-desktop-portal, with touch
+/// injected back over libei (see [`libei`]).
 async fn run_desktop(config: Config) -> Result<()> {
     // The gst `va` plugin only registers its VA-API elements (vapostproc/vah264enc) with this set
     // on multi-GPU boxes - it's how the desktop zero-copy path reaches an integrated (e.g. Intel)
@@ -243,15 +245,14 @@ async fn run_desktop(config: Config) -> Result<()> {
     }
 
     // Ask the portal for ScreenCast + RemoteDesktop access once - a consent dialog appears on the
-    // first run (`PersistMode::Application` remembers it after). The PipeWire node + input session
-    // persist across CarPlay reconnects, the way the compositor does in app mode.
+    // first run (`PersistMode::Application` remembers it after). Touch is then injected over libei
+    // (see `src/libei.rs`). The PipeWire node and input session persist across CarPlay reconnects,
+    // the way the compositor does in app mode.
     let rd = portal::start_remote_desktop().await?;
-    tracing::info!(
-        "Desktop source ready via xdg-desktop-portal (PipeWire node {})",
-        rd.node_id()
-    );
+    tracing::info!("Desktop source ready (PipeWire node {})", rd.node_id());
     // `[graphics] zerocopy` here selects the desktop encode path: GL (GPU) vs software convert.
     let zerocopy = config.graphics.zerocopy;
+    let bitrate = Bitrate::from_kbps(config.graphics.bitrate);
     let bt_device = config.bluetooth_device().unwrap_or_default().to_owned();
 
     loop {
@@ -260,7 +261,9 @@ async fn run_desktop(config: Config) -> Result<()> {
                 tracing::info!("Ctrl-C received, shutting down");
                 return Ok(());
             }
-            result = run_desktop_session(&rd, zerocopy, &bt_device) => {
+            result = run_desktop_session(&rd, zerocopy, bitrate, &bt_device) => {
+                // Lift anything still held: the input session outlives car sessions.
+                rd.end_session();
                 match result {
                     Ok(()) => {
                         tracing::info!("Session ended cleanly, exiting");
@@ -476,6 +479,7 @@ async fn run_session(
         frame_rx,
         video_tx,
         backend.clone(),
+        Bitrate::from_kbps(config.graphics.bitrate),
     )));
     let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx);
     tokio::pin!(video);
@@ -527,6 +531,7 @@ async fn run_session(
 async fn run_desktop_session(
     rd: &portal::RemoteDesktopStream,
     zerocopy: carjack::config::ZeroCopyMode,
+    bitrate: Bitrate,
     bt_device: &str,
 ) -> Result<()> {
     let Established {
@@ -538,14 +543,6 @@ async fn run_desktop_session(
     } = establish_carplay(bt_device).await?;
     let (width, height) = (conn.width, conn.height);
     tracing::info!("Streaming desktop to car at {width}x{height}");
-    // The portal maps touch in *logical* coords, but pipewiresrc reports *physical* pixels - divide
-    // by the display scale so touch reaches the whole (HiDPI) screen, not just the top-left. Read
-    // the scale from the compositor over Wayland (blocking, so off the async thread).
-    let display_scale = tokio::task::spawn_blocking(portal::display_scale)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(1.0);
 
     // Small on purpose: this is a real-time stream, so a shallow channel (plus the pipeline's leaky
     // queue) keeps latency low - a deep buffer just fills once and adds a permanent delay.
@@ -559,6 +556,7 @@ async fn run_desktop_session(
         width,
         height,
         zerocopy,
+        bitrate,
         video_tx,
         desktop_size_tx,
     )));
@@ -594,13 +592,9 @@ async fn run_desktop_session(
                     // Inject back into the real desktop via the portal (async, unlike the
                     // compositor's synchronous seat injection).
                     Some(event) => {
-                        // Physical pipewiresrc size -> logical (what the portal's touch space uses).
-                        let desktop_size = desktop_size_rx.borrow().map(|(w, h)| {
-                            (
-                                ((f64::from(w) / display_scale).round() as u32).max(1),
-                                ((f64::from(h) / display_scale).round() as u32).max(1),
-                            )
-                        });
+                        // The encoder's negotiated pipewiresrc size, in physical pixels;
+                        // `send_touch` converts to the portal's logical space itself.
+                        let desktop_size = *desktop_size_rx.borrow();
                         if let Err(e) = rd.send_touch(&event, (width, height), desktop_size).await {
                             tracing::warn!("portal touch inject failed: {e}");
                         }

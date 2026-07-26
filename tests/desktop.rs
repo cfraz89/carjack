@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use carjack::config::ZeroCopyMode;
-use carjack::encode::encode_pipewire_to_channel;
+use carjack::encode::{Bitrate, encode_pipewire_to_channel};
 use eyre::{Result, eyre};
 use futures::StreamExt;
 use libcarjack::airplay::EncodedFrame;
@@ -75,7 +75,16 @@ async fn desktop_pipewire_encodes() -> Result<()> {
     let (dsize_tx, _dsize_rx) = tokio::sync::watch::channel::<Option<(u32, u32)>>(None);
     let _encoder = AbortOnDropHandle::new(tokio::spawn(async move {
         if let Err(e) =
-            encode_pipewire_to_channel(node_id, 1080, 600, mode, video_tx, dsize_tx).await
+            encode_pipewire_to_channel(
+                node_id,
+                1080,
+                600,
+                mode,
+                Bitrate::default(),
+                video_tx,
+                dsize_tx,
+            )
+            .await
         {
             eprintln!("encoder error: {e}");
         }
