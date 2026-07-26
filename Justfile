@@ -52,22 +52,23 @@ test-run timeout="60" +flags="": (build flags)
 build +flags="": && (_setcap flags)
     {{toolbox_build}}cargo build {{flags}} < /dev/null
 
-# Run a single cargo test filtered by name (e.g. `just test compositor`), in the toolbox (when
-# USE_TOOLBOX is set) for the native build/link libs; the toolbox shares the host GPU/DRM the
-# compositor test needs at runtime.
-test test_name: (build "--tests")
-    cargo test {{test_name}} < /dev/null
+# Run cargo tests
+test +flags="":
+    {{toolbox_build}}cargo test {{flags}} < /dev/null
+
+test-bin +flags="": 
+    cargo test --bin carjack {{flags}} < /dev/null
 
 # The iAP2 protocol unit tests (message encode/decode against bytes captured from a working
 # iPhone session). Pure Rust - no GPU, gstreamer or toolbox needed, unlike `just test`.
-test-proto test_name="":
-    cargo test -p iap2-proto {{test_name}} < /dev/null
+test-proto +flags="":
+    cargo test -p iap2-proto {{flags}} < /dev/null
 
 # The libcarjack unit tests (iAP2 session logic, against bytes captured from real head units).
 # Links against gstreamer/catplay so it builds in the toolbox like `just build`, but needs no
 # GPU and no car. `cargo test` alone doesn't reach it - that only covers the root package.
-test-lib test_name="":
-    {{toolbox_build}}cargo test -p libcarjack --lib {{test_name}} < /dev/null
+test-lib +flags="":
+    {{toolbox_build}}cargo test -p libcarjack --lib {{flags}} < /dev/null
 
 # Install -devel packages that cuda-dmabuf links against (libEGL, libgbm, libgstcuda).
 # libcuda comes from the host NVIDIA driver — ensure /usr/lib64/libcuda.so exists in
