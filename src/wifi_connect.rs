@@ -37,6 +37,22 @@ pub struct CarWifi {
 }
 
 pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<CarWifi> {
+    // Already sitting on the car's AP? Reuse the live connection rather than activating a new
+    // profile over the top of it. Reassociating costs several seconds for no gain, and because a
+    // fresh association regenerates the interface's link-local address it drops us straight back
+    // into the duplicate-address-detection window that `wait_for_link_local` exists to cover -
+    // in `cfmoto_11.pcapng` the host was already on the car's SSID and we tore it down anyway.
+    match live_connection(ssid).await {
+        Ok(Some(car_wifi)) => {
+            tracing::info!("Already connected to {ssid}; reusing the live connection");
+            return Ok(car_wifi);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!("Couldn't inspect the current connection ({e}); connecting anyway")
+        }
+    }
+
     let settings = WifiConnectionBuilder::new(ssid)
         .wpa_psk(passphrase)
         .band(WifiBand::A)
@@ -60,6 +76,39 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
     .await?;
 
     Ok(car_wifi)
+}
+
+/// The current WiFi connection, if it is already on `ssid` and carries an address - i.e. there is
+/// nothing left for `connect_to_car_wifi` to do. `None` means "not it, go and connect".
+async fn live_connection(ssid: &str) -> Result<Option<CarWifi>> {
+    let Some(network) = get_network_manager().await.current_network().await? else {
+        return Ok(None);
+    };
+    // No address yet means the activation is still in flight; let the normal path drive it rather
+    // than handing back a half-configured connection.
+    if network.ssid != ssid || network.ip4_address.is_none() {
+        return Ok(None);
+    }
+    let active_path = active_connection_path(&network.device).await?;
+    Ok(Some(get_car_wifi(active_path).await?))
+}
+
+/// The `ActiveConnection` object path for an interface. `ActiveWifiConnection` doesn't carry the
+/// path and `get_car_wifi` needs one to read the gateway off IP4Config, so go via the device.
+async fn active_connection_path(iface: &str) -> Result<OwnedObjectPath> {
+    let conn = get_network_manager().await.dbus_connection();
+    let device_path = NetworkManagerProxy::new(conn)
+        .await?
+        .get_device_by_ip_iface(iface)
+        .await?;
+    let active = DeviceProxy::new(conn, device_path)
+        .await?
+        .active_connection()
+        .await?;
+    if active.as_str() == "/" {
+        return Err(eyre!("{iface} has no active connection"));
+    }
+    Ok(active)
 }
 
 async fn get_car_wifi(active_path: OwnedObjectPath) -> Result<CarWifi> {
@@ -194,6 +243,22 @@ trait ActiveConnection {
     fn ip4_config(&self) -> zbus::Result<OwnedObjectPath>;
 }
 #[proxy(
+    interface = "org.freedesktop.NetworkManager",
+    default_service = "org.freedesktop.NetworkManager",
+    default_path = "/org/freedesktop/NetworkManager"
+)]
+trait NetworkManager {
+    fn get_device_by_ip_iface(&self, iface: &str) -> zbus::Result<OwnedObjectPath>;
+}
+#[proxy(
+    interface = "org.freedesktop.NetworkManager.Device",
+    default_service = "org.freedesktop.NetworkManager"
+)]
+trait Device {
+    #[zbus(property)]
+    fn active_connection(&self) -> zbus::Result<OwnedObjectPath>;
+}
+#[proxy(
     interface = "org.freedesktop.NetworkManager.IP4Config",
     default_service = "org.freedesktop.NetworkManager"
 )]
@@ -297,6 +362,28 @@ mod tests {
             .await
             .expect("should find a settled link-local");
         assert!(addr.is_unicast_link_local(), "{addr} is not link-local");
+    }
+
+    /// Live check against NetworkManager: asking for the SSID we are already on must hand back
+    /// the live connection so `connect_to_car_wifi` skips reactivating it, and any other SSID must
+    /// not match. Read-only - it never activates or tears down anything.
+    #[tokio::test]
+    #[ignore = "needs a live NetworkManager WiFi connection; set CARJACK_TEST_SSID"]
+    async fn live_connection_matches_only_the_current_ssid() {
+        let ssid = std::env::var("CARJACK_TEST_SSID").expect("set CARJACK_TEST_SSID");
+        let found = super::live_connection(&ssid)
+            .await
+            .expect("querying the current connection failed")
+            .expect("the SSID we are on should match");
+        assert_eq!(found.ssid, ssid);
+        assert!(!found.iface.is_empty());
+
+        assert!(
+            super::live_connection("carjack-definitely-not-connected")
+                .await
+                .expect("querying an unrelated SSID failed")
+                .is_none()
+        );
     }
 
     /// Without an `IFA_FLAGS` attribute there is nothing but the header byte to go on.
