@@ -11,6 +11,7 @@ use iap2_proto::{
     packet::ControlByte,
     stream::SessionType,
 };
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tap::prelude::*;
 use tokio::sync::{mpsc, oneshot};
@@ -72,7 +73,19 @@ pub struct WifiCredentials {
     pub ssid: String,
     pub passphrase: Option<String>,
     pub bssid: Option<String>,
+    /// Where to reach the accessory's AirPlay receiver once we are on its AP, when it tells us
+    /// (0x4301 carries an address and port; the older flat 0x5703 does not).
+    ///
+    /// Worth using rather than discovering: the CFMOTO unit hands this over and then simply
+    /// waits - it never browses mDNS for our `_carplay-ctrl._tcp` and never sends the
+    /// `ctrl-int/1/connect` invite, so whoever waits for the other to speak first waits
+    /// forever. A link-local address here still needs a scope id, which only the caller (who
+    /// knows the interface) can attach.
+    pub airplay: Option<SocketAddr>,
 }
+
+/// Port to reach AirPlay on when the accessory named an address but no port.
+const DEFAULT_AIRPLAY_PORT: u16 = 7000;
 
 /// Who we tell the accessory we are, once authentication has succeeded.
 #[derive(Debug, Clone)]
@@ -363,11 +376,28 @@ impl<S: Stream> CarplaySession<S> {
                         .parameters
                         .get_param::<Vec<Parameter>>(ParameterId::WIFI_CONFIG_GROUP)
                         .unwrap_or_default();
-                    if let Some(port) = msg
+                    let port = msg
                         .parameters
                         .get_param::<u32>(ParameterId::WIFI_CONFIG_PORT)
-                    {
-                        tracing::info!("Accessory WiFi: airplay port={}", port);
+                        .and_then(|p| u16::try_from(p).ok())
+                        .unwrap_or(DEFAULT_AIRPLAY_PORT);
+                    // The address lives inside the group, as a text link-local (e.g.
+                    // "fe80::9083:8eff:feef:a7d3"). Parsing it here keeps the wire format in
+                    // one place; the scope id gets attached once we know the interface.
+                    let airplay = group
+                        .get_param::<String>(ParameterId::WIFI_CONFIG_IPV6)
+                        .and_then(|a| match a.parse::<IpAddr>() {
+                            Ok(ip) => Some(SocketAddr::new(ip, port)),
+                            Err(e) => {
+                                tracing::warn!("Accessory AirPlay address {a:?} unparseable: {e}");
+                                None
+                            }
+                        });
+                    match airplay {
+                        Some(addr) => tracing::info!("Accessory AirPlay endpoint: {addr}"),
+                        None => tracing::warn!(
+                            "Accessory gave no AirPlay address; will have to discover it"
+                        ),
                     }
                     if let Some(v) = msg
                         .parameters
@@ -387,6 +417,7 @@ impl<S: Stream> CarplaySession<S> {
                             bssid: msg
                                 .parameters
                                 .get_param::<String>(ParameterId::WIFI_CONFIG_MAC),
+                            airplay,
                         })
                 } else {
                     // 0x5703: flat parameters. Parameters 3 and 4 are a single byte each and
@@ -398,6 +429,9 @@ impl<S: Stream> CarplaySession<S> {
                             ssid,
                             passphrase: msg.parameters.get_param::<String>(ParameterId::PASSPHRASE),
                             bssid: None,
+                            // This dialect carries no address, so the AUTO BOX path keeps
+                            // discovering the receiver over mDNS exactly as before.
+                            airplay: None,
                         })
                 };
                 if let Some(creds) = creds {
@@ -420,11 +454,17 @@ impl<S: Stream> CarplaySession<S> {
                         );
                     }
                 }
-                // Now start EA session and signal ready
-                let payload = ControlMessage::start_ea_session("com.apple.carplay");
-                self.send_ctrl(payload).await?;
-                tracing::info!("Started EA session");
-                self.phase = SessionPhase::EaReady;
+                // Now start EA session and signal ready - but only the first time. The
+                // accessory repeats its WiFi configuration every ~3s until we show up on its
+                // AP (an iPhone gets it twice and answers neither, `iphone-cfmoto.pklg`), and
+                // answering each repeat with another EA session start sent it eight times in
+                // `cfmoto_10.pcapng`.
+                if !matches!(self.phase, SessionPhase::EaReady) {
+                    let payload = ControlMessage::start_ea_session("com.apple.carplay");
+                    self.send_ctrl(payload).await?;
+                    tracing::info!("Started EA session");
+                    self.phase = SessionPhase::EaReady;
+                }
                 if let Some(tx) = self.ready_tx.take() {
                     let _ = tx.send(());
                 }
@@ -441,6 +481,7 @@ impl<S: Stream> CarplaySession<S> {
                         ssid,
                         passphrase: Some(passphrase),
                         bssid,
+                        airplay: None,
                     };
                     let _ = self.wifi_tx.send(creds).await;
                 }

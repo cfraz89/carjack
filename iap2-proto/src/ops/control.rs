@@ -662,6 +662,12 @@ mod tests {
             group.get_param::<u8>(ParameterId::WIFI_CONFIG_CHANNEL),
             Some(157)
         );
+        // The address of the AirPlay receiver, which is what we actually connect out to -
+        // this unit never invites us, so discovery alone leaves both sides waiting.
+        assert_eq!(
+            group.get_param::<String>(ParameterId::WIFI_CONFIG_IPV6),
+            Some(String::from("fe80::9083:8eff:feef:a7d3"))
+        );
 
         assert_eq!(
             msg.parameters

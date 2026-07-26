@@ -1,101 +1,122 @@
-use eyre::{Result, eyre};
+use backon::{ConstantBuilder, Retryable};
+use enclose::enclose;
+use eyre::{ErrReport, Result, eyre};
+use ipnet::IpNet;
 use nmrs::NetworkManager;
 use nmrs::builders::{WifiBand, WifiConnectionBuilder};
 use std::net::IpAddr;
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::sync::OnceCell;
+use zbus::{proxy, zvariant::OwnedObjectPath};
+
+static NETWORK_MANAGER: OnceCell<NetworkManager> = OnceCell::const_new();
+
+pub(crate) async fn get_network_manager() -> &'static NetworkManager {
+    NETWORK_MANAGER
+        .get_or_init(async || {
+            NetworkManager::new()
+                .await
+                .expect("Unable to get networkmanager")
+        })
+        .await
+}
 
 pub struct CarWifi {
     #[allow(dead_code)]
     pub ssid: String,
+    #[allow(dead_code)]
     pub ip: IpAddr,
+    pub gateway: IpAddr,
     pub iface: String,
+    pub iface_mac: String,
 }
 
-pub async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<CarWifi> {
-    let nm = NetworkManager::new().await?;
+pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<CarWifi> {
+    let settings = WifiConnectionBuilder::new(ssid)
+        .wpa_psk(passphrase)
+        .band(WifiBand::A)
+        .hidden(true)
+        .ipv4_auto()
+        .build();
 
-    try_nm_connect(&nm, ssid, passphrase).await
-}
-
-async fn try_nm_connect(nm: &NetworkManager, ssid: &str, passphrase: &str) -> Result<CarWifi> {
-    for attempt in 0..10 {
-        let settings = WifiConnectionBuilder::new(ssid)
-            .wpa_psk(passphrase)
-            .band(WifiBand::A)
-            .hidden(true)
-            .ipv4_auto()
-            .build();
-
-        tracing::info!(
-            "NM add_and_activate_connection attempt {} for SSID={}",
-            attempt + 1,
-            ssid
-        );
-
-        match nm.add_and_activate_connection(settings, None, None).await {
-            Ok((conn_path, active_path)) => {
+    let car_wifi = enclose!(
+        (settings)
+            || async {
+                let (conn_path, active_path) = get_network_manager()
+                    .await
+                    .add_and_activate_connection(settings, None, None)
+                    .await?;
                 tracing::info!("Connection created: {}, active: {}", conn_path, active_path);
-                sleep(Duration::from_secs(2)).await;
-                if let Ok((ip, iface)) = get_car_ip(&nm).await {
-                    tracing::info!("Car WiFi connected via NM, IP: {} on {}", ip, iface);
-                    return Ok(CarWifi {
-                        ssid: ssid.to_string(),
-                        ip: guess_gateway(ip),
-                        iface,
-                    });
-                }
-                tracing::warn!("No IP yet, will retry");
+                let car_wifi = get_car_wifi(active_path).await?;
+                Ok::<_, ErrReport>(car_wifi)
             }
-            Err(e) => {
-                tracing::warn!("NM attempt {} failed: {e:#}", attempt + 1);
-            }
-        }
-        sleep(Duration::from_secs(3)).await;
-    }
+    )
+    .retry(ConstantBuilder::new().with_delay(Duration::from_secs(2)))
+    .await?;
 
-    Err(eyre!("Failed to connect to car WiFi after 10 attempts"))
+    Ok(car_wifi)
 }
 
-async fn get_car_ip(nm: &NetworkManager) -> Result<(IpAddr, String)> {
-    let devices = nm.list_devices().await?;
-    for dev in &devices {
-        if dev.device_type == nmrs::DeviceType::Wifi && dev.state == nmrs::DeviceState::Activated {
-            if let Some(ref ip_str) = dev.ip4_address {
-                if let Some(slash) = ip_str.find('/') {
-                    if let Ok(ip) = ip_str[..slash].parse::<IpAddr>() {
-                        return Ok((ip, dev.interface.clone()));
-                    }
-                }
-            }
-        }
-    }
-    Err(eyre!("No WiFi device with IP"))
+async fn get_car_wifi(active_path: OwnedObjectPath) -> Result<CarWifi> {
+    let network = get_network_manager()
+        .await
+        .current_network()
+        .await?
+        .ok_or(eyre!("No network connection"))?;
+    let addr = network
+        .ip4_address
+        .ok_or(eyre!("No address on current connection"))?;
+    let ipnet = addr.parse::<IpNet>().expect("Error parsing addr");
+    let ip = ipnet.addr();
+
+    let gateway = get_gateway(active_path).await?;
+
+    Ok(CarWifi {
+        ssid: network.ssid,
+        ip,
+        iface: network.device,
+        iface_mac: get_wifi_mac().await?,
+        gateway,
+    })
 }
 
-/// The station address of the first wireless interface on the host. Reported to the head unit
-/// (in `RequestAccessoryWiFiConfigurationInformation`) as the MAC that will join its AP, so it
-/// is needed before the connection exists - hence sysfs rather than an active NM device.
-pub fn local_wifi_mac() -> Option<String> {
-    let mut ifaces: Vec<_> = std::fs::read_dir("/sys/class/net")
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.join("wireless").exists() || p.join("phy80211").exists())
-        .collect();
-    // Stable pick when a host has more than one radio.
-    ifaces.sort();
-    let mac = std::fs::read_to_string(ifaces.first()?.join("address")).ok()?;
-    let mac = mac.trim().to_string();
-    (!mac.is_empty()).then_some(mac)
+pub(crate) async fn get_wifi_mac() -> Result<String> {
+    let network = get_network_manager()
+        .await
+        .current_network()
+        .await?
+        .ok_or(eyre!("No network connection"))?;
+    let device = get_network_manager()
+        .await
+        .wifi_device_by_interface(&network.device)
+        .await?;
+    Ok(device.hw_address)
 }
 
-fn guess_gateway(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            IpAddr::V4(std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], 1))
-        }
-        IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-    }
+#[proxy(
+    interface = "org.freedesktop.NetworkManager.Connection.Active",
+    default_service = "org.freedesktop.NetworkManager"
+)]
+trait ActiveConnection {
+    #[zbus(property)]
+    fn ip4_config(&self) -> zbus::Result<OwnedObjectPath>;
+}
+#[proxy(
+    interface = "org.freedesktop.NetworkManager.IP4Config",
+    default_service = "org.freedesktop.NetworkManager"
+)]
+trait IP4Config {
+    #[zbus(property)]
+    fn gateway(&self) -> zbus::Result<String>;
+}
+
+async fn get_gateway(active_path: OwnedObjectPath) -> Result<IpAddr> {
+    let conn = get_network_manager().await.dbus_connection();
+    let active_connection_proxy = ActiveConnectionProxy::new(conn, active_path).await?;
+    let ip4_config_path = active_connection_proxy.ip4_config().await?;
+    tracing::debug!(%ip4_config_path);
+    let ip4_config_proxy = IP4ConfigProxy::new(conn, ip4_config_path).await?;
+    let gateway: IpAddr = ip4_config_proxy.gateway().await?.parse()?;
+    tracing::debug!(?gateway);
+    Ok(gateway)
 }

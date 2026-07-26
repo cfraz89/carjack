@@ -291,13 +291,36 @@ struct Established {
     car_addr_rx: tokio::sync::oneshot::Receiver<String>,
 }
 
+/// Bind an IPv6 link-local address to the interface it has to be used on.
+///
+/// The accessory's AirPlay address is link-local (`fe80::/10`), which is ambiguous on a host
+/// with more than one interface - connecting to one without a scope id fails outright rather
+/// than picking the car's WiFi. Anything else is returned untouched.
+fn with_scope_id(addr: std::net::SocketAddr, iface: &str) -> std::net::SocketAddr {
+    let std::net::SocketAddr::V6(mut v6) = addr else {
+        return addr;
+    };
+    if !v6.ip().is_unicast_link_local() || v6.scope_id() != 0 {
+        return addr;
+    }
+    match nix::net::if_::if_nametoindex(iface) {
+        Ok(index) => {
+            v6.set_scope_id(index);
+            std::net::SocketAddr::V6(v6)
+        }
+        Err(e) => {
+            tracing::warn!("Couldn't resolve interface index for {iface} ({e}); no scope id");
+            addr
+        }
+    }
+}
+
 /// Run the Bluetooth -> WiFi -> AirPlay flow and return once AirPlay is connected (so the caller
 /// knows the car's display and can wire up the video source + input). Shared by both source modes.
 async fn establish_carplay(bt_device: &str) -> Result<Established> {
     let (touch_tx, touch_rx) = mpsc::channel::<TouchEvent>(64);
     let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCredentials>(4);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
-    let (bt_mac_tx, bt_mac_rx) = tokio::sync::oneshot::channel::<String>();
     let (car_addr_tx, car_addr_rx) = tokio::sync::oneshot::channel::<String>();
 
     tracing::info!("Starting CarPlay session");
@@ -313,12 +336,13 @@ async fn establish_carplay(bt_device: &str) -> Result<Established> {
         bt_device.to_owned(),
         wifi_tx,
         ready_tx,
-        bt_mac_tx,
         car_addr_tx,
     )));
 
     let mut wifi_handle: Option<tokio::task::JoinHandle<Result<CarWifi>>> = None;
     let mut ready_rx = Some(ready_rx);
+    // Where the accessory said its AirPlay receiver lives, if it said (0x4301 only).
+    let mut airplay_hint: Option<std::net::SocketAddr> = None;
 
     // Phase 1: connect WiFi immediately when creds arrive; wait for the EA session.
     loop {
@@ -332,6 +356,7 @@ async fn establish_carplay(bt_device: &str) -> Result<Established> {
                 };
             }
             Some(creds) = wifi_rx.recv() => {
+                airplay_hint = airplay_hint.or(creds.airplay);
                 if wifi_handle.is_none() {
                     tracing::info!("Got WiFi creds, connecting");
                     let handle = tokio::spawn(async move {
@@ -351,28 +376,35 @@ async fn establish_carplay(bt_device: &str) -> Result<Established> {
     let car_wifi_result = if let Some(handle) = wifi_handle {
         handle.await.map_err(|e| eyre!("WiFi task panicked: {e}"))?
     } else if let Some(creds) = wifi_rx.recv().await {
+        airplay_hint = airplay_hint.or(creds.airplay);
         connect_to_car_wifi(&creds.ssid, creds.passphrase.as_deref().unwrap_or("")).await
     } else {
         return Err(eyre!("No WiFi credentials received from car"));
     };
     let car_wifi = car_wifi_result?;
 
-    tracing::info!("Car WiFi connected, waiting for car probe...");
-
-    let bt_mac = bt_mac_rx
-        .await
-        .unwrap_or_else(|_| "00:00:00:00:00:00".to_string());
-
-    // Advertise _carplay-ctrl._tcp via mDNS, wait for the car's GET /ctrl-int/1/connect,
-    // and use its matching _airplay._tcp Bonjour record for the real peer address + HomeKit id.
-    let (peer_addr, remote_homekit_id) =
-        match wait_for_carplay_ctrl_probe(&car_wifi.iface, &bt_mac).await {
-            Ok(result) => result,
-            Err(e) => {
-                tracing::warn!("CarPlay Ctrl probe failed, falling back to guessed gateway: {e}");
-                (std::net::SocketAddr::new(car_wifi.ip, 7000), None)
+    //In testing, the bike sent us its airplay address, so we use that. It doesn't seem to
+    //invite us on mdns anyway, so only advertis on that if we aren't given the address outright
+    let (peer_addr, remote_homekit_id) = match airplay_hint {
+        Some(addr) => {
+            let addr = with_scope_id(addr, &car_wifi.iface);
+            tracing::info!("Connecting to AirPlay endpoint given by the car: {addr}");
+            (addr, None)
+        }
+        None => {
+            tracing::info!("Car WiFi connected, waiting for car probe...");
+            // Advertise _carplay-ctrl._tcp via mDNS, wait for the car's GET
+            // /ctrl-int/1/connect, and use its matching _airplay._tcp Bonjour record for the
+            // real peer address + HomeKit id.
+            match wait_for_carplay_ctrl_probe(&car_wifi.iface, &car_wifi.iface_mac).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::warn!("CarPlay Ctrl probe failed, falling back to gateway: {e}");
+                    (std::net::SocketAddr::new(car_wifi.gateway, 7000), None)
+                }
             }
-        };
+        }
+    };
 
     // Connect AirPlay to learn the car's display size + refresh.
     let conn = libcarjack::airplay::connect_airplay(peer_addr, remote_homekit_id).await?;
@@ -577,5 +609,42 @@ async fn run_desktop_session(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_scope_id;
+    use std::net::SocketAddr;
+
+    /// A link-local AirPlay address is unusable without knowing which interface it is on, so
+    /// the car's WiFi interface index has to be stamped into it. `lo` is always index 1.
+    #[test]
+    fn link_local_addresses_get_the_interface_scope() {
+        let addr: SocketAddr = "[fe80::9083:8eff:feef:a7d3]:7000".parse().unwrap();
+        let scoped = with_scope_id(addr, "lo");
+        let SocketAddr::V6(v6) = scoped else {
+            panic!("expected v6, got {scoped}")
+        };
+        assert_eq!(v6.scope_id(), 1);
+        assert_eq!(v6.port(), 7000);
+        assert_eq!(v6.ip().to_string(), "fe80::9083:8eff:feef:a7d3");
+    }
+
+    /// Everything else is left exactly as the car gave it: routable addresses need no scope,
+    /// and an unknown interface must not turn into a silently wrong one.
+    #[test]
+    fn other_addresses_are_untouched() {
+        for addr in [
+            "192.168.55.85:7000".parse::<SocketAddr>().unwrap(),
+            "[2001:db8::1]:7000".parse::<SocketAddr>().unwrap(),
+        ] {
+            assert_eq!(with_scope_id(addr, "lo"), addr);
+        }
+        let link_local: SocketAddr = "[fe80::1]:7000".parse().unwrap();
+        assert_eq!(
+            with_scope_id(link_local, "definitely-not-an-iface"),
+            link_local
+        );
     }
 }

@@ -26,6 +26,107 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - **iPhone pklg capture re-analyzed**: Found 62 iAP2 `FF 5A` packets and 4 `FF 55` switch commands. Extracted full protocol exchange: SYN→StartIdentification→IdentificationInformation→Auth→WiFiConfig→WirelessCarPlayUpdate. **Zero EA session messages** found — EA establishment likely happens over WiFi as part of AirPlay handshake, not Bluetooth.
 
 ### Active
+- **`cfmoto_10.pcapng` (2026-07-26, BT + WiFi in one capture): the link layer is FIXED and the
+  whole iAP2 handshake is now clean. What is left is a standoff on WiFi — the car waits for us
+  to connect to the AirPlay address it gave us, and we wait for it to invite us.**
+  - **The sequence fix works.** Keepalives repeat seq `0xa6` without consuming a number, and the
+    car acknowledges every packet from then on (`a6`→`a7`→`a8`…, its own seq advancing
+    `0x62`→`0x69`). No more frozen ack, no more deadlock. The full chain runs in 0.7 s and the
+    car hands over credentials in `0x4301`.
+  - **The `0x4301` repeat is normal, not a fault.** `iphone-cfmoto.pklg` shows the car sending
+    it twice ~3 s apart and the iPhone answering neither - it just bare-acks. The iPhone's iAP2
+    traffic simply *ends* at `4300`→`4301`. We were answering every repeat with another
+    `ea00` (`start_ea_session`), a message the iPhone never sends at all, eight times over.
+  - **The standoff, from the WiFi half of the same capture:** we join the car's AP at t=94.8
+    (DHCP `192.168.55.152`, car at `.85`), advertise `_carplay-ctrl._tcp` from t=97.1, and the
+    car **ARPs us at t=100** (`Who has 192.168.55.152? Tell 192.168.55.85`) - so it knows
+    exactly where we are. Then nothing: it never browses mDNS, never sends the
+    `ctrl-int/1/connect` invite. We send it nothing either - **zero packets to its address or
+    to port 7000 in the entire capture**. `wait_for_carplay_ctrl_probe` burns its full 15 s.
+  - **And the fallback aimed at the wrong host.** `guess_gateway()` rewrites the last octet to
+    `.1`, but this unit is its own DHCP server and gateway at `.85`. carjack ARPs
+    `192.168.55.1` three times (t=112.1, 113.2, 114.2), never gets a reply, never emits a SYN,
+    and tears down RFCOMM at t=114.15.
+  - **Fixed by using the address the car already gave us.** `0x4301` carries the AirPlay
+    receiver's address and port (`fe80::9083:8eff:feef:a7d3`, 7000) and we were parsing both
+    and throwing them away - `WifiCredentials` only had `{ssid, passphrase, bssid}`. It now
+    carries `airplay: Option<SocketAddr>`, and `establish_carplay` connects straight there when
+    present, skipping the probe entirely. `with_scope_id` stamps the WiFi interface's index
+    into link-local addresses (`fe80::/10` is unusable without a scope id on a multi-interface
+    host). The older flat `0x5703` carries no address, so **the AUTO BOX keeps the mDNS
+    discovery path unchanged**.
+  - `start_ea_session` now fires once per session instead of once per `0x4301` repeat.
+  - Tests: the `0x4301` parse test now pins the IPv6 address, and two tests cover `with_scope_id`
+    (link-local gets the index; routable/already-scoped/unknown-interface are left alone).
+  - Not yet retested against the bike. **The open question is whether connecting out is enough
+    on its own** - we pass `remote_homekit_id: None` on this path, where the ctrl-probe path
+    would have supplied a pairing id from the Bonjour record for a pair-verify fast path. If
+    the car rejects the connection, that is the first thing to look at.
+- **`cfmoto_9.pcapng` + `cfmoto_wifi_9.pcapng` (2026-07-26): the packet-length fix landed, but
+  the link still deadlocks — our keepalives were also *consuming a sequence number*, which
+  acknowledgements must not do. WiFi confirms carjack gets all the way to waiting for an
+  invite that the car will never send while Bluetooth is stuck.**
+  - The length fix is confirmed on the wire: keepalives are now `ff5a 0009 …`, 9 bytes,
+    correctly declared (frame 644). But the symptom is unchanged — the car's cumulative ack
+    freezes at `0xa6` and it retransmits `0x4301` nine times before giving up.
+  - **Cause: `send_packet` incremented `seq` for every packet, including empty ones.** A
+    packet with no payload is a pure acknowledgement and does **not** take a sequence number.
+    `iphone-cfmoto.pklg` settles it from both sides: the phone sends data as seq `0x47`, then
+    acknowledges two separate messages with seq `0x47` again (frames 30961, 31381); the car
+    likewise repeats `0x78` across three acks before moving on to `0x79`. So an ack repeats
+    the **last data packet's** number.
+  - What our version did: `EA00` at seq `0xa6` (acked fine), then three 1 s keepalives took us
+    to `0xa7`, `0xa8`, `0xa9`, and the next real message went out as `0xaa`. The accessory was
+    waiting for `0xa7`, saw a gap it could never have filled, and ignored everything from there
+    on. **The keepalive - added to stop the link timing out - is what was killing the link.**
+  - **Fixed** in `iap2-proto/src/iap2.rs`: `send_packet` only advances `seq` when there is a
+    payload, and `make_packet` gives an empty packet the previous number
+    (`seq.wrapping_sub(1)`) so it repeats the last data packet rather than pre-announcing the
+    next. Two `#[tokio::test]`s over a `tokio::io::duplex` pair pin the resulting sequence
+    (`Iap2::wrap` was factored out of `start` so a test can skip the switch/SYN handshake).
+  - **`cfmoto_wifi_9.pcapng` says the WiFi side is healthy and blocked on Bluetooth**, not
+    broken on its own: we associate to the car's AP, complete DHCP (`192.168.212.152` from the
+    car at `.138`), and advertise `_carplay-ctrl._tcp` 84 times - then nothing. **Zero TCP
+    packets in the entire capture**, and no neighbour solicitation for the AirPlay address the
+    car gave us. The car never sends the `ctrl-int/1/connect` invite that
+    `wait_for_carplay_ctrl_probe` waits 15 s for, which is exactly what you would expect while
+    its iAP2 state machine is still stuck re-sending `0x4301`. (Caveat: the two captures cover
+    different time windows - BT 16:39:19-16:40:15, WiFi 16:41:57-16:42:27 - so they are
+    consecutive runs of the same failure, not one synchronised recording.)
+  - Not yet retested against the bike.
+- **`cfmoto_8.pcapng` (2026-07-26): auth and the WiFi handoff BOTH work on the bike now. The
+  stall moved to the link layer — our keepalive packet declares the wrong length and destroys
+  the accessory's framing.**
+  - How far it gets, all in ~0.7 s: SYN → identification → `AA00`/`AA06`/`AA01` → **32-byte
+    `AA02` challenge answered with a real 64-byte signature** (frame 621 — the cert-driven
+    length is right) → `AA05` → `0x4E09` ("carjack") → **`0x4300`** → and at t=29.825 the car
+    answers **`0x4301` with the actual credentials**: SSID `CFMOTO-999700`, passphrase
+    `12345678`, channel 157, IPv6 `fe80::9083:8eff:…`. So the dialect work is confirmed
+    end-to-end on real hardware.
+  - **Then it dies.** We send `EA00` (start EA session) at t=29.827, the car acks it (seq
+    `0xa6`), and at **t=30.068 we send our first keepalive — after which the car never
+    acknowledges another packet of ours.** Its ack field is pinned at `0xa6` for the remaining
+    20 s while it retransmits its `0x4301` (seq `0xe8`, byte-identical) six times, gives up at
+    ~t=38, and drops the link.
+  - **Cause: `make_packet` computed `length = payload.len() + 10` unconditionally.** For an
+    empty payload there *is* no payload checksum, so the packet is 9 bytes — and we sent 9 —
+    but the header claimed 10. Confirmed off the wire: our keepalive is
+    `ff5a 000a 40 a7 e7 00 cf` inside an RFCOMM frame whose own length field says **9**
+    (frame 640; the trailing `0x40` is the RFCOMM FCS, not ours). The car's own bare acks say
+    `ff5a 0009 …` (frame 639). Reading `length`, the accessory consumes our 9 bytes and then
+    takes the first byte of the *next* packet as the tenth — so every subsequent packet is
+    mis-framed, its cumulative ack freezes, and the session deadlocks. The 1 s keepalive
+    guarantees this happens in every session, right after the handshake goes quiet.
+  - **Fixed**: packet construction moved into `Packet::new` in `iap2-proto/src/packet.rs`,
+    which sizes `length` as header + header checksum + payload + payload checksum *only when
+    there is a payload*; `Iap2::make_packet` delegates. Three tests pin it: the empty packet
+    encodes byte-for-byte to the car's own bare ack, a payload packet to our own accepted
+    `AA05`, and both round-trip through our decoder with nothing left over.
+  - **Observed but deliberately not "fixed":** we re-send `EA00` on every retransmitted
+    `0x4301`, because nothing dedupes a repeated sequence number. With framing correct the
+    retransmissions shouldn't happen at all, so adding dedupe now would be guessing at a
+    problem we can't see — revisit only if a capture shows genuine duplicates.
+  - Not yet retested against the bike.
 - **`bench_1.pcapng` (2026-07-26): the AUTO BOX bench unit regressed, and the cause was the
   32-byte auth challenge. The challenge length is now derived from the accessory's
   certificate instead of being guessed-and-retried.**
