@@ -46,9 +46,8 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
     2. **We asked for the WiFi config with a message this head unit does not implement.** Its own
        `IdentificationInformation` declares `MessagesSentByAccessory = {0xAA06, 0x4301}` (param
        0x0006) and `MessagesReceivedFromDevice = {0x4E09, 0x4300}` (param 0x0007). We sent
-       **0x5702**, which isn't in that set, so it was dropped. The iAP2 message IDs for
-       `Request/AccessoryWiFiConfigurationInformation` are **0x4300/0x4301**; `0x5702`/`0x5703`
-       were simply wrong. An iPhone sends `0x4E09` (device name) then `0x4300`, and the car answers
+       **0x5702**, which isn't in that set, so it was dropped. An iPhone sends `0x4E09`
+       (device name) then `0x4300`, and the car answers
        `0x4301` ~2.8 s later with SSID `CFMOTO-999700`, passphrase `12345678`, channel 157, IPv6
        `fe80::9083:8eff:feef:a7d3`, **port 7000**, its WiFi MAC and a session UUID.
   - **Wire format of 0x4301 (was being parsed wrong too):** the credentials are **nested** inside
@@ -60,10 +59,26 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
     `.claude/worktrees/iap2-auth-wifi-config`, uncommitted:
     - `generate_challenge()` → 32 bytes; an empty/missing `AuthenticationResponse` now logs an
       `error!` and does **not** send `AuthenticationSucceeded`.
-    - `ControlMessageId` ids corrected to `0x4300`/`0x4301`; after `AA05` we now send
-      `DeviceInformationUpdate` (0x4E09) then `RequestAccessoryWiFiConfigurationInformation`
-      (0x4300). **The iPhone's ~3.6 s gap between those two is deliberately not implemented** —
-      add it if the car still doesn't answer.
+    - **TWO WiFi-config dialects are supported, because the two head units disagree.** This was
+      nearly a silent regression: `carjack.log` (2026-07-17) shows the **AUTO BOX answering our
+      old 0x5702 with a 0x5703** whose parameters are **flat** — `0x0001` =
+      `carplay_wifi_9900\0`, `0x0002` = `12345678\0`, `0x0003` = `[02]`, `0x0004` = `[24]`.
+      So `0x5702`/`0x5703` were **not** wrong, they're that unit's dialect; the bike simply
+      speaks a different one (`0x4300`/`0x4301`, nested groups). Both pairs now exist as
+      distinct `ControlMessageId` variants (`…Grouped` = the 0x43xx, nested pair), and the
+      response handler parses flat or nested according to which arrived.
+    - **Dialect choice is driven by the accessory, not guessed:** `IdentificationInformation`
+      parameter **7** (`MessagesReceivedFromDevice`) is now parsed into `accepted_messages`.
+      Declares 0x4300 → send the grouped request; otherwise → send legacy 0x5702, which is
+      exactly the old behaviour, so a unit that declares nothing (possibly the AUTO BOX — its
+      param list was never captured) is unaffected. `DeviceInformationUpdate` (0x4E09) is
+      likewise only sent when declared. **The iPhone's ~3.6 s gap before 0x4300 is deliberately
+      not implemented** — add it if the car still doesn't answer.
+    - **The 32-byte challenge falls back to 20.** The AUTO BOX was working with a 20-byte
+      challenge, and we can't tell a coprocessor's generation before asking, so `send_challenge`
+      tries **32 (SHA-256) first and retries once at 20 (SHA-1)** if the accessory returns an
+      empty `AuthenticationResponse`. Only after both fail do we log the error and withhold
+      `AuthenticationSucceeded`. That keeps the bike's fix without betting the bench unit on it.
     - Nested parameters ("groups") and NUL-terminated strings are handled through the existing
       `IntoParameter`/`TryFromParam` traits rather than bespoke helpers: `IntoParameter for
       Vec<Parameter>` writes a group, `TryFromParam for Vec<Parameter>` reads one (so

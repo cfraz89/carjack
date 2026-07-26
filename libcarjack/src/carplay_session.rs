@@ -43,6 +43,15 @@ pub struct TouchEvent {
     pub y: f64,
 }
 
+/// Apple auth coprocessor 3.0 signs a 32-byte SHA-256 digest; 2.0C signs a 20-byte SHA-1 one.
+/// We can't tell which a head unit has before asking, so we try the larger first and fall back
+/// (the CFMOTO unit returned an empty response to 20 bytes; the AUTO BOX accepted 20).
+const SHA256_CHALLENGE_LEN: usize = 32;
+const SHA1_CHALLENGE_LEN: usize = 20;
+
+const MSG_DEVICE_INFORMATION_UPDATE: u16 = 0x4E09;
+const MSG_REQUEST_WIFI_CONFIG_GROUPED: u16 = 0x4300;
+
 #[derive(Debug, Clone)]
 pub struct WifiCredentials {
     pub ssid: String,
@@ -73,6 +82,11 @@ pub struct CarplaySession<S: Stream> {
     identity: DeviceIdentity,
     phase: SessionPhase,
     ea_session_id: u8,
+    /// `MessagesReceivedFromDevice` from the accessory's IdentificationInformation. Empty
+    /// when it didn't declare one, in which case we fall back to the older dialect.
+    accepted_messages: Vec<u16>,
+    /// Length of the last authentication challenge we sent, for the SHA-256 -> SHA-1 retry.
+    challenge_len: usize,
     ready_tx: Option<oneshot::Sender<()>>,
 }
 
@@ -89,8 +103,14 @@ impl<S: Stream> CarplaySession<S> {
             identity,
             phase: SessionPhase::Auth,
             ea_session_id: 0,
+            accepted_messages: Vec::new(),
+            challenge_len: 0,
             ready_tx: Some(ready_tx),
         }
+    }
+
+    fn accepts(&self, message_id: u16) -> bool {
+        self.accepted_messages.contains(&message_id)
     }
 
     pub async fn run(&mut self) -> Result<(), Iap2Error> {
@@ -132,16 +152,14 @@ impl<S: Stream> CarplaySession<S> {
         self.send_ctrl(ControlMessage::start_identification()).await
     }
 
-    /// The accessory's Apple authentication coprocessor signs a 32-byte SHA-256 digest.
-    /// A 20-byte (SHA-1 sized, coprocessor 2.0C) challenge is not something a 3.0 part can
-    /// sign: the CFMOTO unit answered one with an *empty* `AuthenticationResponse`
-    /// (`cfmoto_7.pcapng`), where an iPhone's 32-byte challenge gets a 64-byte signature.
-    fn generate_challenge() -> [u8; 32] {
+    /// Send an authentication challenge of `len` bytes and remember the size, so an empty
+    /// response can be retried at the other digest length.
+    async fn send_challenge(&mut self, len: usize) -> Result<(), Iap2Error> {
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let mut challenge = [0u8; 32];
+        let mut challenge = vec![0u8; len];
         let mut state = seed;
         for byte in challenge.iter_mut() {
             state = state
@@ -149,7 +167,9 @@ impl<S: Stream> CarplaySession<S> {
                 .wrapping_add(1442695040888963407);
             *byte = (state >> 32) as u8;
         }
-        challenge
+        self.challenge_len = len;
+        self.send_ctrl(ControlMessage::authentication_challenge(&challenge))
+            .await
     }
 
     async fn dispatch_packet(
@@ -208,6 +228,17 @@ impl<S: Stream> CarplaySession<S> {
                     .or_else(|| msg.parameters.get_param::<String>(ParameterId::DISPLAY_NAME))
                     .unwrap_or_else(|| String::from("Unknown"));
                 tracing::info!("Accessory identified: {}", name);
+                // Head units disagree about which WiFi-config dialect they speak, so take the
+                // accessory at its word instead of guessing. Absent the declaration we keep the
+                // 0x5702 behaviour that the AUTO BOX bench unit is known to answer.
+                self.accepted_messages = msg
+                    .parameters
+                    .get_param::<Vec<u16>>(ParameterId::MESSAGES_RECEIVED_FROM_DEVICE)
+                    .unwrap_or_default();
+                tracing::debug!(
+                    "Accessory accepts message ids: {:04x?}",
+                    self.accepted_messages
+                );
                 self.send_ctrl(ControlMessage::identification_accepted())
                     .await?;
                 self.send_ctrl(ControlMessage::request_auth_certificate_serial())
@@ -220,9 +251,7 @@ impl<S: Stream> CarplaySession<S> {
             }
             ControlMessageId::AuthenticationCertificate => {
                 tracing::debug!("Received authentication certificate");
-                let challenge = Self::generate_challenge();
-                self.send_ctrl(ControlMessage::authentication_challenge(&challenge))
-                    .await?;
+                self.send_challenge(SHA256_CHALLENGE_LEN).await?;
             }
             ControlMessageId::AuthenticationResponse => {
                 // An accessory that could not sign our challenge answers with an empty
@@ -234,27 +263,52 @@ impl<S: Stream> CarplaySession<S> {
                     .get_param::<Vec<u8>>(ParameterId::AUTH_DATA)
                     .unwrap_or_default();
                 if signature.is_empty() {
+                    // A coprocessor that cannot sign the digest we sent returns an empty
+                    // response rather than AuthenticationFailed. The digest size is the part
+                    // we can't know up front - auth IC 3.0 wants 32 bytes (SHA-256), 2.0C
+                    // wants 20 (SHA-1) - so drop to the shorter one once before giving up.
+                    if self.challenge_len > SHA1_CHALLENGE_LEN {
+                        tracing::warn!(
+                            "Accessory could not sign a {}-byte challenge; retrying with {}",
+                            self.challenge_len,
+                            SHA1_CHALLENGE_LEN
+                        );
+                        return self.send_challenge(SHA1_CHALLENGE_LEN).await;
+                    }
                     tracing::error!(
-                        "Accessory returned an empty AuthenticationResponse - it could not sign \
-                         our challenge. Not sending AuthenticationSucceeded."
+                        "Accessory returned an empty AuthenticationResponse to both a {}- and a \
+                         {}-byte challenge - it cannot sign ours. Not sending \
+                         AuthenticationSucceeded.",
+                        SHA256_CHALLENGE_LEN,
+                        SHA1_CHALLENGE_LEN
                     );
                     return Ok(());
                 }
                 tracing::info!("Authentication complete ({} byte signature)", signature.len());
                 self.send_ctrl(ControlMessage::authentication_succeeded())
                     .await?;
-                // Identify ourselves, then ask for the AP credentials. These two are the only
-                // messages the CFMOTO unit declares it accepts (MessagesReceivedFromDevice =
-                // {0x4E09, 0x4300}), and an iPhone sends exactly this pair here.
-                self.send_ctrl(ControlMessage::device_information_update(
-                    &self.identity.name,
-                ))
-                .await?;
-                self.send_ctrl(ControlMessage::request_accessory_wifi_config(
-                    &self.identity.transport_identifier,
-                    &self.identity.wifi_mac,
-                ))
-                .await?;
+                // Only the CFMOTO-style units want a DeviceInformationUpdate here; sending one
+                // to a unit that never asked for it is the sort of thing that gets a session
+                // dropped, so gate it on the declared list.
+                if self.accepts(MSG_DEVICE_INFORMATION_UPDATE) {
+                    self.send_ctrl(ControlMessage::device_information_update(
+                        &self.identity.name,
+                    ))
+                    .await?;
+                }
+                // Ask for the AP credentials in whichever dialect this accessory speaks.
+                if self.accepts(MSG_REQUEST_WIFI_CONFIG_GROUPED) {
+                    tracing::debug!("Requesting WiFi config (0x4300, grouped)");
+                    self.send_ctrl(ControlMessage::request_accessory_wifi_config_grouped(
+                        &self.identity.transport_identifier,
+                        &self.identity.wifi_mac,
+                    ))
+                    .await?;
+                } else {
+                    tracing::debug!("Requesting WiFi config (0x5702, flat)");
+                    self.send_ctrl(ControlMessage::request_accessory_wifi_config())
+                        .await?;
+                }
                 self.phase = SessionPhase::WaitingForWifiConfig;
             }
             ControlMessageId::RequestAppLaunch
@@ -275,45 +329,63 @@ impl<S: Stream> CarplaySession<S> {
                     let _ = tx.send(());
                 }
             }
-            ControlMessageId::AccessoryWiFiConfigurationInformation => {
-                tracing::debug!("Received AccessoryWiFiConfigurationInformation");
-                // The credentials are nested one level down, in the group at top-level
-                // parameter 1; the accessory's MAC, the AirPlay port and its firmware
-                // version sit alongside that group at the top level.
-                let group = msg
-                    .parameters
-                    .get_param::<Vec<Parameter>>(ParameterId::WIFI_CONFIG_GROUP)
-                    .unwrap_or_default();
-                let bssid = msg.parameters.get_param::<String>(ParameterId::WIFI_CONFIG_MAC);
-                if let Some(port) = msg.parameters.get_param::<u32>(ParameterId::WIFI_CONFIG_PORT) {
-                    tracing::info!("Accessory WiFi: airplay port={}", port);
-                }
-                if let Some(v) = msg
-                    .parameters
-                    .get_param::<String>(ParameterId::WIFI_CONFIG_VERSION)
-                {
-                    tracing::debug!("Accessory firmware version: {}", v);
-                }
-                if let Some(ssid) = group.get_param::<String>(ParameterId::WIFI_CONFIG_SSID) {
-                    let passphrase = group.get_param::<String>(ParameterId::WIFI_CONFIG_PASSPHRASE);
-                    tracing::info!("Accessory WiFi: ssid={}", ssid);
-                    if let Some(ref pw) = passphrase {
-                        tracing::info!("Accessory WiFi: passphrase={}", pw);
+            ControlMessageId::AccessoryWiFiConfigurationInformation
+            | ControlMessageId::AccessoryWiFiConfigurationInformationGrouped => {
+                tracing::debug!("Received {:?}", msg.message_id);
+                let grouped = msg.message_id
+                    == ControlMessageId::AccessoryWiFiConfigurationInformationGrouped;
+                let creds = if grouped {
+                    // 0x4301: credentials nested in the group at top-level parameter 1, with
+                    // the accessory's MAC, AirPlay port and firmware version beside it.
+                    let group = msg
+                        .parameters
+                        .get_param::<Vec<Parameter>>(ParameterId::WIFI_CONFIG_GROUP)
+                        .unwrap_or_default();
+                    if let Some(port) =
+                        msg.parameters.get_param::<u32>(ParameterId::WIFI_CONFIG_PORT)
+                    {
+                        tracing::info!("Accessory WiFi: airplay port={}", port);
+                    }
+                    if let Some(v) = msg
+                        .parameters
+                        .get_param::<String>(ParameterId::WIFI_CONFIG_VERSION)
+                    {
+                        tracing::debug!("Accessory firmware version: {}", v);
                     }
                     if let Some(ch) = group.get_param::<u8>(ParameterId::WIFI_CONFIG_CHANNEL) {
                         tracing::info!("Accessory WiFi: channel={}", ch);
                     }
-                    if let Some(ref b) = bssid {
+                    group
+                        .get_param::<String>(ParameterId::WIFI_CONFIG_SSID)
+                        .map(|ssid| WifiCredentials {
+                            ssid,
+                            passphrase: group
+                                .get_param::<String>(ParameterId::WIFI_CONFIG_PASSPHRASE),
+                            bssid: msg.parameters.get_param::<String>(ParameterId::WIFI_CONFIG_MAC),
+                        })
+                } else {
+                    // 0x5703: flat parameters. Parameters 3 and 4 are a single byte each and
+                    // are not a BSSID (the AUTO BOX sends 0x02 and 0x24); nothing downstream
+                    // uses one, so don't invent it.
+                    msg.parameters
+                        .get_param::<String>(ParameterId::SSID)
+                        .map(|ssid| WifiCredentials {
+                            ssid,
+                            passphrase: msg.parameters.get_param::<String>(ParameterId::PASSPHRASE),
+                            bssid: None,
+                        })
+                };
+                if let Some(creds) = creds {
+                    tracing::info!("Accessory WiFi: ssid={}", creds.ssid);
+                    if let Some(ref pw) = creds.passphrase {
+                        tracing::info!("Accessory WiFi: passphrase={}", pw);
+                    }
+                    if let Some(ref b) = creds.bssid {
                         tracing::info!("Accessory WiFi: bssid={}", b);
                     }
-                    let creds = WifiCredentials {
-                        ssid,
-                        passphrase,
-                        bssid,
-                    };
                     let _ = self.wifi_tx.try_send(creds);
                 } else {
-                    tracing::warn!("AccessoryWiFiConfigurationInformation carried no SSID");
+                    tracing::warn!("{:?} carried no SSID", msg.message_id);
                     for p in &msg.parameters {
                         let id = p.id.raw();
                         tracing::info!(
