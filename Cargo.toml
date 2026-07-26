@@ -70,6 +70,7 @@ thiserror = "2.0.19"
 ipnet = "2.12.0"
 enclose = "1.2.1"
 reis = { version = "0.7.0", features = ["tokio"] }
+rtnetlink = "0.21.0"
 
 # Agent-facing driver for the `run-carjack` skill: brings the compositor up and writes a frame to
 # PNG. Lives beside the skill it documents rather than in `examples/` so the pair stays together.
