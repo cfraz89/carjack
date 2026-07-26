@@ -44,10 +44,25 @@ pub struct TouchEvent {
 }
 
 /// Apple auth coprocessor 3.0 signs a 32-byte SHA-256 digest; 2.0C signs a 20-byte SHA-1 one.
-/// We can't tell which a head unit has before asking, so we try the larger first and fall back
-/// (the CFMOTO unit returned an empty response to 20 bytes; the AUTO BOX accepted 20).
 const SHA256_CHALLENGE_LEN: usize = 32;
 const SHA1_CHALLENGE_LEN: usize = 20;
+
+/// OID prefix 1.2.840.10045 (ansi-X9-62, elliptic curve), as it appears in a DER OID body.
+const OID_ANSI_X962_EC: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d];
+
+/// Pick the challenge digest length from the accessory's certificate.
+///
+/// Need to match challenge length with certificate type otherwise the connection conks out
+fn challenge_len_for_certificate(certificate: &[u8]) -> usize {
+    if certificate
+        .windows(OID_ANSI_X962_EC.len())
+        .any(|window| window == OID_ANSI_X962_EC)
+    {
+        SHA256_CHALLENGE_LEN
+    } else {
+        SHA1_CHALLENGE_LEN
+    }
+}
 
 const MSG_DEVICE_INFORMATION_UPDATE: u16 = 0x4E09;
 const MSG_REQUEST_WIFI_CONFIG_GROUPED: u16 = 0x4300;
@@ -85,7 +100,7 @@ pub struct CarplaySession<S: Stream> {
     /// `MessagesReceivedFromDevice` from the accessory's IdentificationInformation. Empty
     /// when it didn't declare one, in which case we fall back to the older dialect.
     accepted_messages: Vec<u16>,
-    /// Length of the last authentication challenge we sent, for the SHA-256 -> SHA-1 retry.
+    /// Length of the authentication challenge we sent, so a rejection names it.
     challenge_len: usize,
     ready_tx: Option<oneshot::Sender<()>>,
 }
@@ -152,8 +167,8 @@ impl<S: Stream> CarplaySession<S> {
         self.send_ctrl(ControlMessage::start_identification()).await
     }
 
-    /// Send an authentication challenge of `len` bytes and remember the size, so an empty
-    /// response can be retried at the other digest length.
+    /// Send an authentication challenge of `len` bytes, remembering the size so a rejection
+    /// can name it. Pick `len` with [`challenge_len_for_certificate`].
     async fn send_challenge(&mut self, len: usize) -> Result<(), Iap2Error> {
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -225,7 +240,10 @@ impl<S: Stream> CarplaySession<S> {
                 let name = msg
                     .parameters
                     .get_param::<String>(ParameterId::ACCESSORY_NAME)
-                    .or_else(|| msg.parameters.get_param::<String>(ParameterId::DISPLAY_NAME))
+                    .or_else(|| {
+                        msg.parameters
+                            .get_param::<String>(ParameterId::DISPLAY_NAME)
+                    })
                     .unwrap_or_else(|| String::from("Unknown"));
                 tracing::info!("Accessory identified: {}", name);
                 // Head units disagree about which WiFi-config dialect they speak, so take the
@@ -250,8 +268,23 @@ impl<S: Stream> CarplaySession<S> {
                     .await?;
             }
             ControlMessageId::AuthenticationCertificate => {
-                tracing::debug!("Received authentication certificate");
-                self.send_challenge(SHA256_CHALLENGE_LEN).await?;
+                let certificate = msg
+                    .parameters
+                    .get_param::<Vec<u8>>(ParameterId::AUTH_DATA)
+                    .unwrap_or_default();
+                let len = challenge_len_for_certificate(&certificate);
+                tracing::debug!(
+                    "Received authentication certificate ({} bytes, auth IC {}); challenging \
+                     with {} bytes",
+                    certificate.len(),
+                    if len == SHA256_CHALLENGE_LEN {
+                        "3.0 (ECC)"
+                    } else {
+                        "2.0C (RSA)"
+                    },
+                    len
+                );
+                self.send_challenge(len).await?;
             }
             ControlMessageId::AuthenticationResponse => {
                 // An accessory that could not sign our challenge answers with an empty
@@ -263,28 +296,17 @@ impl<S: Stream> CarplaySession<S> {
                     .get_param::<Vec<u8>>(ParameterId::AUTH_DATA)
                     .unwrap_or_default();
                 if signature.is_empty() {
-                    // A coprocessor that cannot sign the digest we sent returns an empty
-                    // response rather than AuthenticationFailed. The digest size is the part
-                    // we can't know up front - auth IC 3.0 wants 32 bytes (SHA-256), 2.0C
-                    // wants 20 (SHA-1) - so drop to the shorter one once before giving up.
-                    if self.challenge_len > SHA1_CHALLENGE_LEN {
-                        tracing::warn!(
-                            "Accessory could not sign a {}-byte challenge; retrying with {}",
-                            self.challenge_len,
-                            SHA1_CHALLENGE_LEN
-                        );
-                        return self.send_challenge(SHA1_CHALLENGE_LEN).await;
-                    }
                     tracing::error!(
-                        "Accessory returned an empty AuthenticationResponse to both a {}- and a \
-                         {}-byte challenge - it cannot sign ours. Not sending \
-                         AuthenticationSucceeded.",
-                        SHA256_CHALLENGE_LEN,
-                        SHA1_CHALLENGE_LEN
+                        "Accessory returned an empty AuthenticationResponse to our {}-byte \
+                         challenge - it cannot sign it. Not sending AuthenticationSucceeded.",
+                        self.challenge_len
                     );
                     return Ok(());
                 }
-                tracing::info!("Authentication complete ({} byte signature)", signature.len());
+                tracing::info!(
+                    "Authentication complete ({} byte signature)",
+                    signature.len()
+                );
                 self.send_ctrl(ControlMessage::authentication_succeeded())
                     .await?;
                 // Only the CFMOTO-style units want a DeviceInformationUpdate here; sending one
@@ -341,8 +363,9 @@ impl<S: Stream> CarplaySession<S> {
                         .parameters
                         .get_param::<Vec<Parameter>>(ParameterId::WIFI_CONFIG_GROUP)
                         .unwrap_or_default();
-                    if let Some(port) =
-                        msg.parameters.get_param::<u32>(ParameterId::WIFI_CONFIG_PORT)
+                    if let Some(port) = msg
+                        .parameters
+                        .get_param::<u32>(ParameterId::WIFI_CONFIG_PORT)
                     {
                         tracing::info!("Accessory WiFi: airplay port={}", port);
                     }
@@ -361,7 +384,9 @@ impl<S: Stream> CarplaySession<S> {
                             ssid,
                             passphrase: group
                                 .get_param::<String>(ParameterId::WIFI_CONFIG_PASSPHRASE),
-                            bssid: msg.parameters.get_param::<String>(ParameterId::WIFI_CONFIG_MAC),
+                            bssid: msg
+                                .parameters
+                                .get_param::<String>(ParameterId::WIFI_CONFIG_MAC),
                         })
                 } else {
                     // 0x5703: flat parameters. Parameters 3 and 4 are a single byte each and
@@ -462,5 +487,58 @@ impl<S: Stream> CarplaySession<S> {
         // frames are currently just parsed and acknowledged.
         let _ = EaFrame::from_bytes(payload);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// First 142 bytes of the AUTO BOX bench unit's AuthenticationCertificate (0xAA01),
+    /// captured in `bench_1.pcapng` frame 386. RSA-1024 / `sha1WithRSAEncryption`, issued by
+    /// the "Apple iPod Accessories Certification Authority" - an auth coprocessor 2.0C.
+    const BENCH_CERTIFICATE_PREFIX: &str = concat!(
+        "3082038806092a864886f70d010702a0820379308203750201013100300b",
+        "06092a864886f70d010701a082035d3082035930820241a003020102020f2222",
+        "aa180511aa06aa5392aa151525300d06092a864886f70d010105050030818331",
+        "0b300906035504061302555331133011060355040a130a4170706c6520496e63",
+        "2e31263024060355040b131d4170706c",
+    );
+
+    /// The same prefix of the CFMOTO bike's certificate, from `cfmoto_7.pcapng` frame 829.
+    /// ECC / `ecdsa-with-SHA256`, issued by "Apple Accessories Certification Authority -
+    /// 00000002" - an auth coprocessor 3.0.
+    const BIKE_CERTIFICATE_PREFIX: &str = concat!(
+        "3082025d06092a864886f70d010702a082024e3082024a0201013100300b",
+        "06092a864886f70d010701a08202303082022c308201d1a003020102021024fb",
+        "0606902e707205d314b0059a193d300a06082a8648ce3d040302308189310b30",
+        "0906035504061302555331133011060355040a130a4170706c6520496e632e31",
+        "263024060355040b131d4170706c6520",
+    );
+
+    #[test]
+    fn challenge_length_follows_certificate_key_type() {
+        assert_eq!(
+            challenge_len_for_certificate(&unhex(BENCH_CERTIFICATE_PREFIX)),
+            SHA1_CHALLENGE_LEN
+        );
+        assert_eq!(
+            challenge_len_for_certificate(&unhex(BIKE_CERTIFICATE_PREFIX)),
+            SHA256_CHALLENGE_LEN
+        );
+    }
+
+    /// A unit whose certificate we failed to read at all must not get the length that hangs
+    /// the older hardware.
+    #[test]
+    fn missing_certificate_falls_back_to_the_shorter_challenge() {
+        assert_eq!(challenge_len_for_certificate(&[]), SHA1_CHALLENGE_LEN);
     }
 }

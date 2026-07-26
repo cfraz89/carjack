@@ -63,6 +63,12 @@ test test_name: (build "--tests")
 test-proto test_name="":
     cargo test -p iap2-proto {{test_name}} < /dev/null
 
+# The libcarjack unit tests (iAP2 session logic, against bytes captured from real head units).
+# Links against gstreamer/catplay so it builds in the toolbox like `just build`, but needs no
+# GPU and no car. `cargo test` alone doesn't reach it - that only covers the root package.
+test-lib test_name="":
+    {{toolbox_build}}cargo test -p libcarjack --lib {{test_name}} < /dev/null
+
 # Install -devel packages that cuda-dmabuf links against (libEGL, libgbm, libgstcuda).
 # libcuda comes from the host NVIDIA driver — ensure /usr/lib64/libcuda.so exists in
 # the toolbox (create a symlink or bind-mount the host path).
