@@ -26,6 +26,66 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - **iPhone pklg capture re-analyzed**: Found 62 iAP2 `FF 5A` packets and 4 `FF 55` switch commands. Extracted full protocol exchange: SYN→StartIdentification→IdentificationInformation→Auth→WiFiConfig→WirelessCarPlayUpdate. **Zero EA session messages** found — EA establishment likely happens over WiFi as part of AirPlay handshake, not Bluetooth.
 
 ### Active
+- **`cfmoto_7.pcapng` (2026-07-26): the passive-connection + session-ID fixes WORK on the bike.
+  iAP2 now runs all the way through authentication; the stall moved to the post-auth WiFi handoff.**
+  - Sequence in the capture: our outbound page still Page-Timeouts (t=13.65 → status `0x04`), we
+    stay quiet, and at **t=74.37 the car pages us**. It sets up HFP/A2DP/AVRCP, opens **RFCOMM ch 1**
+    at t=78.02, sends `FF 55`, and the whole chain runs on **session 02**: SYN → `StartIdentification`
+    → `IdentificationInformation` ("Motorcycle Media Players") → `IdentificationAccepted` → `AA00` →
+    `AA06` serial → `AA00` → `AA01` cert → `AA02` challenge → `AA03` → `AA05`.
+  - **Everything stops at t=78.584.** We send `AuthenticationSucceeded` + `0x5702`; the car
+    link-ACKs both and says nothing for the remaining 13 s. Two independent bugs, both found by
+    diffing against `iphone-cfmoto.pklg`:
+    1. **The auth challenge was the wrong length — authentication actually FAILED.** We sent a
+       **20-byte** challenge (`4040001e aa02 0018 0000 …`); an iPhone sends **32 bytes**
+       (`4040002a aa02 0024 0000 …`). This unit has an Apple auth coprocessor 3.0 (cert CN
+       `IPA_24FB0606…`), which signs a 32-byte SHA-256 digest — given 20 bytes it returned an
+       **empty** `AuthenticationResponse` (`40400006 aa03`) where the iPhone gets a 64-byte
+       signature. `carplay_session.rs` logged "Authentication complete" and sent `AA05` regardless,
+       so the failure was invisible.
+    2. **We asked for the WiFi config with a message this head unit does not implement.** Its own
+       `IdentificationInformation` declares `MessagesSentByAccessory = {0xAA06, 0x4301}` (param
+       0x0006) and `MessagesReceivedFromDevice = {0x4E09, 0x4300}` (param 0x0007). We sent
+       **0x5702**, which isn't in that set, so it was dropped. The iAP2 message IDs for
+       `Request/AccessoryWiFiConfigurationInformation` are **0x4300/0x4301**; `0x5702`/`0x5703`
+       were simply wrong. An iPhone sends `0x4E09` (device name) then `0x4300`, and the car answers
+       `0x4301` ~2.8 s later with SSID `CFMOTO-999700`, passphrase `12345678`, channel 157, IPv6
+       `fe80::9083:8eff:feef:a7d3`, **port 7000**, its WiFi MAC and a session UUID.
+  - **Wire format of 0x4301 (was being parsed wrong too):** the credentials are **nested** inside
+    the group at top-level parameter **1** — `{0: SSID, 1: passphrase, 2: channel u8, 3: IPv6 LL,
+    4: u8}` — while port (2, u32), accessory MAC (3), UUID (4) and firmware version (5) sit at the
+    top level. The old flat `get_param(SSID=0x0001)` read the *group* bytes as a string and, because
+    they start with `0x00`, yielded an **empty SSID rather than an error**.
+  - **Fixed 2026-07-26 (builds clean, unit-tested, NOT yet retested against the bike)** — in
+    `.claude/worktrees/iap2-auth-wifi-config`, uncommitted:
+    - `generate_challenge()` → 32 bytes; an empty/missing `AuthenticationResponse` now logs an
+      `error!` and does **not** send `AuthenticationSucceeded`.
+    - `ControlMessageId` ids corrected to `0x4300`/`0x4301`; after `AA05` we now send
+      `DeviceInformationUpdate` (0x4E09) then `RequestAccessoryWiFiConfigurationInformation`
+      (0x4300). **The iPhone's ~3.6 s gap between those two is deliberately not implemented** —
+      add it if the car still doesn't answer.
+    - Nested parameters ("groups") and NUL-terminated strings are handled through the existing
+      `IntoParameter`/`TryFromParam` traits rather than bespoke helpers: `IntoParameter for
+      Vec<Parameter>` writes a group, `TryFromParam for Vec<Parameter>` reads one (so
+      `get_param::<Vec<Parameter>>(id)` descends a level), and `IntoParameter for &str/String`
+      now appends the NUL terminator that iAP2 strings carry on the wire.
+      **Side effect to watch:** that makes `start_ea_session` send `com.apple.carplay\0` where it
+      previously sent no terminator — a path that had reached "AirPlay bootstrap complete!" on the
+      AUTO BOX unit. Spec-correct and matches every string in the captures, but it is a live change
+      to a previously-working message. `wifi_information` (0x5701) changes the same way; nothing in
+      any capture asks us for that, so it is untested either way.
+    - New `DeviceIdentity {name, transport_identifier, wifi_mac}` plumbed
+      `wireless.rs → carplay.rs → CarplaySession`; `wifi_connect::local_wifi_mac()` reads the
+      station address from sysfs (needed *before* the WiFi link exists). The iPhone's
+      `transport_identifier` is an opaque 24-hex-char blob that appears **nowhere else** in its
+      capture — nothing the accessory sent — so the accessory can't be validating it; our
+      Bluetooth address stands in. First thing to revisit if 0x4300 is rejected.
+    - Accessory name now read from parameter 0 (fixes `Accessory identified: Unknown`).
+    - 5 unit tests in `iap2-proto/src/ops/control.rs` encode/decode against the exact bytes from
+      `iphone-cfmoto.pklg` (0x4E09 and 0x4300 match the iPhone **byte-for-byte**; the car's real
+      0x4301 parses to the right SSID/passphrase/channel/port/MAC). Run with `just test-proto` —
+      a new recipe, because `just test` runs plain `cargo test` (root package only) and
+      `--workspace` can't link libcarjack/cuda-dmabuf outside the toolbox.
 - **Session-ID fix confirmed working — on the STANDALONE TEST HEAD UNIT ("AUTO BOX"), not the bike**
   (`just test-run`, 2026-07-26). With the control session addressed correctly, that unit answers
   `StartIdentification` and the whole chain runs: `IdentificationInformation` (15 params, SSID
@@ -299,7 +359,7 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - **`cfmoto_5.pcapng`** (2026-07-26): carjack↔bike, the first capture where iAP2 actually starts —
   `FF 55` echo + full Link SYN handshake succeed, then `StartIdentification` on the wrong session id
   (1 instead of 2) is ACKed-and-dropped. Two identical attempts, t≈31 and t≈112.
-- **`iphone-cfmoto.pklg`**: iPhone ("Tamagotchi") ↔ this bike, working CarPlay. The byte-level
+- **`iphone-cfmoto.pklg`**: iPhone ↔ this bike, working CarPlay. The byte-level
   reference for the control session id (`02`) and the post-identification auth chain.
 - **`iphonemycarcarplay.pklg`**: the key reference - a real iPhone doing *working* CarPlay on this same bike (2026-07-25). Shows the car opening iAP ch1 inbound and sending `FF 55` first, the iPhone's outbound dial being rejected, and the iPhone's HFP identity answers.
 - `src/bin/carjack-hci-helper.rs`: privileged sidecar — now sets both the CarPlay EIR UUID (`ADD_UUID`) and an iPhone-like Class of Device (`SET_DEV_CLASS`, `CARPLAY_DEV_CLASS`). Takes no arguments; resolves the adapter itself via bluer's default adapter.
