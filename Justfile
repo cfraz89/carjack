@@ -68,6 +68,11 @@ build +flags="": && (_setcap flags)
 test test_name: (build "--tests")
     cargo test {{test_name}} < /dev/null
 
+# The iAP2 protocol unit tests (message encode/decode against bytes captured from a working
+# iPhone session). Pure Rust - no GPU, gstreamer or toolbox needed, unlike `just test`.
+test-proto test_name="":
+    cargo test -p iap2-proto {{test_name}} < /dev/null
+
 # Install -devel packages that cuda-dmabuf links against (libEGL, libgbm, libgstcuda).
 # libcuda comes from the host NVIDIA driver — ensure /usr/lib64/libcuda.so exists in
 # the toolbox (create a symlink or bind-mount the host path).

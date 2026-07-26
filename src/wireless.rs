@@ -19,7 +19,7 @@ use iap2_proto::{error::Iap2Error, iap2::Iap2};
 use libcarjack::carplay;
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
-    carplay_session::WifiCredentials,
+    carplay_session::{DeviceIdentity, WifiCredentials},
     uuid::{CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID, IAP2_UUID},
 };
 use tap::{Tap, TapFallible};
@@ -160,6 +160,14 @@ pub async fn wireless_carplay(
     let adapter = session.default_adapter().await?;
     adapter.set_alias(String::from("carjack")).await?;
     adapter.set_powered(true).await?;
+    let identity = DeviceIdentity {
+        name: String::from("carjack"),
+        transport_identifier: adapter.address().await?.to_string(),
+        wifi_mac: crate::wifi_connect::local_wifi_mac().unwrap_or_else(|| {
+            tracing::warn!("No wireless interface found; reporting an empty WiFi MAC to the car");
+            String::new()
+        }),
+    };
     // Reuse this adapter's address rather than opening a second concurrent bluer::Session
     // later just to look it up - that stepped on BlueZ's handling of the RFCOMM profile
     // this session already owns and reset the connection.
@@ -265,7 +273,7 @@ pub async fn wireless_carplay(
     .await
     .1?;
     tracing::debug!("iAP2 link established");
-    carplay::run_carplay_session(iap2, wifi_tx, ready_tx).await?;
+    carplay::run_carplay_session(iap2, wifi_tx, ready_tx, identity).await?;
     tracing::debug!("iAP lifecycle ended");
     Ok(())
 }

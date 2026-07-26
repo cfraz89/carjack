@@ -166,9 +166,9 @@ pub enum ControlMessageId {
     RequestWiFiInformation,
     #[deku(id = "0x5701")]
     WiFiInformation,
-    #[deku(id = "0x5702")]
+    #[deku(id = "0x4300")]
     RequestAccessoryWiFiConfigurationInformation,
-    #[deku(id = "0x5703")]
+    #[deku(id = "0x4301")]
     AccessoryWiFiConfigurationInformation,
     #[deku(id = "0x0B00")]
     StartBluetoothPairing,
@@ -211,6 +211,22 @@ impl ParameterId {
     pub const VERSION: Self = Self(0x4E02);
     pub const FEATURES: Self = Self(0x4E03);
     pub const AUTH_CHALLENGE: Self = Self(0x0001);
+    pub const AUTH_DATA: Self = Self(0x0000);
+    pub const ACCESSORY_NAME: Self = Self(0x0000);
+    pub const DEVICE_NAME: Self = Self(0x0000);
+    pub const REQUEST_TRANSPORT_GROUP: Self = Self(0x0000);
+    pub const REQUEST_WIFI_GROUP: Self = Self(0x0001);
+    pub const TRANSPORT_KIND: Self = Self(0x0000);
+    pub const TRANSPORT_IDENTIFIER: Self = Self(0x0001);
+    pub const WIFI_CONFIG_GROUP: Self = Self(0x0001);
+    pub const WIFI_CONFIG_SSID: Self = Self(0x0000);
+    pub const WIFI_CONFIG_PASSPHRASE: Self = Self(0x0001);
+    pub const WIFI_CONFIG_CHANNEL: Self = Self(0x0002);
+    pub const WIFI_CONFIG_IPV6: Self = Self(0x0003);
+    pub const WIFI_CONFIG_PORT: Self = Self(0x0002);
+    pub const WIFI_CONFIG_MAC: Self = Self(0x0003);
+    pub const WIFI_CONFIG_UUID: Self = Self(0x0004);
+    pub const WIFI_CONFIG_VERSION: Self = Self(0x0005);
 
     pub fn raw(self) -> u16 {
         self.0
@@ -233,20 +249,35 @@ pub trait IntoParameter {
 
 impl IntoParameter for &str {
     fn into_parameter(self, id: ParameterId) -> Parameter {
+        let mut data = self.as_bytes().to_vec();
+        data.push(0);
         Parameter {
             total_length: 0,
             id,
-            data: self.as_bytes().to_vec(),
+            data,
         }
     }
 }
 
 impl IntoParameter for String {
     fn into_parameter(self, id: ParameterId) -> Parameter {
+        self.as_str().into_parameter(id)
+    }
+}
+
+/// A parameter whose value is itself a list of parameters (an iAP2 "group").
+impl IntoParameter for Vec<Parameter> {
+    fn into_parameter(self, id: ParameterId) -> Parameter {
+        let mut data = Vec::new();
+        for child in &self {
+            data.extend_from_slice(&child.total_length.to_be_bytes());
+            data.extend_from_slice(&child.id.0.to_be_bytes());
+            data.extend_from_slice(&child.data);
+        }
         Parameter {
             total_length: 0,
             id,
-            data: self.into_bytes(),
+            data,
         }
     }
 }
@@ -320,6 +351,18 @@ impl TryFromParam for String {
     }
 }
 
+impl TryFromParam for u8 {
+    fn try_from_param(data: &[u8]) -> Option<Self> {
+        data.try_into().ok().map(u8::from_be_bytes)
+    }
+}
+
+impl TryFromParam for u16 {
+    fn try_from_param(data: &[u8]) -> Option<Self> {
+        data.try_into().ok().map(u16::from_be_bytes)
+    }
+}
+
 impl TryFromParam for u32 {
     fn try_from_param(data: &[u8]) -> Option<Self> {
         data.try_into().ok().map(u32::from_be_bytes)
@@ -329,6 +372,31 @@ impl TryFromParam for u32 {
 impl TryFromParam for Vec<u8> {
     fn try_from_param(data: &[u8]) -> Option<Self> {
         Some(data.to_vec())
+    }
+}
+
+impl TryFromParam for Vec<Parameter> {
+    fn try_from_param(data: &[u8]) -> Option<Self> {
+        let mut out = Vec::new();
+        let mut rest = data;
+        while !rest.is_empty() {
+            if rest.len() < 4 {
+                return None;
+            }
+            let total_length = u16::from_be_bytes([rest[0], rest[1]]);
+            let id = u16::from_be_bytes([rest[2], rest[3]]);
+            let len = total_length as usize;
+            if len < 4 || len > rest.len() {
+                return None;
+            }
+            out.push(Parameter {
+                total_length,
+                id: ParameterId(id),
+                data: rest[4..len].to_vec(),
+            });
+            rest = &rest[len..];
+        }
+        (!out.is_empty()).then_some(out)
     }
 }
 
@@ -403,7 +471,7 @@ impl ControlMessage {
     pub fn authentication_challenge(challenge: &[u8]) -> Self {
         Self::new(
             ControlMessageId::RequestAuthenticationChallengeResponse,
-            vec![Parameter::new(ParameterId(0x0000), challenge)],
+            vec![Parameter::new(ParameterId::AUTH_DATA, challenge)],
         )
     }
 
@@ -425,10 +493,29 @@ impl ControlMessage {
         Self::new(ControlMessageId::NowPlayingUpdate, vec![])
     }
 
-    pub fn request_accessory_wifi_config() -> Self {
+    pub fn device_information_update(name: &str) -> Self {
+        Self::new(
+            ControlMessageId::DeviceInformationUpdate,
+            vec![Parameter::new(ParameterId::DEVICE_NAME, name)],
+        )
+    }
+
+    pub fn request_accessory_wifi_config(transport_identifier: &str, wifi_mac: &str) -> Self {
+        let transport = |id, identifier: &str| {
+            Parameter::new(
+                id,
+                vec![
+                    Parameter::new(ParameterId::TRANSPORT_KIND, 0x01u8),
+                    Parameter::new(ParameterId::TRANSPORT_IDENTIFIER, identifier),
+                ],
+            )
+        };
         Self::new(
             ControlMessageId::RequestAccessoryWiFiConfigurationInformation,
-            vec![],
+            vec![
+                transport(ParameterId::REQUEST_TRANSPORT_GROUP, transport_identifier),
+                transport(ParameterId::REQUEST_WIFI_GROUP, wifi_mac),
+            ],
         )
     }
 
@@ -457,5 +544,123 @@ impl ControlMessage {
                 Parameter::new(ParameterId::STATUS, status),
             ],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// Strip the 9-byte iAP2 packet header and the trailing payload checksum, leaving the
+    /// control message as it appeared on the wire.
+    fn payload(packet_hex: &str) -> Vec<u8> {
+        let bytes = unhex(packet_hex);
+        bytes[9..bytes.len() - 1].to_vec()
+    }
+
+    // Reference packets from `iphone-cfmoto.pklg`: a working CarPlay session between an
+    // iPhone and the CFMOTO head unit. Encoding against these is the only check available
+    // for the post-authentication sequence without a head unit on the bench.
+    //
+    const IPHONE_DEVICE_INFO: &str =
+        "ff5a001f4046780288404000154e09000f0000546573744465766963650004";
+    const IPHONE_WIFI_REQUEST: &str = "ff5a005540477802514040004b4300002600000005000001001d0001303132333435363738394142434445463031323334353637\
+00001f000100050000010016000130323a30303a30303a30303a30303a303100aa";
+    const CAR_WIFI_CONFIG: &str = "ff5a00ae40794702f7404000a44301004b00010012000043464d4f544f2d39393937303000000d00013132333435363738000005\
+00029d001e0003666538303a3a393038333a386566663a666565663a613764330000050004030008000200001b58000c00053437352e382e3200001600033344\
+3a32303a33443a44333a45423a3036000029000439613031316639392d353937652d343234642d623439302d3830366664376330373830300059";
+    const IPHONE_AUTH_CHALLENGE: &str = "ff5a003440447702764040002aaa0200240000295edc4346f01a343d579fdff9562f18662a4ad76eeb0059ee81b10f16c682665e";
+
+    #[test]
+    fn device_information_update_matches_iphone() {
+        let msg = ControlMessage::device_information_update("TestDevice");
+        assert_eq!(msg.to_bytes().unwrap(), payload(IPHONE_DEVICE_INFO));
+    }
+
+    #[test]
+    fn wifi_config_request_matches_iphone() {
+        let msg = ControlMessage::request_accessory_wifi_config(
+            "0123456789ABCDEF01234567",
+            "02:00:00:00:00:01",
+        );
+        assert_eq!(msg.to_bytes().unwrap(), payload(IPHONE_WIFI_REQUEST));
+    }
+
+    /// The credentials sit in a nested group, not at the top level - reading them flat
+    /// yields an empty SSID rather than an error, so this is worth pinning down.
+    #[test]
+    fn wifi_config_response_parses() {
+        let bytes = payload(CAR_WIFI_CONFIG);
+        let (_, msg) = ControlMessage::from_bytes((&bytes, 0)).unwrap();
+        assert_eq!(
+            msg.message_id,
+            ControlMessageId::AccessoryWiFiConfigurationInformation
+        );
+
+        let group = msg
+            .parameters
+            .get_param::<Vec<Parameter>>(ParameterId::WIFI_CONFIG_GROUP)
+            .expect("credentials group");
+        assert_eq!(
+            group.get_param::<String>(ParameterId::WIFI_CONFIG_SSID),
+            Some(String::from("CFMOTO-999700"))
+        );
+        assert_eq!(
+            group.get_param::<String>(ParameterId::WIFI_CONFIG_PASSPHRASE),
+            Some(String::from("12345678"))
+        );
+        assert_eq!(
+            group.get_param::<u8>(ParameterId::WIFI_CONFIG_CHANNEL),
+            Some(157)
+        );
+
+        assert_eq!(
+            msg.parameters
+                .get_param::<u32>(ParameterId::WIFI_CONFIG_PORT),
+            Some(7000)
+        );
+        assert_eq!(
+            msg.parameters
+                .get_param::<String>(ParameterId::WIFI_CONFIG_MAC),
+            Some(String::from("3D:20:3D:D3:EB:06"))
+        );
+    }
+
+    #[test]
+    fn auth_challenge_is_32_bytes() {
+        let reference = payload(IPHONE_AUTH_CHALLENGE);
+        let msg = ControlMessage::authentication_challenge(&[0u8; 32]);
+        let encoded = msg.to_bytes().unwrap();
+        assert_eq!(encoded.len(), reference.len());
+        // Same header and parameter framing; only the random challenge itself differs.
+        assert_eq!(encoded[..10], reference[..10]);
+    }
+
+    #[test]
+    fn plain_value_is_not_mistaken_for_a_group() {
+        let params = vec![Parameter::new(ParameterId::DEVICE_NAME, "TestDevice")];
+        assert!(
+            params
+                .get_param::<Vec<Parameter>>(ParameterId::DEVICE_NAME)
+                .is_none()
+        );
+    }
+
+    /// Strings are written with their NUL terminator and read back without it.
+    #[test]
+    fn string_parameter_round_trips() {
+        let params = vec![Parameter::new(ParameterId::DEVICE_NAME, "TestDevice")];
+        assert_eq!(params[0].data.last(), Some(&0));
+        assert_eq!(
+            params.get_param::<String>(ParameterId::DEVICE_NAME),
+            Some(String::from("TestDevice"))
+        );
     }
 }

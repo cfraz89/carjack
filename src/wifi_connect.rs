@@ -73,6 +73,23 @@ async fn get_car_ip(nm: &NetworkManager) -> Result<(IpAddr, String)> {
     Err(eyre!("No WiFi device with IP"))
 }
 
+/// The station address of the first wireless interface on the host. Reported to the head unit
+/// (in `RequestAccessoryWiFiConfigurationInformation`) as the MAC that will join its AP, so it
+/// is needed before the connection exists - hence sysfs rather than an active NM device.
+pub fn local_wifi_mac() -> Option<String> {
+    let mut ifaces: Vec<_> = std::fs::read_dir("/sys/class/net")
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.join("wireless").exists() || p.join("phy80211").exists())
+        .collect();
+    // Stable pick when a host has more than one radio.
+    ifaces.sort();
+    let mac = std::fs::read_to_string(ifaces.first()?.join("address")).ok()?;
+    let mac = mac.trim().to_string();
+    (!mac.is_empty()).then_some(mac)
+}
+
 fn guess_gateway(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(v4) => {
