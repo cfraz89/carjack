@@ -5,7 +5,7 @@ use std::{
 };
 use thiserror::Error;
 
-use backon::{ConstantBuilder, RetryableWithContext};
+use backon::{ConstantBuilder, ExponentialBuilder, RetryableWithContext};
 use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
@@ -112,7 +112,6 @@ async fn run_hci_helper() -> Result<()> {
 /// connections from, and the single outbound page (dropped, and so cancelled, once any link lands).
 struct LinkCtx {
     profiles: Merge<ProfileHandle, ProfileHandle>,
-    dial: AbortOnDropHandle<()>,
     device: Device,
 }
 
@@ -139,7 +138,6 @@ async fn attempt_iap2_link(
         .next()
         .await
         .ok_or(LinkAttemptError::ProfilesClosed)?;
-    ctx.dial.abort();
     tracing::debug!("Got connect request");
     let stream = rq.accept()?;
     tracing::debug!("Establishing iAP2 link");
@@ -174,8 +172,8 @@ pub async fn wireless_carplay(
     let _ = bt_mac_tx.send(adapter.address().await?.to_string());
     let _advertisement_handle = publish_advertisement(&adapter).await?;
 
-    // Apply HCI-level CarPlay hacks so BR/EDR inquiry shows the CarPlay UUID
-    tracing::trace!("Applying hci hacks");
+    // Apply HCI-level CarPlay config so BR/EDR inquiry shows the CarPlay UUID
+    tracing::trace!("Applying hci config");
     //We need cap_net_admin to write to the hci socket directly.
     //However adding that cap to this process is probably a security liability, and breaks
     //xdg-desktop-portal. So we offload the work to a separate binary.
@@ -223,38 +221,64 @@ pub async fn wireless_carplay(
     // Surface the car's MAC (known now, early) so the caller can look up its cached display and
     // size the compositor / launch the app before AirPlay reports the display.
     let _ = car_addr_tx.send(device.address().to_string());
-    device.disconnect_profile(&IAP_ACCESSORY_UUID).await?;
 
+    //Disconnecting profile isnt enough, have to to do a full disconnect in order to kick off a new connection
+    let disconnect_res = device.disconnect().await;
+    tracing::debug!(?disconnect_res, "Disconnection");
+
+    //Start listening for iap2 messages before actually connecting anything, otherwise we may miss them
     let profiles = iap_accessory_handle.merge(iap_device_handle);
+    let task_device = device.clone();
+    // let iap2_task = AbortOnDropHandle::new(tokio::spawn(async move {
+    //     ({
+    //         |mut ctx: LinkCtx| async move {
+    //             let res = attempt_iap2_link(&mut ctx).await;
+    //             if let Err(LinkAttemptError::Iap2(e)) = &res {
+    //                 tracing::warn!(?e, "Got iap2 error bringing up link, disconnecting");
+    //                 let _ = &ctx.device.disconnect().await;
+    //             }
+    //             (ctx, res)
+    //         }
+    //     })
+    //     //Retry our link unless our profiles start to return None.
+    //     .retry(
+    //         ConstantBuilder::new()
+    //             .with_delay(ACCEPT_RETRY_DELAY)
+    //             .without_max_times(),
+    //     )
+    //     .context(LinkCtx {
+    //         profiles,
+    //         device: task_device,
+    //     })
+    //     .when(|e| !matches!(e, LinkAttemptError::ProfilesClosed))
+    //     .await
+    //     .1
+    // }));
 
-    // Page the car exactly once, then leave the radio alone. Some head units only ever run iAP2
-    // over an ACL link they originated (the CFMOTO bike: when our page wins, it opens RFCOMM ch 1
-    // on our link and DISCs without ever sending `FF 55` - `cfmoto_6.pcapng`), while others won't
-    // page us for a long time, if at all. A single attempt serves both: it still establishes the
-    // first bond, but unlike the old unbounded retry it doesn't keep the controller paging and
-    // starve our own page scan, so the car can reach us right after it fails.
-    let dialled = device.clone();
-    let accessory_profile_connect_task = AbortOnDropHandle::new(tokio::spawn(async move {
-        match dialled.connect_profile(&IAP_ACCESSORY_UUID).await {
-            Ok(()) => tracing::debug!("Outbound accessory profile connect accepted"),
-            // Not fatal, and not worth retrying: the inbound path is still live, and the car may
-            // simply not be pageable yet. Whichever side lands a connection first wins.
-            Err(e) => tracing::info!(
-                e = ?e,
-                "Outbound accessory profile connect failed, waiting for the head unit to page us"
-            ),
-        }
+    //It's ok if outbound connection fails, we may still receive an inbound one
+    let accessory_connect_task = AbortOnDropHandle::new(tokio::spawn(async move {
+        (async |device: Device| {
+            tracing::debug!("Attempting to connect accessory");
+            let res = device.connect_profile(&IAP_ACCESSORY_UUID).await;
+            tracing::debug!(?res, "Accessory connection");
+            (device, res)
+        })
+        .retry(ExponentialBuilder::new().without_max_times())
+        .context(device)
+        .await
     }));
 
-    //Retry our link unless our profiles start to return None.
-    let iap2: Iap2<rfcomm::Stream> = (|mut ctx: LinkCtx| async move {
-        let res = attempt_iap2_link(&mut ctx).await;
-        if let Err(LinkAttemptError::Iap2(e)) = &res {
-            tracing::warn!(?e, "Got iap2 error bringing up link, disconnecting");
-            let _ = &ctx.device.disconnect().await;
+    let iap2 = ({
+        |mut ctx: LinkCtx| async move {
+            let res = attempt_iap2_link(&mut ctx).await;
+            if let Err(LinkAttemptError::Iap2(e)) = &res {
+                tracing::warn!(?e, "Got iap2 error bringing up link, disconnecting");
+                let _ = &ctx.device.disconnect().await;
+            }
+            (ctx, res)
         }
-        (ctx, res)
     })
+    //Retry our link unless our profiles start to return None.
     .retry(
         ConstantBuilder::new()
             .with_delay(ACCEPT_RETRY_DELAY)
@@ -262,12 +286,14 @@ pub async fn wireless_carplay(
     )
     .context(LinkCtx {
         profiles,
-        dial: accessory_profile_connect_task,
-        device,
+        device: task_device,
     })
     .when(|e| !matches!(e, LinkAttemptError::ProfilesClosed))
     .await
     .1?;
+    // let iap2 = iap2_task.await??;
+    // drop(accessory_connect_task);
+
     tracing::debug!("iAP2 link established");
     carplay::run_carplay_session(iap2, wifi_tx, ready_tx, identity).await?;
     tracing::debug!("iAP lifecycle ended");
