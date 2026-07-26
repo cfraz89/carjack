@@ -26,6 +26,47 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - **iPhone pklg capture re-analyzed**: Found 62 iAP2 `FF 5A` packets and 4 `FF 55` switch commands. Extracted full protocol exchange: SYN→StartIdentification→IdentificationInformation→Auth→WiFiConfig→WirelessCarPlayUpdate. **Zero EA session messages** found — EA establishment likely happens over WiFi as part of AirPlay handshake, not Bluetooth.
 
 ### Active
+- **`bench_1.pcapng` (2026-07-26): the AUTO BOX bench unit regressed, and the cause was the
+  32-byte auth challenge. The challenge length is now derived from the accessory's
+  certificate instead of being guessed-and-retried.**
+  - Capture reads (direction from `hci_h4.direction`: `0x01` = from the car, `0x00` = from us).
+    Everything up to authentication is healthy: car pages us, RFCOMM opens, SYN → SYN|ACK →
+    `StartIdentification` → `IdentificationInformation` ("AUTO BOX") → `IdentificationAccepted`
+    → `AA00` → `AA06` serial → `AA00` → `AA01` certificate. At **t=13.967 we send `AA02` with a
+    32-byte challenge** (`4040002a aa02 0024 0000 …`, frame 390).
+  - **The car link-ACKs it (frame 392) and then says nothing.** No `AA03` at all — not even the
+    empty one the bike sends. At t=18.7 the *car* starts re-sending `FF 55 02 00 EE 10` once a
+    second through the end of the capture, i.e. it gave up and tried to restart iAP2; carjack
+    sends nothing further. **So the 32→20 retry could never fire: it triggers on an empty
+    `AuthenticationResponse`, and this unit's failure mode is silence.**
+  - **The certificates say outright which digest each unit wants**, so there is no need to guess:
+    | | bench (AUTO BOX), frame 386 | bike (CFMOTO), `cfmoto_7` frame 829 |
+    |---|---|---|
+    | cert size | 908 B | 609 B |
+    | signature alg | `sha1WithRSAEncryption` (`06092a864886f70d010105`) | `ecdsa-with-SHA256` (`06082a8648ce3d040302`) |
+    | key | RSA-1024 | ECC |
+    | issuer CN | "Apple iPod Accessories Certification Authority" | "Apple Accessories Certification Authority - 00000002" |
+    | coprocessor | **2.0C → 20-byte SHA-1** | **3.0 → 32-byte SHA-256** |
+  - **Fixed** in `libcarjack/src/carplay_session.rs`: `challenge_len_for_certificate()` scans the
+    `AuthenticationCertificate` blob for the ansi-X9-62 EC OID prefix `2a 86 48 ce 3d` — present
+    → 32 bytes, absent (or no certificate readable at all) → 20.
+  - **The 32↔20 retry is now deleted rather than kept as insurance.** It can't help anything
+    we've seen: the bench unit rejects a wrong-sized challenge by going *silent*, which never
+    reaches the empty-response branch, and the bike gets the right length up front now. It
+    isn't free either — an unexpected second `AA02` mid-auth is a plausible way to trigger the
+    aggressive-reconnect sulk. What **is** kept is the empty-response *check*: it logs an
+    `error!` naming the length we sent and withholds `AuthenticationSucceeded`, which is what
+    turned this class of failure from invisible ("Authentication complete") into diagnosable.
+  - Two `libcarjack` unit tests pin the discriminator against the real certificate prefixes from
+    both captures. `cargo test` alone doesn't reach them (root package only) so there is a new
+    **`just test-lib`** recipe alongside `just test-proto`.
+  - The rest of the new dialect code checks out against this capture: the bench unit's
+    `MessagesReceivedFromDevice` (param 7) is `{0x5702, 0x4E0A, 0x4E0D, 0x4E0B, 0x5001}` — no
+    0x4300 and no 0x4E09 — so `accepts()` correctly picks the **legacy 0x5702** request and
+    skips `DeviceInformationUpdate`. (The bike's is `{0x4E09, 0x4300}`.) That answers the open
+    question above: the AUTO BOX **does** declare param 7, so dialect selection is driven by
+    real data on both units rather than by the empty-list fallback.
+  - Not yet retested against either unit.
 - **`cfmoto_7.pcapng` (2026-07-26): the passive-connection + session-ID fixes WORK on the bike.
   iAP2 now runs all the way through authentication; the stall moved to the post-auth WiFi handoff.**
   - Sequence in the capture: our outbound page still Page-Timeouts (t=13.65 → status `0x04`), we
@@ -79,6 +120,8 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
       tries **32 (SHA-256) first and retries once at 20 (SHA-1)** if the accessory returns an
       empty `AuthenticationResponse`. Only after both fail do we log the error and withhold
       `AuthenticationSucceeded`. That keeps the bike's fix without betting the bench unit on it.
+      **SUPERSEDED — `bench_1.pcapng` proved "try 32 first" cannot be recovered from; the
+      length is now read off the certificate. See the next entry.**
     - Nested parameters ("groups") and NUL-terminated strings are handled through the existing
       `IntoParameter`/`TryFromParam` traits rather than bespoke helpers: `IntoParameter for
       Vec<Parameter>` writes a group, `TryFromParam for Vec<Parameter>` reads one (so

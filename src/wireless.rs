@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
+    sync::Arc,
     time::Duration,
 };
 use thiserror::Error;
@@ -23,7 +24,7 @@ use libcarjack::{
     uuid::{CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID, IAP2_UUID},
 };
 use tap::{Tap, TapFallible};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, TryAcquireError, mpsc, oneshot};
 use tokio_stream::{StreamExt, adapters::Merge};
 use tokio_util::task::AbortOnDropHandle;
 
@@ -113,11 +114,12 @@ async fn run_hci_helper() -> Result<()> {
 struct LinkCtx {
     profiles: Merge<ProfileHandle, ProfileHandle>,
     device: Device,
+    connect_attempt: Arc<Semaphore>,
 }
 
 /// Why an attempt to bring the iAP2 link up failed. Drives the `.when` retry predicate.
 #[derive(Error, Debug)]
-enum LinkAttemptError {
+pub enum LinkAttemptError {
     /// The profile stream ended: BlueZ has taken our registrations away, so no further connection
     /// can ever arrive.
     #[error("iAP2 profiles stream closed")]
@@ -125,7 +127,11 @@ enum LinkAttemptError {
     #[error("iAP2 error: {0:?}")]
     Iap2(#[from] Iap2Error),
     #[error("Bluer error: {0:?}")]
-    Error(#[from] bluer::Error),
+    BluerError(#[from] bluer::Error),
+    #[error("Semaphore acquire error: {0:?}")]
+    AcquireError(#[from] tokio::sync::AcquireError),
+    #[error("Semaphore try acquire error: {0:?}")]
+    TrueAcquireError(#[from] tokio::sync::TryAcquireError),
 }
 
 /// Wait for an inbound iAP2 profile connection, accept it, and bring the iAP2 link up on it.
@@ -139,10 +145,29 @@ async fn attempt_iap2_link(
         .await
         .ok_or(LinkAttemptError::ProfilesClosed)?;
     tracing::debug!("Got connect request");
+    let _permit = ctx.connect_attempt.acquire().await?;
     let stream = rq.accept()?;
     tracing::debug!("Establishing iAP2 link");
     let iap2 = Iap2::start(stream).await?;
     Ok(iap2)
+}
+
+pub async fn connect_accessory(
+    device: &Device,
+    connect_attempt: &Semaphore,
+) -> Result<(), LinkAttemptError> {
+    tracing::debug!("Attempting to connect accessory");
+    if !device.is_connected().await? {
+        //We dont actually want to stop iap2 from connecting so we dont block the semaphore while connecting
+        if connect_attempt.available_permits() == 0 {
+            Err(TryAcquireError::NoPermits)?
+        }
+        device
+            .connect()
+            .await
+            .tap(|r| tracing::debug!(?r, "Accessory connection"))?;
+    }
+    Ok(())
 }
 
 pub async fn wireless_carplay(
@@ -185,7 +210,7 @@ pub async fn wireless_carplay(
             uuid: IAP_ACCESSORY_UUID,
             name: Some(String::from("Wireless iAP")),
             role: Some(Role::Client),
-            auto_connect: Some(false),
+            auto_connect: Some(true),
             require_authentication: Some(true),
             require_authorization: Some(false),
             ..Default::default()
@@ -229,6 +254,9 @@ pub async fn wireless_carplay(
     //Start listening for iap2 messages before actually connecting anything, otherwise we may miss them
     let profiles = iap_accessory_handle.merge(iap_device_handle);
     let task_device = device.clone();
+
+    //Thought maybe we would need to start listening for iap2 packets immdiately in a task,
+    //but doesnt seem necessary so far
     // let iap2_task = AbortOnDropHandle::new(tokio::spawn(async move {
     //     ({
     //         |mut ctx: LinkCtx| async move {
@@ -255,15 +283,25 @@ pub async fn wireless_carplay(
     //     .1
     // }));
 
+    //Make sure we dont try to establish an iap link on an existing connection as well as trying to make new connections simultaneously
+    let connect_attempt = Arc::new(tokio::sync::Semaphore::new(1));
+    let accessory_connect_attempt = connect_attempt.clone();
     //It's ok if outbound connection fails, we may still receive an inbound one
     let accessory_connect_task = AbortOnDropHandle::new(tokio::spawn(async move {
         (async |device: Device| {
-            tracing::debug!("Attempting to connect accessory");
-            let res = device.connect_profile(&IAP_ACCESSORY_UUID).await;
-            tracing::debug!(?res, "Accessory connection");
+            let res = connect_accessory(&device, &accessory_connect_attempt).await;
             (device, res)
         })
         .retry(ExponentialBuilder::new().without_max_times())
+        .when(|e| match e {
+            LinkAttemptError::BluerError(e)
+                if (e.kind == bluer::ErrorKind::Failed
+                    && e.message == "br-connection-already-connected") =>
+            {
+                false
+            }
+            _ => true,
+        })
         .context(device)
         .await
     }));
@@ -287,12 +325,14 @@ pub async fn wireless_carplay(
     .context(LinkCtx {
         profiles,
         device: task_device,
+        connect_attempt,
     })
     .when(|e| !matches!(e, LinkAttemptError::ProfilesClosed))
     .await
     .1?;
+
     // let iap2 = iap2_task.await??;
-    // drop(accessory_connect_task);
+    drop(accessory_connect_task);
 
     tracing::debug!("iAP2 link established");
     carplay::run_carplay_session(iap2, wifi_tx, ready_tx, identity).await?;
