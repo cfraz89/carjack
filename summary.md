@@ -73,9 +73,19 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
     3. **Retry.** `connect_airplay_endpoints` retries each candidate with `backon`
        (`ConstantBuilder`, 500 ms × 4) before falling through to the next, so a transient failure no
        longer costs a Bluetooth reconnect. The car repeats `0x4301` for ~15s, so there is budget.
+    4. **Don't reconnect to an AP we are already on.** `connect_to_car_wifi` now checks the live
+       connection first (`live_connection`) and reuses it when the SSID already matches and has an
+       address, instead of activating a new profile over the top. This is not just a saving: the
+       host in `cfmoto_11.pcapng` was *already* associated to `CFMOTO-999700` from t=1.2, and
+       reactivating at t=16.3 is what generated the new link-local (`fe80::37bd:…` →
+       `fe80::d819:…`) and opened the DAD window in the first place. `ActiveWifiConnection` carries
+       no D-Bus path, so the `ActiveConnection` path comes from the device via
+       `GetDeviceByIpIface` + `Device.ActiveConnection`.
   - Tests: four unit tests over the flag/address parsing (`IFA_FLAGS` beating the header byte,
     tentative/dadfailed rejection, IPv4 and global-scope v6 ignored) plus an `#[ignore]`d live check
-    (`CARJACK_TEST_IFACE=… cargo test --bin carjack -- --ignored`) that runs the real netlink dump.
+    (`CARJACK_TEST_IFACE=… cargo test --bin carjack -- --ignored`) that runs the real netlink dump, and
+    another (`CARJACK_TEST_SSID=…`) that checks the reuse path against live NetworkManager - both
+    read-only, neither activates or tears down a connection.
 - **`cfmoto_10.pcapng` (2026-07-26, BT + WiFi in one capture): the link layer is FIXED and the
   whole iAP2 handshake is now clean. What is left is a standoff on WiFi — the car waits for us
   to connect to the AirPlay address it gave us, and we wait for it to invite us.**
