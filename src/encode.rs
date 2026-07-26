@@ -19,6 +19,43 @@ use crate::compositor::CapturedFrame;
 use crate::config::ZeroCopyMode;
 use libcarjack::airplay::EncodedFrame;
 
+/// The configured target video bitrate (`[graphics] bitrate` / `--bitrate`, in kbit/s), passed to
+/// whichever encoder is selected. A newtype because the encoders disagree on units - x264enc,
+/// nvh264enc and vah264enc take kbit/s while openh264enc and the v4l2 controls take bit/s - so the
+/// encoder descriptions in [`HW_BACKENDS`] / [`DEFAULT_SW_ENCODER`] spell the unit they want as a
+/// `{kbps}` / `{bps}` placeholder and [`Bitrate::apply`] fills it in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bitrate {
+    kbps: u32,
+}
+
+impl Bitrate {
+    /// From kbit/s, which is how it's configured.
+    pub fn from_kbps(kbps: u32) -> Self {
+        Self { kbps }
+    }
+
+    /// Substitute this bitrate into a gst-launch-style encoder description, replacing `{kbps}` with
+    /// kbit/s and `{bps}` with bit/s. A description with neither placeholder is returned unchanged
+    /// (`v4l2h264enc`'s bare default, and any `CARPLAY_ENCODER` override that pins its own rate).
+    fn apply(self, desc: &str) -> String {
+        desc.replace("{kbps}", &self.kbps.to_string())
+            .replace("{bps}", &(self.kbps as u64 * 1000).to_string())
+    }
+}
+
+impl Default for Bitrate {
+    fn default() -> Self {
+        Self::from_kbps(crate::config::DEFAULT_BITRATE_KBPS)
+    }
+}
+
+impl std::fmt::Display for Bitrate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} kbit/s", self.kbps)
+    }
+}
+
 /// Zero-copy `AsRef<[u8]>` view of an SHM frame's pixels, so re-pushing the same frame (the
 /// repeater does 30x/sec) is just an `Arc` refcount bump rather than a full memcpy each tick.
 struct FrameData(Arc<CapturedFrame>);
@@ -163,6 +200,7 @@ pub async fn encode_h264_to_channel(
     frame_rx: watch::Receiver<Option<Arc<CapturedFrame>>>,
     video_tx: mpsc::Sender<EncodedFrame>,
     backend: EncodeBackend,
+    bitrate: Bitrate,
 ) -> Result<()> {
     gst::init()?;
 
@@ -203,8 +241,8 @@ pub async fn encode_h264_to_channel(
     // Build the pipeline for the backend chosen at startup. The compositor was started in a
     // matching mode (dmabuf for zero-copy, CPU-readback SHM for software), so the frame variant
     // the feeder receives always matches what this pipeline's first element can consume.
-    let (encoder, feeder) = build_backend(&pipeline, &queue, &backend)?;
-    tracing::info!("Encode backend: {}", backend.describe());
+    let (encoder, feeder) = build_backend(&pipeline, &queue, &backend, bitrate)?;
+    tracing::info!("Encode backend: {} at {bitrate}", backend.describe());
 
     let _frame_feeder = AbortOnDropHandle::new(tokio::spawn(async move {
         let appsrc = src;
@@ -312,6 +350,7 @@ pub async fn encode_pipewire_to_channel(
     width: u32,
     height: u32,
     zerocopy: ZeroCopyMode,
+    bitrate: Bitrate,
     video_tx: mpsc::Sender<EncodedFrame>,
     desktop_size_tx: tokio::sync::watch::Sender<Option<(u32, u32)>>,
 ) -> Result<()> {
@@ -353,7 +392,7 @@ pub async fn encode_pipewire_to_channel(
         });
     }
 
-    let encoder = build_pipewire_encode(&pipeline, &src, width, height, zerocopy)?;
+    let encoder = build_pipewire_encode(&pipeline, &src, width, height, zerocopy, bitrate)?;
     drive_h264_pipeline(&pipeline, &encoder, video_tx).await
 }
 
@@ -367,6 +406,7 @@ fn build_pipewire_encode(
     width: u32,
     height: u32,
     zerocopy: ZeroCopyMode,
+    bitrate: Bitrate,
 ) -> Result<gst::Element> {
     let mk = |name: &str, label: &str| {
         gst::ElementFactory::make(name)
@@ -401,7 +441,7 @@ fn build_pipewire_encode(
     // *is* NVIDIA-rendered. (For the Intel `va` elements to register on a hybrid box, gst needs
     // `GST_VA_ALL_DRIVERS=1`, which `run_desktop` sets.)
     let build_hw = |b: &HwBackend| -> Result<gst::Element> {
-        let (enc_name, encoder) = make_encoder(&b.encoder_desc())?;
+        let (enc_name, encoder) = make_encoder(&b.encoder_desc(bitrate))?;
         let mut chain = b
             .desktop
             .iter()
@@ -420,7 +460,7 @@ fn build_pipewire_encode(
             .link_filtered(&encoder, &caps(Some(b.desktop_memory)))
             .map_err(|_| eyre!("link hw-encoder"))?;
         tracing::info!(
-            "Encode source: desktop zero-copy hardware '{}' ({} ! {enc_name})",
+            "Encode source: desktop zero-copy hardware '{}' ({} ! {enc_name}) at {bitrate}",
             b.name,
             b.desktop.join(" ! ")
         );
@@ -456,7 +496,7 @@ fn build_pipewire_encode(
     }
 
     // Software: CPU convert + scale.
-    let (enc_name, encoder) = make_encoder(&software_encoder_desc()?)?;
+    let (enc_name, encoder) = make_encoder(&software_encoder_desc(bitrate)?)?;
     let rate = mk("videorate", "videorate")?;
     let scale = mk("videoscale", "videoscale")?;
     let convert = mk("videoconvert", "videoconvert")?;
@@ -467,7 +507,7 @@ fn build_pipewire_encode(
     convert
         .link_filtered(&encoder, &caps(None))
         .map_err(|_| eyre!("link convert-encoder"))?;
-    tracing::info!("Encode source: desktop software (videoconvert ! {enc_name})");
+    tracing::info!("Encode source: desktop software (videoconvert ! {enc_name}) at {bitrate}");
     Ok(encoder)
 }
 
@@ -647,12 +687,17 @@ const HW_BACKENDS: &[HwBackend] = &[
         // gop-size=30 specifically. It's a quirk of that exact value (30 is fine on the internal
         // path's CUDA memory, and other sizes are fine on system memory), so 60 is the one setting
         // that behaves on every path. Verified via `tests/desktop.rs` on a real GNOME ScreenCast.
-        encoder: "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=cbr bitrate=12000 \
+        encoder: "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=cbr bitrate={kbps} \
                   gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true aud=true",
     },
     // Qualcomm / embedded (the deployment target). v4l2 stateful encoders import DMABuf via
-    // V4L2_MEMORY_DMABUF; keyframe/rate control is usually via extra-controls, so leave defaults
-    // here and revisit against the real device.
+    // V4L2_MEMORY_DMABUF; rate/keyframe control goes through the driver's V4L2 controls rather than
+    // gst properties, so `extra-controls` carries the rate setup the other rows express as encoder
+    // properties: `video_bitrate` (V4L2_CID_MPEG_VIDEO_BITRATE, in bit/s) at
+    // `video_bitrate_mode=1` (V4L2_MPEG_VIDEO_BITRATE_MODE_CBR - the enum's 0 is VBR), so this row
+    // is steady CBR like cuda/vaapi/x264. Keyframe interval stays at the driver's default, to
+    // revisit against the real device. Untested off-device: a driver that doesn't implement one of
+    // these controls just logs a warning and keeps its own default.
     HwBackend {
         name: "v4l2",
         drivers: &["msm", "msm_drm"],
@@ -660,7 +705,7 @@ const HW_BACKENDS: &[HwBackend] = &[
         postproc: Some("v4l2convert"),
         desktop: &["v4l2convert"],
         desktop_memory: "memory:DMABuf",
-        encoder: "v4l2h264enc",
+        encoder: "v4l2h264enc extra-controls=controls,video_bitrate_mode=1,video_bitrate={bps}",
     },
     // Intel / AMD VA-API. vapostproc imports the DMA_DRM dmabuf and outputs NV12 in VAMemory,
     // which vah264enc consumes on the same GPU - fully zero-copy. Defaults use B-frames + non-CBR
@@ -672,28 +717,34 @@ const HW_BACKENDS: &[HwBackend] = &[
         postproc: Some("vapostproc"),
         desktop: &["vapostproc"],
         desktop_memory: "memory:DMABuf",
-        encoder: "vah264enc rate-control=cbr bitrate=12000 b-frames=0 ref-frames=1 \
+        encoder: "vah264enc rate-control=cbr bitrate={kbps} b-frames=0 ref-frames=1 \
                   target-usage=6 key-int-max=30 aud=true",
     },
 ];
 
 impl HwBackend {
-    /// The encoder to build for this backend, on any path. `CARPLAY_ENCODER` wins over the row's
-    /// tuned default - the override applies to hardware backends too, not just software.
-    fn encoder_desc(&self) -> String {
+    /// The encoder description for this backend on any path, still holding its bitrate placeholder.
+    /// `CARPLAY_ENCODER` wins over the row's tuned default - the override applies to hardware
+    /// backends too, not just software.
+    fn encoder_template(&self) -> String {
         encoder_override().unwrap_or_else(|| self.encoder.to_string())
+    }
+
+    /// The encoder to build for this backend, with the configured `bitrate` substituted in.
+    fn encoder_desc(&self, bitrate: Bitrate) -> String {
+        bitrate.apply(&self.encoder_template())
     }
 
     /// Whether this backend's compositor-path elements all exist on this machine.
     fn available(&self) -> bool {
         self.postproc.is_none_or(element_available)
-            && element_available(encoder_name(&self.encoder_desc()))
+            && element_available(encoder_name(&self.encoder_template()))
     }
 
     /// Whether this backend's desktop-path elements all exist on this machine.
     fn desktop_available(&self) -> bool {
         self.desktop.iter().copied().all(element_available)
-            && element_available(encoder_name(&self.encoder_desc()))
+            && element_available(encoder_name(&self.encoder_template()))
     }
 
     /// Whether this backend runs on the GPU driven by DRM `driver` (used to pick the desktop
@@ -709,7 +760,9 @@ impl HwBackend {
     }
 }
 
-/// Explicit encoder override, applied to every path (hardware, desktop and software).
+/// Explicit encoder override, applied to every path (hardware, desktop and software). It replaces
+/// the whole description, so the configured bitrate only reaches it if the override itself spells a
+/// `{kbps}`/`{bps}` placeholder.
 fn encoder_override() -> Option<String> {
     std::env::var("CARPLAY_ENCODER").ok()
 }
@@ -744,9 +797,13 @@ fn build_backend(
     pipeline: &gst::Pipeline,
     tail: &gst::Element,
     backend: &EncodeBackend,
+    bitrate: Bitrate,
 ) -> Result<(gst::Element, FrameFeeder)> {
     match backend {
-        EncodeBackend::Software => Ok((build_software_chain(pipeline, tail)?, FrameFeeder::Shm)),
+        EncodeBackend::Software => Ok((
+            build_software_chain(pipeline, tail, bitrate)?,
+            FrameFeeder::Shm,
+        )),
         EncodeBackend::Hw { backend, importer } => {
             if let Some(importer) = importer {
                 // Share our CUDA context with the encoder so the imported GstCudaMemory and the
@@ -754,7 +811,7 @@ fn build_backend(
                 // bin (the bin propagates its contexts to children as they're added).
                 pipeline.set_context(&importer.gst_context());
             }
-            let encoder = build_hw_chain(pipeline, tail, backend)?;
+            let encoder = build_hw_chain(pipeline, tail, backend, bitrate)?;
             let feeder = match importer {
                 Some(importer) => FrameFeeder::Cuda(importer.clone()),
                 None => FrameFeeder::DmaDrm(DmaBufAllocator::new()),
@@ -774,19 +831,19 @@ fn build_backend(
 ///   backends disable them.
 /// - `key-int-max=30`: ~1s keyframes, matching the hardware backends - often enough that the car
 ///   recovers quickly, rare enough that the IDR bursts don't congest its WiFi.
-/// - `pass=cbr` + `bitrate=12000` (kbit/s): a steady rate the link can sustain, not x264's spiky
-///   quality-targeted default.
+/// - `pass=cbr` + `bitrate={kbps}` (the configured [`Bitrate`], in kbit/s): a steady rate the link
+///   can sustain, not x264's spiky quality-targeted default.
 /// - `byte-stream=true` + `aud=true`: Annex-B with access-unit delimiters, which is what the
 ///   AirPlay screen sink consumes (otherwise h264parse has to repackage every buffer).
 const DEFAULT_SW_ENCODER: &str = "x264enc speed-preset=ultrafast tune=zerolatency pass=cbr \
-    bitrate=12000 key-int-max=30 bframes=0 byte-stream=true aud=true";
+    bitrate={kbps} key-int-max=30 bframes=0 byte-stream=true aud=true";
 
 /// Tried in order when [`DEFAULT_SW_ENCODER`] isn't installed. openh264enc (LGPL, in
 /// gst-plugins-bad) is the usual stand-in where gst-plugins-ugly is absent; it's baseline-only, so
 /// there's no B-frame reordering to disable - just pin it to a steady bitrate (bits/s here, unlike
-/// x264enc's kbit/s) and ~1s keyframes.
+/// x264enc's kbit/s - hence `{bps}`) and ~1s keyframes.
 const SW_ENCODER_FALLBACKS: &[&str] =
-    &["openh264enc complexity=low rate-control=bitrate bitrate=12000000 gop-size=30"];
+    &["openh264enc complexity=low rate-control=bitrate bitrate={bps} gop-size=30"];
 
 /// The encoder for a software (non-zero-copy) chain, honouring `CARPLAY_ENCODER` first.
 ///
@@ -795,17 +852,17 @@ const SW_ENCODER_FALLBACKS: &[&str] =
 /// dev box included) ship a vendor encoder but no CPU one - so falling back to nvh264enc/vah264enc
 /// beats failing outright. Each row's `encoder` is tuned to hold up on system memory too (see the
 /// nvenc gop-size note), so it can be used here as-is.
-fn software_encoder_desc() -> Result<String> {
+fn software_encoder_desc(bitrate: Bitrate) -> Result<String> {
     if let Some(desc) = encoder_override() {
-        return Ok(desc);
+        return Ok(bitrate.apply(&desc));
     }
     let sw = std::iter::once(DEFAULT_SW_ENCODER).chain(SW_ENCODER_FALLBACKS.iter().copied());
     if let Some(desc) = sw.clone().find(|d| element_available(encoder_name(d))) {
-        return Ok(desc.to_string());
+        return Ok(bitrate.apply(desc));
     }
     if let Some(desc) = HW_BACKENDS
         .iter()
-        .map(HwBackend::encoder_desc)
+        .map(|b| b.encoder_desc(bitrate))
         .find(|d| element_available(encoder_name(d)))
     {
         tracing::warn!(
@@ -832,8 +889,9 @@ fn build_hw_chain(
     pipeline: &gst::Pipeline,
     src_tail: &gst::Element,
     b: &HwBackend,
+    bitrate: Bitrate,
 ) -> Result<gst::Element> {
-    let (enc_name, encoder) = make_encoder(&b.encoder_desc())?;
+    let (enc_name, encoder) = make_encoder(&b.encoder_desc(bitrate))?;
     pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
 
     let mut tail = src_tail.clone();
@@ -851,7 +909,7 @@ fn build_hw_chain(
 
     let chain = b.postproc.map(|p| format!("{p} ! ")).unwrap_or_default();
     tracing::info!(
-        "Encode backend: zero-copy hardware '{}' ({chain}{enc_name})",
+        "Encode backend: zero-copy hardware '{}' ({chain}{enc_name}) at {bitrate}",
         b.name
     );
     Ok(encoder)
@@ -863,14 +921,18 @@ fn build_hw_chain(
 /// car's resolution and the feeder pushes a steady 30fps, so there's nothing to scale or
 /// re-time. `videoconvert` stays because most encoders don't accept the compositor's BGRx (e.g.
 /// x264enc wants planar YUV) - it does the BGRx->encoder-format conversion on the CPU.
-fn build_software_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Result<gst::Element> {
+fn build_software_chain(
+    pipeline: &gst::Pipeline,
+    src_tail: &gst::Element,
+    bitrate: Bitrate,
+) -> Result<gst::Element> {
     let mk = |name: &str, label: &str| {
         gst::ElementFactory::make(name)
             .name(label)
             .build()
             .map_err(|_| eyre!("failed to create {label} ({name})"))
     };
-    let (enc_name, encoder) = make_encoder(&software_encoder_desc()?)?;
+    let (enc_name, encoder) = make_encoder(&software_encoder_desc(bitrate)?)?;
     let convert = mk("videoconvert", "videoconvert")?;
     pipeline.add(&convert).map_err(|_| eyre!("add convert"))?;
     pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
@@ -880,7 +942,7 @@ fn build_software_chain(pipeline: &gst::Pipeline, src_tail: &gst::Element) -> Re
     convert
         .link(&encoder)
         .map_err(|_| eyre!("link convert-encoder"))?;
-    tracing::info!("Encode backend: software (videoconvert ! {enc_name})");
+    tracing::info!("Encode backend: software (videoconvert ! {enc_name}) at {bitrate}");
     Ok(encoder)
 }
 
@@ -1058,4 +1120,71 @@ fn normalize_annexb_4byte(buf: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&buf[payload_start..payload_end]);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bitrate_substitutes_the_unit_each_encoder_wants() {
+        let b = Bitrate::from_kbps(3000);
+        assert_eq!(b.apply("x264enc bitrate={kbps}"), "x264enc bitrate=3000");
+        assert_eq!(
+            b.apply("openh264enc bitrate={bps}"),
+            "openh264enc bitrate=3000000"
+        );
+        // No placeholder: left as-is, so a CARPLAY_ENCODER override can pin its own rate.
+        assert_eq!(b.apply("x264enc bitrate=8000"), "x264enc bitrate=8000");
+    }
+
+    /// Every tuned encoder description has to take the configured bitrate - a row that hardcodes
+    /// one (or misspells the placeholder) would silently ignore `[graphics] bitrate`.
+    #[test]
+    fn every_encoder_takes_the_configured_bitrate() {
+        let b = Bitrate::from_kbps(4500);
+        for desc in HW_BACKENDS
+            .iter()
+            .map(|hw| hw.encoder)
+            .chain(std::iter::once(DEFAULT_SW_ENCODER))
+            .chain(SW_ENCODER_FALLBACKS.iter().copied())
+        {
+            let applied = b.apply(desc);
+            assert_ne!(
+                applied,
+                desc,
+                "'{}' has no {{kbps}}/{{bps}} placeholder, so it ignores the configured bitrate",
+                encoder_name(desc)
+            );
+            assert!(
+                !applied.contains('{'),
+                "'{applied}' still holds an unsubstituted placeholder"
+            );
+            // Parseable, and the bitrate landed in a property rather than in the factory name.
+            let (name, props) = parse_encoder_string(&applied).unwrap();
+            assert_eq!(name, encoder_name(desc));
+            assert!(
+                props.iter().any(|(_, v)| v.contains("4500")),
+                "no property carries the bitrate in '{applied}'"
+            );
+        }
+    }
+
+    /// The v4l2 row passes its whole rate setup as a GstStructure (`extra-controls`), which has to
+    /// survive the whitespace-splitting property parser in one piece - commas and all.
+    #[test]
+    fn v4l2_extra_controls_parse_as_one_property() {
+        let v4l2 = HW_BACKENDS.iter().find(|b| b.name == "v4l2").unwrap();
+        let (name, props) = parse_encoder_string(&v4l2.encoder_desc(Bitrate::from_kbps(3000)))
+            .expect("v4l2 encoder description parses");
+        assert_eq!(name, "v4l2h264enc");
+        assert_eq!(
+            props,
+            vec![(
+                "extra-controls".to_string(),
+                // video_bitrate_mode=1 is CBR, matching the other rows' rate-control=cbr.
+                "controls,video_bitrate_mode=1,video_bitrate=3000000".to_string()
+            )]
+        );
+    }
 }

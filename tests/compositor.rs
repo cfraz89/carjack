@@ -12,21 +12,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use carjack::compositor::{CapturedFrame, Compositor};
 use carjack::config::{Cli, Config};
-use carjack::encode::{EncodeBackend, encode_h264_to_channel, resolve_backend};
+use carjack::encode::{Bitrate, EncodeBackend, encode_h264_to_channel, resolve_backend};
 use clap::Parser;
 use eyre::{Result, eyre};
 use libcarjack::airplay::EncodedFrame;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
-/// Resolve the render node + encode backend the same way `main` does (from config/env), so the
-/// test exercises the real selection path. Returns (node, backend).
-fn resolve_gpu() -> Result<(String, EncodeBackend)> {
+/// Resolve the render node + encode backend + bitrate the same way `main` does (from config/env),
+/// so the test exercises the real selection path. Returns (node, backend, bitrate).
+fn resolve_gpu() -> Result<(String, EncodeBackend, Bitrate)> {
     // Empty CLI: config comes from defaults + CARJACK_* env vars (see the test's env).
     let cfg = Config::load(&Cli::parse_from(["carjack"]))?;
     let node = carjack::config::resolve_render_node(&cfg.graphics.drm_device)?;
     let backend = resolve_backend(cfg.graphics.zerocopy, &node)?;
-    Ok((node, backend))
+    Ok((node, backend, Bitrate::from_kbps(cfg.graphics.bitrate)))
 }
 
 #[tokio::test]
@@ -36,7 +36,7 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
-    let (node, backend) = resolve_gpu()?;
+    let (node, backend, bitrate) = resolve_gpu()?;
     let comp = Compositor::start(node, backend.is_zero_copy(), 1280, 720, 30)?;
     tracing::info!("compositor started, socket={:?}", comp.socket_name);
 
@@ -60,6 +60,7 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
         comp.subscribe_frames(),
         video_tx,
         backend.clone(),
+        bitrate,
     )));
     let encoded = Arc::new(AtomicU64::new(0));
     let encoded2 = encoded.clone();
@@ -143,7 +144,7 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
 /// the new dimensions (no client needed - the compositor renders at the output size regardless).
 #[tokio::test]
 async fn reconfigure_switches_frame_size() -> Result<()> {
-    let (node, backend) = resolve_gpu()?;
+    let (node, backend, _bitrate) = resolve_gpu()?;
     let comp = Compositor::start(node, backend.is_zero_copy(), 1280, 720, 30)?;
     let mut rx = comp.subscribe_frames();
 

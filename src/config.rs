@@ -56,13 +56,21 @@ pub struct Graphics {
     /// Zero-copy encode mode: `"auto"` (try it, fall back to software with a warning), `true`
     /// (require it - error out if the pipeline can't be built), or `false` (software).
     pub zerocopy: ZeroCopyMode,
+    /// Target H264 bitrate in kbit/s, applied (as CBR) to whichever encoder ends up selected. The
+    /// default is deliberately modest: the car's WiFi link is the bottleneck, so overshooting it
+    /// shows up as stutter rather than as detail.
+    pub bitrate: u32,
 }
+
+/// Default video bitrate, in kbit/s (3 Mbit/s).
+pub const DEFAULT_BITRATE_KBPS: u32 = 3000;
 
 impl Default for Graphics {
     fn default() -> Self {
         Self {
             drm_device: "auto".into(),
             zerocopy: ZeroCopyMode::Auto,
+            bitrate: DEFAULT_BITRATE_KBPS,
         }
     }
 }
@@ -170,6 +178,10 @@ pub struct Cli {
     #[arg(long, value_name = "MODE")]
     pub zerocopy: Option<String>,
 
+    /// Override [graphics] bitrate: target video bitrate in kbit/s (default 3000 = 3 Mbit/s).
+    #[arg(long, value_name = "KBPS")]
+    pub bitrate: Option<u32>,
+
     /// Override [display] width / height / fps.
     #[arg(long)]
     pub width: Option<u32>,
@@ -235,6 +247,9 @@ impl Config {
         if let Some(v) = &cli.zerocopy {
             cfg.graphics.zerocopy = ZeroCopyMode::parse(v)?;
         }
+        if let Some(v) = cli.bitrate {
+            cfg.graphics.bitrate = v;
+        }
         if let Some(v) = cli.width {
             cfg.display.width = v;
         }
@@ -252,6 +267,9 @@ impl Config {
         }
         if let Some(v) = &cli.bt_device {
             cfg.bluetooth.device = v.clone();
+        }
+        if cfg.graphics.bitrate == 0 {
+            return Err(eyre!("[graphics] bitrate must be greater than 0 (kbit/s)"));
         }
         Ok(cfg)
     }
@@ -490,6 +508,7 @@ mod tests {
         env.insert("CARJACK.GRAPHICS.ZEROCOPY".to_string(), "false".to_string());
         env.insert("CARJACK.APP.COMMAND".to_string(), "foo".to_string());
         env.insert("CARJACK.DISPLAY.WIDTH".to_string(), "800".to_string());
+        env.insert("CARJACK.GRAPHICS.BITRATE".to_string(), "6000".to_string());
         env.insert(
             "CARJACK.BLUETOOTH.DEVICE".to_string(),
             "MYCAR-1234".to_string(),
@@ -509,6 +528,7 @@ mod tests {
         assert_eq!(cfg.graphics.zerocopy, ZeroCopyMode::Off);
         assert_eq!(cfg.desktop_command(), "foo");
         assert_eq!(cfg.display.width, 800);
+        assert_eq!(cfg.graphics.bitrate, 6000);
         assert_eq!(cfg.bluetooth_device(), Some("MYCAR-1234"));
     }
 
@@ -529,6 +549,21 @@ mod tests {
         };
         assert_eq!(blank.bluetooth_device(), None);
         assert_eq!(Config::default().bluetooth_device(), None);
+    }
+
+    #[test]
+    fn bitrate_defaults_and_overrides() {
+        use clap::Parser;
+        assert_eq!(Config::default().graphics.bitrate, 3000); // 3 Mbit/s
+        assert_eq!(parse_toml("").graphics.bitrate, 3000);
+        assert_eq!(
+            parse_toml("[graphics]\nbitrate = 8000\n").graphics.bitrate,
+            8000
+        );
+        // Flag wins, and 0 is rejected rather than handed to an encoder.
+        let cli = Cli::parse_from(["carjack", "--bitrate", "6000"]);
+        assert_eq!(Config::load(&cli).unwrap().graphics.bitrate, 6000);
+        assert!(Config::load(&Cli::parse_from(["carjack", "--bitrate", "0"])).is_err());
     }
 
     #[test]
