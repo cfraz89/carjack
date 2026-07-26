@@ -25,7 +25,7 @@ run +flags="": (build flags)
 
 #Run the app until timeout, then kill it and restore the original wifi connection
 [script('bash')]
-test-run timeout="60": build
+test-run timeout="60" +flags="": (build flags)
     set -uo pipefail
     original=""
     cleanup() {
@@ -41,23 +41,13 @@ test-run timeout="60": build
         fi
     }
     trap cleanup EXIT
+    trap cleanup ERR
 
     original=$(nmcli -t -f NAME,TYPE,ACTIVE connection show --active 2>/dev/null | awk -F: '$2!="loopback" && $3=="yes" {print $1; exit}')
     echo "Active connection before test: ${original:-none}" >&2
 
-    # `--foreground` is what makes Ctrl-C work. Without it, `timeout` puts the command in a *new
-    # process group*; the terminal only ever sends SIGINT to its **foreground** process group, so
-    # Ctrl-C reaches this script but never reaches carjack - it just runs on (spewing RUST_LOG
-    # output) until the timeout expires, which reads as a wedged terminal. The cost of
-    # `--foreground` is that on expiry `timeout` signals only its direct child (cargo), leaving
-    # carjack orphaned - the `pkill` in `cleanup` above is what reaps it.
-    #
-    # Deliberately NOT `just run`: that re-runs the `build` recipe, and its `_setcap` step shells
-    # out to `run0`, which wants a PTY and its own polkit auth. Building as a recipe dependency
-    # keeps that out of the timed section and stops a cold compile eating the budget. Keep these
-    # two lines in sync with the `run` recipe above.
     waydroid session stop || true
-    timeout --foreground --kill-after=5s "{{timeout}}s" cargo run < /dev/null || true
+    timeout --foreground --kill-after=5s "{{timeout}}s" cargo run {{flags}} < /dev/null || true
 
 build +flags="": && (_setcap flags)
     {{toolbox_build}}cargo build {{flags}} < /dev/null
