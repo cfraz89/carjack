@@ -8,9 +8,6 @@ use ashpd::desktop::{
 };
 use eyre::{Result, eyre};
 use libcarjack::carplay_session::{TouchEvent, TouchEventType};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
 use tracing::debug;
 use wayland_client::protocol::{wl_output, wl_registry};
 use wayland_client::{Connection, Dispatch, QueueHandle};
@@ -169,44 +166,7 @@ fn scale_touch(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_restore_token_at, save_restore_token_at, scale_touch};
-
-    /// A scratch path in the target dir; no tempfile dep in this crate.
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!("carjack-test-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        path
-    }
-
-    #[test]
-    fn restore_token_round_trips() {
-        let path = scratch("restore-token");
-        assert_eq!(load_restore_token_at(&path), None, "missing file -> no token");
-
-        save_restore_token_at(&path, "tok-abc123").unwrap();
-        assert_eq!(load_restore_token_at(&path).as_deref(), Some("tok-abc123"));
-
-        // Rotated token overwrites the old one.
-        save_restore_token_at(&path, "tok-def456").unwrap();
-        assert_eq!(load_restore_token_at(&path).as_deref(), Some("tok-def456"));
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "token must not be world/group readable");
-        }
-
-        // An empty (e.g. truncated) file reads as "no token" rather than an empty one, which the
-        // portal would reject.
-        std::fs::write(&path, "").unwrap();
-        assert_eq!(load_restore_token_at(&path), None);
-        // Trailing newline from a hand-edited file is trimmed.
-        std::fs::write(&path, "tok-xyz\n").unwrap();
-        assert_eq!(load_restore_token_at(&path).as_deref(), Some("tok-xyz"));
-
-        std::fs::remove_file(&path).unwrap();
-    }
+    use super::scale_touch;
 
     #[test]
     fn display_scale_probe() {
@@ -240,89 +200,7 @@ mod tests {
     }
 }
 
-/// Path of the stored portal restore token, `~/.local/state/carjack/portal-restore-token`.
-/// State (not cache): losing it costs the user a consent dialog, so it shouldn't be swept up by a
-/// cache clean. `None` if there's no state dir to write to.
-fn restore_token_path() -> Option<PathBuf> {
-    xdg::BaseDirectories::with_prefix("carjack")
-        .place_state_file("portal-restore-token")
-        .ok()
-}
-
-/// The saved restore token, if any. A missing/unreadable/empty file just means "no token yet" -
-/// the portal then shows its consent dialog as on a first run.
-fn load_restore_token() -> Option<String> {
-    load_restore_token_at(&restore_token_path()?)
-}
-
-fn load_restore_token_at(path: &Path) -> Option<String> {
-    let token = std::fs::read_to_string(path).ok()?.trim().to_string();
-    (!token.is_empty()).then_some(token)
-}
-
-/// Persist the token the portal handed back. Portals may rotate it on every restore, so this is
-/// called with whatever `Start` returned, every session. Written 0600 - the token grants silent
-/// screen capture and input injection to whoever holds it.
-fn save_restore_token(token: &str) {
-    let Some(path) = restore_token_path() else {
-        return;
-    };
-    if let Err(e) = save_restore_token_at(&path, token) {
-        tracing::warn!("portal: write restore token {}: {e}", path.display());
-    }
-}
-
-fn save_restore_token_at(path: &Path, token: &str) -> std::io::Result<()> {
-    std::fs::write(path, token)?;
-    #[cfg(unix)]
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-/// Forget a token the portal wouldn't accept, so the next attempt starts from a clean consent.
-fn clear_restore_token() {
-    let Some(path) = restore_token_path() else {
-        return;
-    };
-    match std::fs::remove_file(&path) {
-        Ok(()) => tracing::info!("portal: discarded stale restore token"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!("portal: remove restore token {}: {e}", path.display()),
-    }
-}
-
-/// Open the ScreenCast + RemoteDesktop session. With a saved restore token the portal reuses the
-/// previous selection and (`PersistMode::Application`) grants it without a dialog; without one the
-/// user is prompted, and the token the portal returns is saved for next time. A token the portal
-/// rejects is discarded and the session retried once, prompting.
 pub async fn start_remote_desktop() -> Result<RemoteDesktopStream> {
-    let token = load_restore_token();
-    if token.is_some() {
-        debug!("portal: restoring session from saved token");
-    }
-    match start_session(token.as_deref()).await {
-        Ok(stream) => Ok(stream),
-        // Only a token-bearing attempt is worth retrying: without one there's nothing stale to
-        // blame, and a second prompt would just annoy the user. A cancelled request is the user
-        // saying no - re-prompting them would be worse than failing.
-        Err(e) if token.is_some() && !is_cancelled(&e) => {
-            tracing::warn!("portal: restoring saved session failed ({e}), re-requesting consent");
-            clear_restore_token();
-            start_session(None).await
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// Whether a portal error is the user dismissing/denying the dialog.
-fn is_cancelled(e: &eyre::Report) -> bool {
-    matches!(
-        e.downcast_ref::<ashpd::Error>(),
-        Some(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled))
-    )
-}
-
-async fn start_session(restore_token: Option<&str>) -> Result<RemoteDesktopStream> {
     let remote_desktop = RemoteDesktop::new().await?;
     let session = remote_desktop.create_session(Default::default()).await?;
 
@@ -331,8 +209,7 @@ async fn start_session(restore_token: Option<&str>) -> Result<RemoteDesktopStrea
             &session,
             SelectDevicesOptions::default()
                 .set_devices(DeviceType::Keyboard | DeviceType::Touchscreen)
-                .set_persist_mode(PersistMode::Application)
-                .set_restore_token(restore_token),
+                .set_persist_mode(PersistMode::Application),
         )
         .await?;
 
@@ -341,11 +218,7 @@ async fn start_session(restore_token: Option<&str>) -> Result<RemoteDesktopStrea
         .select_sources(
             &session,
             SelectSourcesOptions::default()
-                .set_sources(SourceType::Monitor | SourceType::Virtual | SourceType::Window)
-                // The screencast half needs its own persist mode + token, otherwise the source
-                // picker reappears every run even though the device grant was remembered.
-                .set_persist_mode(PersistMode::Application)
-                .set_restore_token(restore_token),
+                .set_sources(SourceType::Monitor | SourceType::Virtual | SourceType::Window),
         )
         .await?;
 
@@ -355,13 +228,6 @@ async fn start_session(restore_token: Option<&str>) -> Result<RemoteDesktopStrea
         .response()?;
 
     debug!(response = ?response, "Response");
-
-    match response.restore_token() {
-        Some(token) => save_restore_token(token),
-        // Portal chose not to persist (user picked "deny"/one-off, or the backend doesn't support
-        // it): drop any stale token so the next run doesn't try to restore something that's gone.
-        None => clear_restore_token(),
-    }
 
     let streams = response.streams();
     let stream = streams

@@ -215,11 +215,7 @@ pub async fn wireless_carplay(
     // Surface the car's MAC (known now, early) so the caller can look up its cached display and
     // size the compositor / launch the app before AirPlay reports the display.
     let _ = car_addr_tx.send(device.address().to_string());
-    if device.is_connected().await? {
-        tracing::info!("Already connected");
-        device.disconnect().await?;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
+    device.disconnect_profile(&IAP_ACCESSORY_UUID).await?;
 
     let profiles = iap_accessory_handle.merge(iap_device_handle);
 
