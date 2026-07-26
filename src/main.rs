@@ -387,7 +387,7 @@ async fn establish_carplay(bt_device: &str) -> Result<Established> {
     let car_wifi = car_wifi_result?;
 
     //In testing, the bike sent us its airplay address, so we use that. It doesn't seem to
-    //invite us on mdns anyway, so only advertis on that if we aren't given the address outright
+    //invite us on mdns anyway, so only advertise on that if we aren't given the address outright
     let (peer_addr, remote_homekit_id) = match airplay_hint {
         Some(addr) => {
             let addr = with_scope_id(addr, &car_wifi.iface);
