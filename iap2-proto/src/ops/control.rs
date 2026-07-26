@@ -166,10 +166,21 @@ pub enum ControlMessageId {
     RequestWiFiInformation,
     #[deku(id = "0x5701")]
     WiFiInformation,
-    #[deku(id = "0x4300")]
+    // Two dialects of the same exchange are in the wild, differing in *both* opcode and
+    // payload shape, so carjack has to speak whichever the accessory declares (see
+    // `MESSAGES_RECEIVED_FROM_DEVICE`):
+    //   - 0x5702/0x5703, parameters flat (SSID=1, passphrase=2). The AUTO BOX bench unit
+    //     answers this one; `carjack.log` 2026-07-17 has it returning `carplay_wifi_9900`.
+    //   - 0x4300/0x4301, parameters nested in groups. The CFMOTO bike accepts *only* this
+    //     one, and declares it in its IdentificationInformation (`iphone-cfmoto.pklg`).
+    #[deku(id = "0x5702")]
     RequestAccessoryWiFiConfigurationInformation,
-    #[deku(id = "0x4301")]
+    #[deku(id = "0x5703")]
     AccessoryWiFiConfigurationInformation,
+    #[deku(id = "0x4300")]
+    RequestAccessoryWiFiConfigurationInformationGrouped,
+    #[deku(id = "0x4301")]
+    AccessoryWiFiConfigurationInformationGrouped,
     #[deku(id = "0x0B00")]
     StartBluetoothPairing,
     #[deku(id = "0x0B01")]
@@ -213,6 +224,10 @@ impl ParameterId {
     pub const AUTH_CHALLENGE: Self = Self(0x0001);
     pub const AUTH_DATA: Self = Self(0x0000);
     pub const ACCESSORY_NAME: Self = Self(0x0000);
+    /// `IdentificationInformation` parameter 7: the message IDs the accessory will accept
+    /// from us. Head units differ on which WiFi-config dialect they implement, so this is
+    /// what carjack keys off rather than guessing.
+    pub const MESSAGES_RECEIVED_FROM_DEVICE: Self = Self(0x0007);
     pub const DEVICE_NAME: Self = Self(0x0000);
     pub const REQUEST_TRANSPORT_GROUP: Self = Self(0x0000);
     pub const REQUEST_WIFI_GROUP: Self = Self(0x0001);
@@ -375,6 +390,21 @@ impl TryFromParam for Vec<u8> {
     }
 }
 
+/// A packed big-endian list of u16s, as used by the message-ID lists in
+/// `IdentificationInformation` (parameters 6 and 7).
+impl TryFromParam for Vec<u16> {
+    fn try_from_param(data: &[u8]) -> Option<Self> {
+        if data.is_empty() || data.len() % 2 != 0 {
+            return None;
+        }
+        Some(
+            data.chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect(),
+        )
+    }
+}
+
 impl TryFromParam for Vec<Parameter> {
     fn try_from_param(data: &[u8]) -> Option<Self> {
         let mut out = Vec::new();
@@ -500,7 +530,19 @@ impl ControlMessage {
         )
     }
 
-    pub fn request_accessory_wifi_config(transport_identifier: &str, wifi_mac: &str) -> Self {
+    /// The 0x5702 dialect: no parameters. What the AUTO BOX bench unit answers (with a flat
+    /// 0x5703 carrying SSID in parameter 1 and passphrase in parameter 2).
+    pub fn request_accessory_wifi_config() -> Self {
+        Self::new(
+            ControlMessageId::RequestAccessoryWiFiConfigurationInformation,
+            vec![],
+        )
+    }
+
+    pub fn request_accessory_wifi_config_grouped(
+        transport_identifier: &str,
+        wifi_mac: &str,
+    ) -> Self {
         let transport = |id, identifier: &str| {
             Parameter::new(
                 id,
@@ -511,7 +553,7 @@ impl ControlMessage {
             )
         };
         Self::new(
-            ControlMessageId::RequestAccessoryWiFiConfigurationInformation,
+            ControlMessageId::RequestAccessoryWiFiConfigurationInformationGrouped,
             vec![
                 transport(ParameterId::REQUEST_TRANSPORT_GROUP, transport_identifier),
                 transport(ParameterId::REQUEST_WIFI_GROUP, wifi_mac),
@@ -586,7 +628,7 @@ mod tests {
 
     #[test]
     fn wifi_config_request_matches_iphone() {
-        let msg = ControlMessage::request_accessory_wifi_config(
+        let msg = ControlMessage::request_accessory_wifi_config_grouped(
             "0123456789ABCDEF01234567",
             "02:00:00:00:00:01",
         );
@@ -601,7 +643,7 @@ mod tests {
         let (_, msg) = ControlMessage::from_bytes((&bytes, 0)).unwrap();
         assert_eq!(
             msg.message_id,
-            ControlMessageId::AccessoryWiFiConfigurationInformation
+            ControlMessageId::AccessoryWiFiConfigurationInformationGrouped
         );
 
         let group = msg
@@ -641,6 +683,52 @@ mod tests {
         assert_eq!(encoded.len(), reference.len());
         // Same header and parameter framing; only the random challenge itself differs.
         assert_eq!(encoded[..10], reference[..10]);
+    }
+
+    /// The AUTO BOX bench unit's 0x5703, rebuilt from the parameter bytes logged verbatim in
+    /// `carjack.log` (2026-07-17). Flat parameters, no group - the opposite of the bike's
+    /// 0x4301 above, which is why both dialects have to be supported.
+    #[test]
+    fn legacy_wifi_config_response_parses() {
+        let bytes = unhex(
+            "404000335703\
+             0016000163617270 6c61795f776966695f3939303000\
+             000d0002313233343536373800\
+             0005000302\
+             0005000424"
+                .replace(' ', "")
+                .as_str(),
+        );
+        let (_, msg) = ControlMessage::from_bytes((&bytes, 0)).unwrap();
+        assert_eq!(
+            msg.message_id,
+            ControlMessageId::AccessoryWiFiConfigurationInformation
+        );
+        assert_eq!(
+            msg.parameters.get_param::<String>(ParameterId::SSID),
+            Some(String::from("carplay_wifi_9900"))
+        );
+        assert_eq!(
+            msg.parameters.get_param::<String>(ParameterId::PASSPHRASE),
+            Some(String::from("12345678"))
+        );
+        // The flat layout must NOT be read as a group, or the SSID comes back empty.
+        assert!(
+            msg.parameters
+                .get_param::<Vec<Parameter>>(ParameterId::WIFI_CONFIG_GROUP)
+                .is_none()
+        );
+    }
+
+    /// The two dialects must stay distinct opcodes, since one accessory answers each.
+    #[test]
+    fn wifi_config_dialects_are_distinct() {
+        assert_eq!(
+            ControlMessage::request_accessory_wifi_config().to_bytes().unwrap(),
+            unhex("404000065702")
+        );
+        let grouped = ControlMessage::request_accessory_wifi_config_grouped("a", "b");
+        assert_eq!(grouped.message_id.deku_id().unwrap(), 0x4300);
     }
 
     #[test]
