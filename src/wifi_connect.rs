@@ -32,6 +32,16 @@ pub struct CarWifi {
 }
 
 pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<CarWifi> {
+    let nm = get_network_manager().await;
+
+    // If already connected to this SSID, skip creating a new connection profile.
+    // `add_and_activate_connection` would deactivate the current connection and
+    // activate a new one, briefly cycling the WiFi and disrupting IPv6 stability.
+    if let Some(car_wifi) = maybe_current_car_wifi(&nm, ssid).await? {
+        tracing::info!("Already connected to {ssid}, reusing current connection");
+        return Ok(car_wifi);
+    }
+
     let settings = WifiConnectionBuilder::new(ssid)
         .wpa_psk(passphrase)
         .band(WifiBand::A)
@@ -55,6 +65,38 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
     .await?;
 
     Ok(car_wifi)
+}
+
+/// If the host is already connected to `ssid`, return the current `CarWifi`
+/// without creating a new NM connection profile.
+async fn maybe_current_car_wifi(nm: &NetworkManager, ssid: &str) -> Result<Option<CarWifi>> {
+    let Some(net) = nm.current_network().await? else {
+        return Ok(None);
+    };
+    if net.ssid != ssid || net.ip4_address.is_none() {
+        return Ok(None);
+    }
+
+    let iface = net.device;
+    let ipnet = net.ip4_address.as_ref().unwrap().parse::<IpNet>()?;
+    let ip = ipnet.addr();
+
+    // Read the active connection D-Bus path from the WiFi device so we can
+    // look up its gateway via NM's IP4Config.
+    let conn = nm.dbus_connection();
+    let dev_path = nm.get_device_by_interface(&iface).await?;
+    let dev = NMDeviceProxy::new(conn, dev_path).await?;
+    let active_path = dev.active_connection().await?;
+
+    let gateway = get_gateway(active_path).await?;
+
+    Ok(Some(CarWifi {
+        ssid: net.ssid,
+        ip,
+        iface,
+        iface_mac: get_wifi_mac().await?,
+        gateway,
+    }))
 }
 
 async fn get_car_wifi(active_path: OwnedObjectPath) -> Result<CarWifi> {
@@ -91,6 +133,15 @@ pub(crate) async fn get_wifi_mac() -> Result<String> {
         .wifi_device_by_interface(&network.device)
         .await?;
     Ok(device.hw_address)
+}
+
+#[proxy(
+    interface = "org.freedesktop.NetworkManager.Device",
+    default_service = "org.freedesktop.NetworkManager"
+)]
+trait NMDevice {
+    #[zbus(property)]
+    fn active_connection(&self) -> zbus::Result<OwnedObjectPath>;
 }
 
 #[proxy(

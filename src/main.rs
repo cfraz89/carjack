@@ -2,7 +2,9 @@ use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
 use std::time::Duration;
 
+use backon::{ConstantBuilder, Retryable};
 use eyre::{Result, eyre};
+use futures::TryStreamExt;
 use libcarjack::carplay_session::{TouchEvent, WifiCredentials};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
@@ -318,6 +320,57 @@ fn with_scope_id(addr: std::net::SocketAddr, iface: &str) -> std::net::SocketAdd
     }
 }
 
+/// Wait for the WiFi interface to have at least one non-tentative IPv6 address.
+///
+/// After a WiFi reconnect the kernel assigns a fresh link-local address and runs DAD on it;
+/// the address is marked "tentative" until DAD finishes and the kernel refuses to use it as a
+/// source for `connect()`.  Uses rtnetlink to query the kernel's address list and retries with
+/// backoff via `backon`.
+async fn wait_for_ipv6(iface: &str, timeout: Duration) -> Result<()> {
+    let if_index = nix::net::if_::if_nametoindex(iface)
+        .map_err(|e| eyre!("Interface {iface}: {e}"))?;
+
+    let (conn, handle, _) = rtnetlink::new_connection()
+        .map_err(|e| eyre!("rtnetlink connection: {e}"))?;
+    tokio::spawn(conn);
+
+    use netlink_packet_route::address::AddressHeaderFlag;
+
+    tokio::time::timeout(
+        timeout,
+        (move || {
+            let handle = handle.clone();
+            async move {
+                let mut addresses = handle
+                    .address()
+                    .get()
+                    .set_link_index_filter(if_index)
+                    .execute();
+                while let Some(msg) = addresses
+                    .try_next()
+                    .await
+                    .map_err(|e| eyre!("rtnetlink: {e}"))?
+                {
+                    if msg.header.index != if_index {
+                        continue;
+                    }
+                    // IFA_F_TENTATIVE (0x40): DAD still in progress
+                    if msg.header.flags.contains(&AddressHeaderFlag::Tentative) {
+                        continue;
+                    }
+                    return Ok(());
+                }
+                Err(eyre!("no valid IPv6 address"))
+            }
+        })
+        .retry(ConstantBuilder::new().with_delay(Duration::from_millis(50))),
+    )
+    .await
+    .map_err(|_| {
+        eyre!("IPv6 address did not become available on {iface} within {timeout:?}")
+    })?
+}
+
 /// Run the Bluetooth -> WiFi -> AirPlay flow and return once AirPlay is connected (so the caller
 /// knows the car's display and can wire up the video source + input). Shared by both source modes.
 async fn establish_carplay(bt_device: &str) -> Result<Established> {
@@ -386,10 +439,16 @@ async fn establish_carplay(bt_device: &str) -> Result<Established> {
     };
     let car_wifi = car_wifi_result?;
 
-    //In testing, the bike sent us its airplay address, so we use that. It doesn't seem to
-    //invite us on mdns anyway, so only advertise on that if we aren't given the address outright
+    // In testing, the bike sent us its airplay address, so we use that. It doesn't seem to
+    // invite us on mdns anyway, so only advertise on that if we aren't given the address outright
     let (peer_addr, remote_homekit_id) = match airplay_hint {
         Some(addr) => {
+            // Wait for a non-tentative IPv6 address before attempting the AirPlay connect:
+            // after a WiFi reconnect the kernel needs a moment to finish DAD, and the link-local
+            // source address won't be usable until then.
+            if let Err(e) = wait_for_ipv6(&car_wifi.iface, Duration::from_secs(10)).await {
+                tracing::warn!("{e}");
+            }
             let addr = with_scope_id(addr, &car_wifi.iface);
             tracing::info!("Connecting to AirPlay endpoint given by the car: {addr}");
             (addr, None)
@@ -410,7 +469,14 @@ async fn establish_carplay(bt_device: &str) -> Result<Established> {
     };
 
     // Connect AirPlay to learn the car's display size + refresh.
-    let conn = libcarjack::airplay::connect_airplay(peer_addr, remote_homekit_id).await?;
+    // Retry with backoff: the TCP connect can transiently fail (e.g. EADDRNOTAVAIL if IPv6
+    // DAD is still in progress despite our wait, or the car's AirPlay server isn't listening
+    // quite yet).
+    let conn = (move || {
+        libcarjack::airplay::connect_airplay(peer_addr, remote_homekit_id)
+    })
+    .retry(ConstantBuilder::new().with_delay(Duration::from_secs(2)))
+    .await?;
     Ok(Established {
         conn,
         carplay_handle,
