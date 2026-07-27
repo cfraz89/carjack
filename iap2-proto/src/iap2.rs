@@ -8,7 +8,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_util::codec::{Decoder, Encoder, Framed};
 
+use std::collections::VecDeque;
+
 use crate::error::Iap2Error;
+use crate::link::{LinkAction, LinkState};
 use crate::ops::{switch::perform_switch, syn::Syn};
 use crate::packet::{ControlByte, Packet};
 use crate::stream::{SessionTable, SessionType};
@@ -60,6 +63,14 @@ impl Encoder<Packet> for Iap2Codec {
     }
 }
 
+/// A packet waiting for the send window to open. Held as its parts rather than a built `Packet`
+/// so the `ack` field is filled in at transmit time and carries the freshest value.
+struct Queued {
+    control: ControlByte,
+    session_id: u8,
+    payload: Vec<u8>,
+}
+
 pub struct Iap2<T> {
     // Split into independent read/write halves so a pending receive_packet() (which
     // spends nearly all its time blocked waiting for the accessory's next byte) never
@@ -68,7 +79,10 @@ pub struct Iap2<T> {
     sink: Mutex<SplitSink<Framed<T, Iap2Codec>, Packet>>,
     stream: Mutex<SplitStream<Framed<T, Iap2Codec>>>,
     seq: AtomicU8,
-    ack: AtomicU8,
+    /// Negotiated parameters plus the send window, retransmit queue and cumulative-ack timers.
+    pub link: Mutex<LinkState>,
+    /// Packets that arrived while the send window was full, oldest first.
+    tx_queue: Mutex<VecDeque<Queued>>,
     pub session_table: Mutex<SessionTable>,
 }
 
@@ -105,7 +119,8 @@ impl<S: Stream> Iap2<S> {
             sink: Mutex::new(sink),
             stream: Mutex::new(stream),
             seq: AtomicU8::new(INITIAL_SEQ),
-            ack: AtomicU8::new(0),
+            link: Mutex::new(LinkState::new()),
+            tx_queue: Mutex::new(VecDeque::new()),
             session_table: Mutex::new(SessionTable::new()),
         }
     }
@@ -119,7 +134,23 @@ impl<S: Stream> Iap2<S> {
         Ok(iap2)
     }
 
-    pub fn make_packet(&self, control: ControlByte, session_id: u8, payload: Vec<u8>) -> Packet {
+    pub async fn make_packet(
+        &self,
+        control: ControlByte,
+        session_id: u8,
+        payload: Vec<u8>,
+    ) -> Packet {
+        let ack = self.link.lock().await.ack_field();
+        self.make_packet_with_ack(control, session_id, payload, ack)
+    }
+
+    fn make_packet_with_ack(
+        &self,
+        control: ControlByte,
+        session_id: u8,
+        payload: Vec<u8>,
+        ack: u8,
+    ) -> Packet {
         // `self.seq` is the number the *next* payload-bearing packet will use. A packet with
         // no payload is a pure acknowledgement, and repeats the last one instead - see
         // `send_packet` for why that matters.
@@ -129,16 +160,10 @@ impl<S: Stream> Iap2<S> {
         } else {
             next_seq
         };
-        Packet::new(
-            control,
-            seq,
-            self.ack.load(Ordering::Relaxed),
-            session_id,
-            payload,
-        )
+        Packet::new(control, seq, ack, session_id, payload)
     }
 
-    /// Send a packet, consuming a sequence number only if it carries a payload.
+    /// Queue or send a packet, consuming a sequence number only if it carries a payload.
     ///
     /// Pure acknowledgements do not advance the sequence: both an iPhone and the accessory
     /// repeat their last data packet's number on them (`iphone-cfmoto.pklg` - the phone sends
@@ -151,27 +176,228 @@ impl<S: Stream> Iap2<S> {
     /// exactly what `cfmoto_9.pcapng` shows - three 1 s keepalives take us from seq `0xa7` to
     /// `0xa9`, and the car ignores every packet from there on, including the `0xaa` that
     /// follows, while re-sending its WiFi configuration nine times.
+    ///
+    /// **This never blocks on the send window.** The session dispatches its replies from inside
+    /// its own receive loop, so a `send_packet` that waited for an acknowledgement would stop
+    /// that loop from ever reading the acknowledgement it is waiting for - a guaranteed deadlock
+    /// at `max_outstanding = 1`, which is what the CFMOTO head unit negotiates. A packet that
+    /// does not fit in the window is queued instead and goes out from `maintain` as soon as an
+    /// acknowledgement frees a slot.
     pub async fn send_packet(
         &self,
         control: ControlByte,
         session_id: u8,
         payload: Vec<u8>,
     ) -> Result<(), Iap2Error> {
+        self.check_length(&payload).await?;
+
+        // Bare acknowledgements and link-control packets (SYN, RST) are not session data: they
+        // take no sequence number, are never retransmitted, and are not subject to the window -
+        // the SYN exchange has to complete *before* there is a negotiated window at all.
+        let bypasses_window = payload.is_empty() || control.syn || control.rst;
+        if !bypasses_window && self.link.lock().await.window_is_full() {
+            tracing::debug!(
+                session_id,
+                bytes = payload.len(),
+                "Send window full; queueing packet"
+            );
+            self.tx_queue.lock().await.push_back(Queued {
+                control,
+                session_id,
+                payload,
+            });
+            return Ok(());
+        }
+
+        self.transmit(control, session_id, payload).await
+    }
+
+    /// Put a packet on the wire now, updating the sequence number and link bookkeeping.
+    async fn transmit(
+        &self,
+        control: ControlByte,
+        session_id: u8,
+        payload: Vec<u8>,
+    ) -> Result<(), Iap2Error> {
         let consumes_seq = !payload.is_empty();
-        let packet = self.make_packet(control, session_id, payload);
-        let mut sink = self.sink.lock().await;
-        sink.send(packet).await?;
+        let ack = self.link.lock().await.ack_field();
+        let packet = self.make_packet_with_ack(control, session_id, payload.clone(), ack);
+        {
+            let mut sink = self.sink.lock().await;
+            sink.send(packet.clone()).await?;
+        }
         if consumes_seq {
             self.seq.fetch_add(1, Ordering::Relaxed);
+        }
+        self.link.lock().await.record_sent(&packet, payload);
+        Ok(())
+    }
+
+    /// Reject anything larger than the accessory said it could receive. Sending it regardless
+    /// would overrun its buffer and cost us the link, which is far worse than a failed send.
+    async fn check_length(&self, payload: &[u8]) -> Result<(), Iap2Error> {
+        let max = self.link.lock().await.params.max_length;
+        let len = Packet::wire_len(payload.len());
+        if len > usize::from(max) {
+            return Err(Iap2Error::PacketTooLarge { len, max });
         }
         Ok(())
     }
 
+    /// Send whatever the newly-freed window allows. Returns how many packets went out.
+    async fn drain_tx_queue(&self) -> Result<usize, Iap2Error> {
+        let mut sent = 0;
+        loop {
+            if self.link.lock().await.window_is_full() {
+                break;
+            }
+            let Some(queued) = self.tx_queue.lock().await.pop_front() else {
+                break;
+            };
+            self.transmit(queued.control, queued.session_id, queued.payload)
+                .await?;
+            sent += 1;
+        }
+        Ok(sent)
+    }
+
+    /// Send a bare acknowledgement. Doubles as the idle keepalive - the accessory drops the
+    /// Bluetooth link if it hears nothing for `retx_timeout * max_retx`.
+    pub async fn send_ack(&self) -> Result<(), Iap2Error> {
+        self.transmit(ControlByte::with_ack(), LINK_SESSION_ID, Vec::new())
+            .await
+    }
+
+    /// Drive the link-layer timers: retransmit anything that has gone unacknowledged for
+    /// `retx_timeout`, and send a bare acknowledgement when the cumulative-ack timer expires or
+    /// the link has been idle long enough to need a keepalive.
+    ///
+    /// Tell the accessory the link is finished, so it can start a fresh SYN straight away
+    /// instead of waiting out its own retransmit timeout. Best-effort - by the time we send
+    /// this the transport is often already gone.
+    pub async fn send_reset(&self) -> Result<(), Iap2Error> {
+        let control = ControlByte {
+            rst: true,
+            ..Default::default()
+        };
+        self.transmit(control, LINK_SESSION_ID, Vec::new()).await
+    }
+
+    /// Sleep until the link needs attention. Pure - it only waits - so it is safe to cancel,
+    /// which is what lets it sit in a `select!` while `maintain` runs outside one.
+    pub async fn wait_for_link_work(&self) {
+        // Anything already queued goes out the moment the window has room for it.
+        if !self.tx_queue.lock().await.is_empty() && !self.link.lock().await.window_is_full() {
+            return;
+        }
+        let deadline = self.link.lock().await.next_deadline();
+        tokio::time::sleep_until(deadline).await;
+    }
+
+    /// Run once `wait_for_link_work` says there is something to do. **Do not call this inside a
+    /// `select!`**: it transmits, and being cancelled part-way through would lose or duplicate a
+    /// packet.
+    pub async fn maintain(&self) -> Result<(), Iap2Error> {
+        if self.drain_tx_queue().await? > 0 {
+            return Ok(());
+        }
+        let action = self.link.lock().await.next_action();
+        match action {
+            LinkAction::Idle(_) => Ok(()),
+            LinkAction::SendAck => self.send_ack().await,
+            LinkAction::Retransmit(unacked) => {
+                tracing::warn!(
+                    seq = format_args!("{:#04x}", unacked.seq),
+                    retx = unacked.retx,
+                    "Retransmitting unacknowledged packet"
+                );
+                let ack = self.link.lock().await.ack_field();
+                let packet = Packet::new(
+                    unacked.control,
+                    unacked.seq,
+                    ack,
+                    unacked.session_id,
+                    unacked.payload.clone(),
+                );
+                self.sink.lock().await.send(packet).await?;
+                self.link.lock().await.record_retransmit(unacked.seq);
+                Ok(())
+            }
+            LinkAction::Dead { seq, retx } => Err(Iap2Error::RetransmitsExhausted { seq, retx }),
+        }
+    }
+
+    /// Whether keepalives should go out. Off during identification/auth, where interleaving an
+    /// out-of-band packet into the exchange confuses some accessories.
+    pub async fn set_keepalive_enabled(&self, enabled: bool) {
+        self.link.lock().await.keepalive_enabled = enabled;
+    }
+
+    /// Receive the next packet the session should act on.
+    ///
+    /// Link-layer housekeeping happens here rather than in the caller: the accessory's
+    /// acknowledgement retires our in-flight packets (freeing the send window), a repeat of a
+    /// sequence number we have already taken is re-acknowledged but not returned twice, and a
+    /// link reset is surfaced as an error rather than being silently ignored.
     pub async fn receive_packet(&self) -> Result<Packet, Iap2Error> {
-        let mut stream = self.stream.lock().await;
-        let packet = stream.next().await.ok_or(Iap2Error::NoPacket)??;
-        self.ack.store(packet.header.seq, Ordering::Relaxed);
-        Ok(packet)
+        loop {
+            let packet = {
+                let mut stream = self.stream.lock().await;
+                stream.next().await.ok_or(Iap2Error::NoPacket)??
+            };
+            let control = packet.header.control;
+
+            if control.rst {
+                tracing::warn!("Accessory reset the link");
+                return Err(Iap2Error::LinkReset);
+            }
+            if control.sleep {
+                // Nothing to do beyond noting it: we have no power state to enter, and the
+                // accessory carries on talking regardless.
+                tracing::info!("Accessory signalled device sleep");
+            }
+
+            // Every packet carries a cumulative acknowledgement, data or not.
+            if control.ack {
+                let retired = self.link.lock().await.retire_acked(packet.header.ack);
+                if retired > 0 {
+                    tracing::trace!(retired, "Acknowledged in-flight packets");
+                }
+            }
+            // An extended ack additionally lists sequence numbers received out of order, which
+            // the cumulative field cannot describe.
+            if control.eak && !packet.payload.is_empty() {
+                let retired = self.link.lock().await.retire_eak(&packet.payload);
+                tracing::debug!(retired, "Extended ack retired out-of-order packets");
+            }
+            // An acknowledgement may have opened the window for something we had queued.
+            self.drain_tx_queue().await?;
+
+            // SYN packets are the handshake's business, not the session's - hand them straight
+            // back without touching the receive sequence.
+            if control.syn {
+                return Ok(packet);
+            }
+
+            if packet.payload.is_empty() || control.eak {
+                // A bare acknowledgement (or an EAK we have now consumed) is not session data.
+                continue;
+            }
+
+            if !self.link.lock().await.accept_rx(packet.header.seq) {
+                tracing::debug!(
+                    seq = format_args!("{:#04x}", packet.header.seq),
+                    "Duplicate packet; re-acknowledging without dispatching"
+                );
+                self.send_ack().await?;
+                continue;
+            }
+
+            if self.link.lock().await.must_ack_now() {
+                self.send_ack().await?;
+            }
+            return Ok(packet);
+        }
     }
 }
 
@@ -233,6 +459,106 @@ mod tests {
                 (INITIAL_SEQ.wrapping_add(1), 6),
             ]
         );
+    }
+
+    /// Write a packet into the peer's end of the duplex, as the accessory would.
+    async fn peer_sends(peer: &mut tokio::io::DuplexStream, packet: Packet) {
+        use tokio::io::AsyncWriteExt;
+        peer.write_all(&packet.to_bytes().unwrap()).await.unwrap();
+    }
+
+    /// Let `receive_packet` consume whatever is buffered. It swallows link-layer traffic and
+    /// then waits for real session data, so a timeout is how a test gets the side effects
+    /// without hanging on the wait that follows.
+    async fn pump<S: Stream>(iap2: &Iap2<S>) {
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(50), iap2.receive_packet()).await;
+    }
+
+    /// The CFMOTO head unit negotiates a one-packet window. Anything beyond it has to wait for
+    /// an acknowledgement rather than going out immediately - we used to send three at once
+    /// (`cfmoto_11.pcapng` frames 851-853).
+    #[tokio::test]
+    async fn a_full_window_queues_the_next_packet() {
+        let (ours, mut theirs) = tokio::io::duplex(1024);
+        let iap2 = Iap2::wrap(ours);
+        iap2.link.lock().await.params.max_outstanding = 1;
+
+        iap2.send_packet(ControlByte::with_ack(), 2, control_payload())
+            .await
+            .unwrap();
+        iap2.send_packet(ControlByte::with_ack(), 2, control_payload())
+            .await
+            .unwrap();
+
+        // Only the first is on the wire; the second is held back.
+        assert_eq!(drain(&mut theirs).await, vec![(INITIAL_SEQ, 6)]);
+        assert_eq!(iap2.link.lock().await.in_flight(), 1);
+
+        // The accessory acknowledges it, which frees the window and releases the queued packet.
+        peer_sends(
+            &mut theirs,
+            Packet::new(ControlByte::with_ack(), 0x2a, INITIAL_SEQ, 0, Vec::new()),
+        )
+        .await;
+        pump(&iap2).await;
+
+        assert_eq!(
+            drain(&mut theirs).await,
+            vec![(INITIAL_SEQ.wrapping_add(1), 6)]
+        );
+    }
+
+    /// A payload larger than the accessory said it could take is refused rather than sent - it
+    /// would overrun the accessory's receive buffer and cost us the link.
+    #[tokio::test]
+    async fn an_oversized_payload_is_refused() {
+        let (ours, _theirs) = tokio::io::duplex(4096);
+        let iap2 = Iap2::wrap(ours);
+        iap2.link.lock().await.params.max_length = 64;
+
+        let err = iap2
+            .send_packet(ControlByte::with_ack(), 2, vec![0u8; 128])
+            .await
+            .expect_err("a packet over max_length must not go out");
+        assert!(matches!(err, Iap2Error::PacketTooLarge { max: 64, .. }));
+    }
+
+    /// A reset from the accessory means the link is gone. Carrying on talking over it - which is
+    /// what ignoring the bit amounted to - just wastes the session's time.
+    #[tokio::test]
+    async fn a_link_reset_is_surfaced_as_an_error() {
+        let (ours, mut theirs) = tokio::io::duplex(1024);
+        let iap2 = Iap2::wrap(ours);
+
+        let rst = ControlByte {
+            rst: true,
+            ..Default::default()
+        };
+        peer_sends(&mut theirs, Packet::new(rst, 0x2a, 0, 0, Vec::new())).await;
+
+        assert!(matches!(
+            iap2.receive_packet().await,
+            Err(Iap2Error::LinkReset)
+        ));
+    }
+
+    /// A retransmission from the accessory has to be acknowledged again but must not be handed
+    /// to the session twice - it would replay whatever message it carried.
+    #[tokio::test]
+    async fn a_duplicate_packet_is_not_dispatched_twice() {
+        let (ours, mut theirs) = tokio::io::duplex(1024);
+        let iap2 = Iap2::wrap(ours);
+
+        let data = Packet::new(ControlByte::with_ack(), 0x2a, 0, 2, control_payload());
+        peer_sends(&mut theirs, data.clone()).await;
+        let first = iap2.receive_packet().await.unwrap();
+        assert_eq!(first.header.seq, 0x2a);
+
+        // The same sequence number again is a retransmission, not new data.
+        peer_sends(&mut theirs, data).await;
+        pump(&iap2).await;
+        assert_eq!(iap2.link.lock().await.ack_field(), 0x2a);
     }
 
     /// Consecutive messages still advance one at a time.

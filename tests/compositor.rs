@@ -56,11 +56,15 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
     // this validates the full compositor -> encode path (incl. the zero-copy dmabuf pipeline)
     // without needing the car.
     let (video_tx, mut video_rx) = mpsc::channel::<EncodedFrame>(64);
+    // No car here to ask for keyframes, so the sender is simply dropped and the encoder's
+    // request pump sees a closed channel and exits.
+    let (_keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
     let _encoder = AbortOnDropHandle::new(tokio::spawn(encode_h264_to_channel(
         comp.subscribe_frames(),
         video_tx,
         backend.clone(),
         bitrate,
+        keyframe_rx,
     )));
     let encoded = Arc::new(AtomicU64::new(0));
     let encoded2 = encoded.clone();

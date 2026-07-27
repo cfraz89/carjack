@@ -3,7 +3,6 @@ use std::os::unix::process::CommandExt;
 use std::time::Duration;
 
 use backon::{ConstantBuilder, Retryable};
-use enclose::enclose;
 use eyre::{Result, eyre};
 use libcarjack::carplay_session::{TouchEvent, WifiCredentials};
 use tokio::signal::unix::{SignalKind, signal};
@@ -335,13 +334,9 @@ async fn connect_airplay_endpoints(
     let mut last_error = None;
     for &addr in candidates {
         tracing::info!("Connecting to AirPlay endpoint {addr}");
-        let attempt =
-            enclose!(
-                (addr)
-                    || async move {
-                        libcarjack::airplay::connect_airplay(addr, remote_homekit_id).await
-                    }
-            )
+        // `SocketAddr` is `Copy`, so a plain `move` closure hands each attempt its own copy -
+        // nothing to clone into it.
+        let attempt = (move || libcarjack::airplay::connect_airplay(addr, remote_homekit_id))
             .retry(
                 ConstantBuilder::new()
                     .with_delay(AIRPLAY_CONNECT_DELAY)
@@ -544,13 +539,18 @@ async fn run_session(
     // Small on purpose: this is a real-time stream, so a shallow channel (plus the pipeline's leaky
     // queue) keeps latency low - a deep buffer just fills once and adds a permanent delay.
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(4);
+    // Keyframe requests travelling the other way: the car asks (ForceKeyFrame, or catplay
+    // rejecting a delta frame) and the encoder answers with an IDR. Depth 1 is enough - a
+    // second request while one is outstanding would only ask for the same thing.
+    let (keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_h264_to_channel(
         frame_rx,
         video_tx,
         backend.clone(),
         Bitrate::from_kbps(config.graphics.bitrate),
+        keyframe_rx,
     )));
-    let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx);
+    let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx, keyframe_tx);
     tokio::pin!(video);
 
     // If the car later drops Bluetooth on its own, that's not fatal - keep streaming.
@@ -616,6 +616,10 @@ async fn run_desktop_session(
     // Small on purpose: this is a real-time stream, so a shallow channel (plus the pipeline's leaky
     // queue) keeps latency low - a deep buffer just fills once and adds a permanent delay.
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(4);
+    // Keyframe requests travelling the other way: the car asks (ForceKeyFrame, or catplay
+    // rejecting a delta frame) and the encoder answers with an IDR. Depth 1 is enough - a
+    // second request while one is outstanding would only ask for the same thing.
+    let (keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
     // The encoder reports the desktop's real frame size here; touch is scaled from car space to it.
     let (desktop_size_tx, desktop_size_rx) =
         tokio::sync::watch::channel::<Option<(u32, u32)>>(None);
@@ -628,8 +632,9 @@ async fn run_desktop_session(
         bitrate,
         video_tx,
         desktop_size_tx,
+        keyframe_rx,
     )));
-    let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx);
+    let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx, keyframe_tx);
     tokio::pin!(video);
 
     let mut carplay_done = false;

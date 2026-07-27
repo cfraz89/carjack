@@ -201,6 +201,7 @@ pub async fn encode_h264_to_channel(
     video_tx: mpsc::Sender<EncodedFrame>,
     backend: EncodeBackend,
     bitrate: Bitrate,
+    keyframe_rx: mpsc::Receiver<()>,
 ) -> Result<()> {
     gst::init()?;
 
@@ -330,7 +331,7 @@ pub async fn encode_h264_to_channel(
     }));
 
     // `_frame_feeder` stays alive for the whole call, feeding the appsrc while the pipeline runs.
-    drive_h264_pipeline(&pipeline, &encoder, video_tx).await
+    drive_h264_pipeline(&pipeline, &encoder, video_tx, keyframe_rx).await
 }
 
 /// Stream the user's existing desktop, captured via the xdg-desktop-portal ScreenCast PipeWire
@@ -353,6 +354,7 @@ pub async fn encode_pipewire_to_channel(
     bitrate: Bitrate,
     video_tx: mpsc::Sender<EncodedFrame>,
     desktop_size_tx: tokio::sync::watch::Sender<Option<(u32, u32)>>,
+    keyframe_rx: mpsc::Receiver<()>,
 ) -> Result<()> {
     gst::init()?;
     let pipeline = gst::Pipeline::new();
@@ -393,7 +395,7 @@ pub async fn encode_pipewire_to_channel(
     }
 
     let encoder = build_pipewire_encode(&pipeline, &src, width, height, zerocopy, bitrate)?;
-    drive_h264_pipeline(&pipeline, &encoder, video_tx).await
+    drive_h264_pipeline(&pipeline, &encoder, video_tx, keyframe_rx).await
 }
 
 /// Build the desktop encode chain from `src` (a `pipewiresrc`), scaling/re-timing to the car's
@@ -518,6 +520,7 @@ async fn drive_h264_pipeline(
     pipeline: &gst::Pipeline,
     encoder: &gst::Element,
     video_tx: mpsc::Sender<EncodedFrame>,
+    keyframe_rx: mpsc::Receiver<()>,
 ) -> Result<()> {
     let mk = |name: &str, label: &str| {
         gst::ElementFactory::make(name)
@@ -532,6 +535,32 @@ async fn drive_h264_pipeline(
 
     let h264parse = mk("h264parse", "h264parse")?;
     h264parse.set_property("config-interval", -1i32);
+    // Forced keyframes, asked for by the car (a `ForceKeyFrame` command, or catplay refusing
+    // delta frames) over on the AirPlay side. An *upstream* force-key-unit event delivered to
+    // the encoder's src pad is the portable way to ask for an IDR: every H264 encoder we use
+    // handles it, so this needs no per-backend special-casing. `all_headers` re-sends SPS/PPS
+    // with the IDR, which is what lets a car that has lost sync latch back on.
+    let _keyframe_pump = {
+        let encoder = encoder.clone();
+        let mut keyframe_rx = keyframe_rx;
+        AbortOnDropHandle::new(tokio::spawn(async move {
+            while keyframe_rx.recv().await.is_some() {
+                let Some(pad) = encoder.static_pad("src") else {
+                    tracing::warn!("Encoder has no src pad; cannot force a keyframe");
+                    continue;
+                };
+                let event = gst_video::UpstreamForceKeyUnitEvent::builder()
+                    .all_headers(true)
+                    .build();
+                if !pad.send_event(event) {
+                    tracing::warn!("Encoder refused the force-keyframe event");
+                } else {
+                    tracing::debug!("Forced a keyframe");
+                }
+            }
+        }))
+    };
+
     // Leaky queue between the encoder and the appsink: if the consumer (`video_tx` -> the car)
     // stalls or is still setting up, drop the *oldest* encoded frames instead of letting them pile
     // up - otherwise a backlog forms (e.g. while the AirPlay connection negotiates) and never

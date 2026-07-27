@@ -26,6 +26,60 @@ Complete a wireless CarPlay bridge (carjack) that impersonates iPhone + accessor
 - **iPhone pklg capture re-analyzed**: Found 62 iAP2 `FF 5A` packets and 4 `FF 55` switch commands. Extracted full protocol exchange: SYN→StartIdentification→IdentificationInformation→Auth→WiFiConfig→WirelessCarPlayUpdate. **Zero EA session messages** found — EA establishment likely happens over WiFi as part of AirPlay handshake, not Bluetooth.
 
 ### Active
+- **iAP2 link-layer + video flow-control review (2026-07-27). Nine gaps found against what the
+  SYN actually negotiates and what the car asks for over AirPlay; all nine addressed. Builds and
+  tests pass; none of it is retested against the bike yet.**
+  - The car's SYN decodes as `version=1, max_outstanding=1, max_length=4096, retx_timeout=1000ms,
+    cumack_timeout=500ms, max_retx=15, max_cumack=0, session{id=2, Control, v2}`. Every field
+    except the session table was parsed and thrown away: `Syn::perform_inner` echoed the SYN back
+    verbatim (so we *agreed* to all of it) and returned only a `SessionTable`.
+  - **What was wrong, and what changed:**
+    1. **Window violated.** We sent `aa05`/`4e09`/`4300` inside 0.3 ms against a window of one
+       (`cfmoto_11.pcapng` frames 851-853). Now `LinkState` tracks in-flight packets and
+       `send_packet` *queues* past the window. It deliberately does **not** block: the session
+       dispatches replies from inside its own receive loop, so waiting for an ack there would
+       stop the loop reading the very ack it waits for - a guaranteed deadlock at window 1.
+    2. **`ForceKeyFrame` discarded.** `handle_car_commands` matched only `ChangeModes` and
+       `HidSendReport`; everything else got `respond_ok()` and no action. Now forwarded to the
+       encoder.
+    3. **`NeedsKeyframe` only logged**, so we kept pushing deltas catplay was throwing away until
+       the next natural IDR (up to 1s at `key-int-max=30`). Now requests a keyframe and holds off
+       until it arrives.
+    4. **No backpressure.** `push_frame` *blocks* when the car's queue is full, which converts a
+       backlog into latency. Now drops the frame and forces a keyframe (every later delta
+       references the dropped one), counted in the streaming heartbeat.
+    5. **No retransmission** (`retx_timeout`/`max_retx` unused). Now retransmits from `maintain`,
+       and `RetransmitsExhausted` ends the session instead of retransmitting into the void.
+    6. **No cumulative-ack timer** - acks only piggybacked or rode the hardcoded 1s keepalive,
+       i.e. up to double the 500ms we agreed to. Now timer-driven. **Note `max_cumack = 0` means
+       "no limit", not "ack every packet"**: reading it the other way would have put a bare ack
+       before every reply and changed the handshake's shape on the wire for no benefit.
+    7. **Naive ack tracking** - `self.ack.store(packet.header.seq)` unconditionally, no
+       next-expected sequence, no duplicate detection. Now `accept_rx` dedupes (a duplicate is
+       re-acked, not dispatched twice - it would have replayed the message).
+    8. **`RST` ignored and `Reset` dead code** (unconstructable, no public ctor). Incoming `rst`
+       now surfaces as `Iap2Error::LinkReset`; `ops/reset.rs` is replaced by `Iap2::send_reset`,
+       sent on teardown so the accessory can re-SYN instead of waiting out its own timeout.
+       `EAK` is now consumed too; `sleep` is logged.
+    9. **`max_length` unenforced.** Now checked before build; oversize is an error rather than an
+       accessory buffer overrun.
+  - **The subtle one worth not regressing:** acks retire in-flight packets by a *window-bounded*
+    comparison, not "is this seq at or before the ack". Sequence numbers wrap in a `u8`, and an
+    accessory that has not heard from us yet sends `ack = 0` - which under a naive half-space
+    test "covers" our initial `0x9D` and retires a packet that was never acknowledged.
+    `an_unrelated_ack_retires_nothing` pins this.
+  - Keyframes reach the encoder as an **upstream force-key-unit event on the encoder's src pad**,
+    which every backend handles - so no per-`HW_BACKENDS`-row special-casing. Requests are
+    deduplicated while one is outstanding, or a sustained stall would pin the encoder to an
+    all-IDR stream and worsen the congestion it is reacting to.
+  - Tests: iap2-proto is up to 31 (link params from the real SYN bytes, window fill/drain, the
+    wrapping-ack case, dedup, EAK, retransmit timing and exhaustion against a paused clock, plus
+    duplex-backed integration tests for queueing, oversize rejection, reset and duplicates).
+  - **Regression risk to watch on the bike:** the handshake is now lock-step where it used to
+    burst, and a reply that previously went out immediately may now be queued behind an ack. If
+    the car behaves worse than `cfmoto_11`, `max_outstanding` enforcement is the first thing to
+    disable (`LinkParams::max_outstanding`).
+
 - **`cfmoto_11.pcapng` (2026-07-26 22:43, BT + WiFi in one capture): the whole iAP2 handshake now
   runs clean in ~1s and the car hands over credentials — but the AirPlay connect dies instantly,
   in a race with IPv6 duplicate-address detection. Fixed; not yet retested against the bike.**

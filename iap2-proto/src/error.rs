@@ -20,6 +20,18 @@ pub enum Iap2Error {
     ControlSessionError(&'static str),
     #[error("Channel closed")]
     ChannelClosed,
+    /// The accessory set the link-reset bit. The link is gone; the session has to be rebuilt
+    /// from a fresh SYN rather than carried on with.
+    #[error("Accessory reset the link")]
+    LinkReset,
+    /// A packet went unacknowledged through all `max_retx` retransmissions - the accessory has
+    /// stopped listening, so there is nothing left to do but tear the session down.
+    #[error("Packet seq {seq:#04x} unacknowledged after {retx} retransmissions")]
+    RetransmitsExhausted { seq: u8, retx: u8 },
+    /// Bigger than the `max_length` the accessory advertised in its SYN. Sending it anyway
+    /// would overrun the accessory's receive buffer and cost us the link.
+    #[error("Packet of {len} bytes exceeds the negotiated maximum of {max}")]
+    PacketTooLarge { len: usize, max: u16 },
     #[error("Connection closed")]
     ConnectionClosed,
     #[error("Timeout: {0}")]

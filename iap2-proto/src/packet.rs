@@ -27,19 +27,27 @@ pub struct Packet {
 }
 
 impl Packet {
-    /// Build a packet, sizing the header's `length` to what will actually go on the wire.
+    /// How many bytes a packet carrying `payload_len` bytes of payload occupies on the wire.
     ///
-    /// `length` counts the *whole* packet: the 8-byte header, its checksum, the payload, and
-    /// - only when there is a payload - the payload checksum. The empty case is the one worth
-    /// spelling out: an empty packet is 9 bytes, not 10, because there is no payload checksum
-    /// to carry. That is not a cosmetic off-by-one. The accessory trusts `length` to know how
-    /// many bytes this packet occupies, so a keepalive claiming 10 while writing 9 makes it
-    /// take the first byte of the *next* packet as the missing one and lose framing for the
-    /// rest of the session - it then stops acknowledging anything, retransmits its last
-    /// message until it gives up, and drops the link (`cfmoto_8.pcapng`, t=30.068 onwards).
+    /// This counts the *whole* packet: the 8-byte header, its checksum, the payload, and - only
+    /// when there is a payload - the payload checksum. The empty case is the one worth spelling
+    /// out: an empty packet is 9 bytes, not 10, because there is no payload checksum to carry.
+    /// That is not a cosmetic off-by-one. The accessory trusts `length` to know how many bytes
+    /// this packet occupies, so a keepalive claiming 10 while writing 9 makes it take the first
+    /// byte of the *next* packet as the missing one and lose framing for the rest of the session
+    /// - it then stops acknowledging anything, retransmits its last message until it gives up,
+    /// and drops the link (`cfmoto_8.pcapng`, t=30.068 onwards).
+    ///
+    /// Exposed separately from `new` so the negotiated `max_length` can be checked against a
+    /// payload before a packet is built for it.
+    pub fn wire_len(payload_len: usize) -> usize {
+        HEADER_SIZE + 1 + payload_len + usize::from(payload_len > 0)
+    }
+
+    /// Build a packet, sizing the header's `length` per [`Packet::wire_len`].
     pub fn new(control: ControlByte, seq: u8, ack: u8, session_id: u8, payload: Vec<u8>) -> Self {
         let payload_checksum = (!payload.is_empty()).then(|| payload.calculate_checksum());
-        let length = HEADER_SIZE + 1 + payload.len() + usize::from(payload_checksum.is_some());
+        let length = Self::wire_len(payload.len());
         let header = Header {
             length: length as u16,
             control,
@@ -155,8 +163,8 @@ mod tests {
         assert_eq!(
             packet.to_bytes().unwrap(),
             vec![
-                0xff, 0x5a, 0x00, 0x10, 0x40, 0xa3, 0xe6, 0x02, 0xcc, 0x40, 0x40, 0x00, 0x06,
-                0xaa, 0x05, 0xcb
+                0xff, 0x5a, 0x00, 0x10, 0x40, 0xa3, 0xe6, 0x02, 0xcc, 0x40, 0x40, 0x00, 0x06, 0xaa,
+                0x05, 0xcb
             ]
         );
     }

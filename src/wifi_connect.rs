@@ -1,10 +1,11 @@
-use backon::{ConstantBuilder, Retryable};
+use backon::{ConstantBuilder, Retryable, RetryableWithContext};
 use enclose::enclose;
 use eyre::{ErrReport, Result, eyre};
 use futures::TryStreamExt;
 use ipnet::IpNet;
 use nmrs::NetworkManager;
 use nmrs::builders::{WifiBand, WifiConnectionBuilder};
+use rtnetlink::Handle;
 use rtnetlink::packet_route::address::{
     AddressAttribute, AddressFlags, AddressHeaderFlags, AddressMessage,
 };
@@ -159,41 +160,44 @@ pub(crate) async fn wait_for_link_local(iface: &str) -> Result<Ipv6Addr> {
     // progress while it is polled - and closes the socket when dropped on return.
     let _connection = AbortOnDropHandle::new(tokio::spawn(connection));
 
-    let addr = enclose!(
-        (handle) || {
-            // Each attempt dumps the interface's addresses afresh; `Handle` is a cheap
-            // clone over the one netlink socket, and the future has to own the one it uses.
-            let handle = handle.clone();
-            async move {
-                let mut addrs = std::pin::pin!(
-                    handle
-                        .address()
-                        .get()
-                        .set_link_index_filter(index)
-                        .execute()
-                );
-                while let Some(msg) = addrs.try_next().await? {
-                    let Some(addr) = link_local_of(&msg) else {
-                        continue;
-                    };
-                    if dad_finished(&msg) {
-                        return Ok::<_, ErrReport>(addr);
-                    }
-                    tracing::debug!("{iface}: link-local {addr} is still tentative");
-                }
-                Err(eyre!("no link-local address on {iface} has finished DAD"))
-            }
-        }
-    )
+    // The handle is threaded through the retry as context rather than cloned per attempt: each
+    // attempt takes it and hands it back, so there is one handle over the one netlink socket.
+    let (_handle, addr) = (async |handle: Handle| {
+        let res = settled_link_local(&handle, index, iface).await;
+        (handle, res)
+    })
     .retry(
         ConstantBuilder::new()
             .with_delay(DAD_POLL_DELAY)
             .with_max_times(DAD_POLL_ATTEMPTS),
     )
-    .await?;
+    .context(handle)
+    .await;
+    let addr = addr?;
 
     tracing::info!("{iface} link-local {addr} is usable as a source address");
     Ok(addr)
+}
+
+/// One pass over the interface's addresses, looking for a link-local that has settled.
+async fn settled_link_local(handle: &Handle, index: u32, iface: &str) -> Result<Ipv6Addr> {
+    let mut addrs = std::pin::pin!(
+        handle
+            .address()
+            .get()
+            .set_link_index_filter(index)
+            .execute()
+    );
+    while let Some(msg) = addrs.try_next().await? {
+        let Some(addr) = link_local_of(&msg) else {
+            continue;
+        };
+        if dad_finished(&msg) {
+            return Ok(addr);
+        }
+        tracing::debug!("{iface}: link-local {addr} is still tentative");
+    }
+    Err(eyre!("no link-local address on {iface} has finished DAD"))
 }
 
 /// The address this `RTM_NEWADDR` is about, if it is an IPv6 link-local one.

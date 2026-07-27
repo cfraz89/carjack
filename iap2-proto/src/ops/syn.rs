@@ -4,7 +4,8 @@ use backon::{ConstantBuilder, Retryable};
 
 use crate::{
     error::Iap2Error,
-    iap2::{Iap2, Stream, LINK_SESSION_ID},
+    iap2::{Iap2, LINK_SESSION_ID, Stream},
+    link::LinkParams,
     packet::ControlByte,
     stream::{SessionTable, SessionType, SynPayload},
 };
@@ -28,6 +29,10 @@ impl<S: Stream> Syn<'_, S> {
     }
 
     async fn perform_inner(&self) -> Result<SessionTable, Iap2Error> {
+        // A previous attempt may have left a packet in flight or an ack owed; starting a fresh
+        // handshake on top of that stale state would keep the send window occupied forever.
+        self.0.link.lock().await.reset();
+
         tracing::debug!("Waiting for SYN from accessory");
 
         let packet = tokio::time::timeout(Duration::from_secs(5), self.0.receive_packet())
@@ -44,6 +49,14 @@ impl<S: Stream> Syn<'_, S> {
         let accessory_sessions = SynPayload::from_bytes(&packet.payload)
             .map_err(|_| Iap2Error::Other(String::from("Bad SYN payload")))?;
         tracing::debug!(?accessory_sessions, "Received SYN from accessory");
+
+        // Echoing the accessory's proposal back is how we accept it wholesale - so from here on
+        // its numbers are binding on us, and the link layer has to actually honour them. They
+        // used to be parsed and discarded: we agreed to a one-packet window and then sent three
+        // at a time (`cfmoto_11.pcapng`, frames 851-853).
+        let params = LinkParams::from(&accessory_sessions);
+        tracing::debug!(?params, "Negotiated link parameters");
+        self.0.link.lock().await.params = params;
 
         let our_syn = accessory_sessions.clone();
 

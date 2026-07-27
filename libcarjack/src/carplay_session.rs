@@ -1,7 +1,7 @@
 use deku::prelude::*;
 use iap2_proto::{
     error::Iap2Error,
-    iap2::{Iap2, Stream, LINK_SESSION_ID},
+    iap2::{Iap2, Stream},
     ops::{
         control::{
             ControlMessage, ControlMessageId, ControlMessageSet, GetParam, Parameter, ParameterId,
@@ -12,8 +12,7 @@ use iap2_proto::{
     stream::SessionType,
 };
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tap::prelude::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(DekuRead, Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,36 +141,43 @@ impl<S: Stream> CarplaySession<S> {
     }
 
     pub async fn run(&mut self) -> Result<(), Iap2Error> {
-        self.do_identification().await?;
+        let result = self.run_inner().await;
+        // Say goodbye properly. Without this the accessory sits waiting out its own retransmit
+        // timeout before it will re-SYN, which shows up as a slow reconnect. Skipped when the
+        // accessory is the one that reset - echoing it back would be noise.
+        if matches!(&result, Err(e) if !matches!(e, Iap2Error::LinkReset)) {
+            let _ = self.iap2.send_reset().await;
+        }
+        result
+    }
 
-        // The accessory's SYN handshake negotiates a cumulative-ack timeout (typically
-        // ~1s x 6 = ~6s); if we go that long without sending anything, it considers the
-        // link dead and resets the Bluetooth connection - which otherwise happens right
-        // in the middle of the (silent, on this channel) AirPlay/screen-sharing phase.
-        let mut keepalive = tokio::time::interval(Duration::from_secs(1));
+    async fn run_inner(&mut self) -> Result<(), Iap2Error> {
+        self.do_identification().await?;
 
         loop {
             tokio::select! {
-                    packet = self.iap2.receive_packet() => {
-                        let packet = packet?;
-                        if !packet.header.control.ack || packet.payload.is_empty() {
-                            continue;
-                        }
-                        if let Err(e) = self.dispatch_packet(packet).await {
-                            tracing::warn!("Dispatch error: {e}");
-                        }
+                packet = self.iap2.receive_packet() => {
+                    let packet = packet?;
+                    // `receive_packet` has already absorbed the link-layer traffic - bare
+                    // acknowledgements, duplicates, extended acks - and turned a reset into an
+                    // error, so anything arriving here is session data.
+                    if packet.header.control.syn {
+                        // The accessory wants to renegotiate the link. That cannot be done
+                        // underneath a running session, so fold it back to a full restart.
+                        tracing::warn!("Accessory re-sent SYN mid-session; restarting");
+                        return Err(Iap2Error::LinkReset);
                     }
-                    _ = keepalive.tick() => {
-                        // Only once the identification/auth/wifi-config handshake has
-                        // settled (ready_tx already fired) - interleaving an out-of-band
-                        // packet during that sequence confuses some accessories.
-                        if self.ready_tx.is_none() {
-            self.iap2
-                .send_packet(ControlByte::with_ack(), LINK_SESSION_ID, Vec::new())
-                .await.tap_err(|e| tracing::warn!("Keep-alive send error: {e}"))?
-                        }
+                    if let Err(e) = self.dispatch_packet(packet).await {
+                        tracing::warn!("Dispatch error: {e}");
                     }
                 }
+                // Retransmits, the cumulative-ack timer and the idle keepalive, all paced by
+                // what the SYN negotiated. Only the *wait* goes in the `select!` - the work
+                // itself transmits, and must not be cancelled half-done.
+                _ = self.iap2.wait_for_link_work() => {
+                    self.iap2.maintain().await?;
+                }
+            }
         }
     }
 
@@ -361,6 +367,10 @@ impl<S: Stream> CarplaySession<S> {
                 tracing::info!("Started EA session");
                 self.phase = SessionPhase::EaReady;
                 if let Some(tx) = self.ready_tx.take() {
+                    // The identification/auth/wifi-config exchange is finished, so the link is
+                    // about to go quiet for the whole AirPlay phase - start the keepalives that
+                    // were held back to avoid interleaving packets into that exchange.
+                    self.iap2.set_keepalive_enabled(true).await;
                     let _ = tx.send(());
                 }
             }
@@ -466,6 +476,10 @@ impl<S: Stream> CarplaySession<S> {
                     self.phase = SessionPhase::EaReady;
                 }
                 if let Some(tx) = self.ready_tx.take() {
+                    // The identification/auth/wifi-config exchange is finished, so the link is
+                    // about to go quiet for the whole AirPlay phase - start the keepalives that
+                    // were held back to avoid interleaving packets into that exchange.
+                    self.iap2.set_keepalive_enabled(true).await;
                     let _ = tx.send(());
                 }
             }

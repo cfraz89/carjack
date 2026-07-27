@@ -88,6 +88,33 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   `ProfileUnavailable` / already-connected errors) after several rapid reconnect
   cycles during iteration. A power cycle clears it - don't spend time debugging
   carjack if you see this pattern, just reboot the head unit.
+- **The link layer honours what the SYN negotiates** (`iap2-proto/src/link.rs`). The accessory's
+  SYN parameters used to be parsed and discarded; `LinkParams` now carries them and `LinkState`
+  enforces them. The CFMOTO unit sends `max_outstanding=1, max_length=4096, retx_timeout=1000ms,
+  cumack_timeout=500ms, max_retx=15, max_cumack=0`. Consequences worth knowing:
+  - **The send window is one packet.** `send_packet` *queues* rather than blocking when the
+    window is full - the session dispatches replies from inside its own receive loop, so waiting
+    for an ack there would deadlock the link outright. `maintain` releases queued packets as
+    acks arrive.
+  - **`max_cumack = 0` means "no limit", not "ack everything"**, so a received packet is not
+    acknowledged immediately; the `cumack_timeout` timer gives our reply a chance to piggyback
+    the ack instead, which is what keeps the handshake at one packet per exchange.
+  - Acks retire in-flight packets by a window-bounded comparison, *not* a plain wrapping
+    "is this seq <= ack". An accessory that has not heard from us sends `ack = 0`, which under a
+    naive half-space test "covers" our initial seq `0x9D` and retires a packet it never received.
+  - `receive_packet` absorbs the link layer: bare acks, duplicates (re-acked, not dispatched
+    twice), EAK, and `rst` -> `Iap2Error::LinkReset`. The session loop only ever sees session
+    data. The keepalive/retransmit/ack timers are driven by `wait_for_link_work()` (pure, safe to
+    cancel in a `select!`) followed by `maintain()` (transmits - must **not** be inside one).
+- **Keyframes are requested by the car and must actually reach the encoder.** The car sends
+  `ForceKeyFrame` over the AirPlay event channel when it loses sync, and catplay refuses delta
+  frames (`ScreenTransmitError::NeedsKeyframe`) until the stream opens on one. Both used to be
+  acknowledged and ignored, leaving a frozen/torn picture until the next natural IDR up to a
+  second later. `run_video_stream` now forwards both (plus its own backpressure drops) down a
+  `keyframe_tx` channel, and `encode.rs` turns each request into an **upstream force-key-unit
+  event on the encoder's src pad** - portable across every backend, no per-row special-casing.
+  Requests are deduplicated while one is outstanding, or a sustained stall would pin the encoder
+  to an all-IDR stream and make the congestion worse.
 - The detailed, currently-evolving debugging state (what's been tried, ruled
   out, current hypothesis for any open issue) lives in `summary.md`, not here -
   check that for where things stand, and update it rather than duplicating its

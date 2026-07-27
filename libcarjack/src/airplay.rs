@@ -73,6 +73,7 @@ pub async fn run_video_stream(
     conn: AirPlayConnection,
     mut video_rx: mpsc::Receiver<EncodedFrame>,
     touch_tx: mpsc::Sender<TouchEvent>,
+    keyframe_tx: mpsc::Sender<()>,
 ) -> Result<()> {
     let AirPlayConnection {
         tx,
@@ -106,6 +107,7 @@ pub async fn run_video_stream(
         tx.clone(),
         modes,
         touch_tx,
+        keyframe_tx.clone(),
     )));
 
     let latency = Duration::from_millis(100);
@@ -126,6 +128,10 @@ pub async fn run_video_stream(
     }
 
     let mut sent_keyframe = false;
+    // Set while a keyframe request is outstanding, so a sustained stall asks once rather than
+    // once per frame (which would hold the encoder at an all-IDR stream and make things worse).
+    let mut requested_keyframe = false;
+    let mut dropped_full: u64 = 0;
     let mut frames_sent: u64 = 0;
     let mut last_heartbeat = std::time::Instant::now();
     let mut frames_at_last_heartbeat: u64 = 0;
@@ -148,6 +154,25 @@ pub async fn run_video_stream(
 
         // After draining we may land mid-GOP; the stream has to open on a keyframe.
         if !sent_keyframe && !is_keyframe {
+            continue;
+        }
+
+        // The car has stopped keeping up (a WiFi stall, a busy head unit). `push_frame` would
+        // wait for a slot, which just converts the backlog into latency, so drop this frame
+        // instead - and because every later delta frame references the one we dropped, ask the
+        // encoder for a fresh keyframe so the picture recovers now rather than at the next
+        // natural IDR up to a second away.
+        if screen_guard.is_full() {
+            dropped_full += 1;
+            if !requested_keyframe {
+                tracing::warn!(
+                    queued = screen_guard.queue_len(),
+                    "Car's screen queue is full; dropping frame and forcing a keyframe"
+                );
+                let _ = keyframe_tx.try_send(());
+                requested_keyframe = true;
+            }
+            sent_keyframe = false;
             continue;
         }
 
@@ -188,10 +213,24 @@ pub async fn run_video_stream(
             if matches!(err, ScreenTransmitError::Closed) {
                 return Err(eyre!("Screen socket closed by accessory"));
             }
+            if matches!(err, ScreenTransmitError::NeedsKeyframe) {
+                // catplay refuses delta frames until the stream has opened on a keyframe (it
+                // re-arms this whenever the screen socket reconnects). Pushing deltas at it
+                // regardless just discards them until the encoder's next natural IDR, so ask
+                // for one now and hold off until it arrives.
+                if !requested_keyframe {
+                    tracing::warn!("Screen stream needs a keyframe; requesting one");
+                    let _ = keyframe_tx.try_send(());
+                    requested_keyframe = true;
+                }
+                sent_keyframe = false;
+                continue;
+            }
             tracing::warn!("push_frame error: {err}");
         } else {
             frames_sent += 1;
             sent_keyframe = true;
+            requested_keyframe = false;
         }
 
         let elapsed = last_heartbeat.elapsed();
@@ -199,7 +238,7 @@ pub async fn run_video_stream(
             let sent = frames_sent - frames_at_last_heartbeat;
             let rate = sent as f64 / elapsed.as_secs_f64();
             tracing::info!(
-                "Streaming heartbeat: {rate:.1} fps ({sent} frames / {:.1}s), last frame {data_len} bytes, target {fps} fps",
+                "Streaming heartbeat: {rate:.1} fps ({sent} frames / {:.1}s), last frame {data_len} bytes, target {fps} fps, {dropped_full} dropped to backpressure",
                 elapsed.as_secs_f64()
             );
             last_heartbeat = std::time::Instant::now();
@@ -220,6 +259,7 @@ async fn handle_car_commands(
     tx: AirPlayTransmitterProxyRef,
     mut modes: ResourceController,
     touch_tx: mpsc::Sender<TouchEvent>,
+    keyframe_tx: mpsc::Sender<()>,
 ) {
     let mut touching = false;
     while let Some(mut cmd) = tx.pop_command().await {
@@ -230,6 +270,15 @@ async fn handle_car_commands(
                 if cmd.respond_plist(HttpStatus::Ok, resp).is_err() {
                     cmd.respond_err();
                 }
+            }
+            Command::ForceKeyFrame(_) => {
+                // The car asks for this when it has lost sync - it has just joined the stream,
+                // or dropped enough packets that its decoder can no longer follow the deltas.
+                // Answering OK and doing nothing (which is what we used to do) leaves it
+                // showing a frozen or torn picture until the encoder's next natural IDR.
+                tracing::debug!("Car requested a keyframe");
+                let _ = keyframe_tx.try_send(());
+                cmd.respond_ok();
             }
             Command::HidSendReport(r) => {
                 if let Some(event) = parse_touch_report(r.hid_report.as_ref(), &mut touching) {

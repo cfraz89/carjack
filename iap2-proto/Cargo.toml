@@ -18,3 +18,8 @@ thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1.44"
+
+[dev-dependencies]
+# `tokio::time::pause`/`advance` - the link-layer retransmit and cumulative-ack timers are
+# tested against a paused clock rather than by sleeping through real timeouts.
+tokio = { version = "1.52.3", features = ["full", "test-util"] }

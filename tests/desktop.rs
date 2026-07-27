@@ -73,6 +73,8 @@ async fn desktop_pipewire_encodes() -> Result<()> {
     // Encode the desktop stream, scaled to a car-like 1080x600, and count access units.
     let (video_tx, mut video_rx) = mpsc::channel::<EncodedFrame>(64);
     let (dsize_tx, _dsize_rx) = tokio::sync::watch::channel::<Option<(u32, u32)>>(None);
+    // No car here to ask for keyframes; the encoder's request pump just sees a closed channel.
+    let (_keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
     let _encoder = AbortOnDropHandle::new(tokio::spawn(async move {
         if let Err(e) =
             encode_pipewire_to_channel(
@@ -83,6 +85,7 @@ async fn desktop_pipewire_encodes() -> Result<()> {
                 Bitrate::default(),
                 video_tx,
                 dsize_tx,
+                keyframe_rx,
             )
             .await
         {
