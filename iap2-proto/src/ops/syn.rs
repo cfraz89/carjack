@@ -89,7 +89,7 @@ impl<S: Stream> Syn<'_, S> {
         // inject entries of our own here: SessionTable::add replaces by id, so a
         // hardcoded {id:2, ExternalAccessory} silently overwrote the CFMOTO head unit's
         // real {id:2, Control} and left us sending identification on a session that did
-        // not exist (see summary.md, cfmoto_5.pcapng).
+        // not exist (see docs/investigation-log.md, cfmoto_5.pcapng).
         let mut table = SessionTable::new();
         for s in accessory_sessions.sessions {
             table.add(s);

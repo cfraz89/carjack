@@ -70,6 +70,16 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   (`Role::Client`, `auto_connect=false`) and `IAP_DEVICE_UUID` (`Role::Server`,
   channel=1). `connect_profile(&IAP_ACCESSORY_UUID)` is what actually triggers
   the connection.
+- `src/bin/carjack-hci-helper.rs` is a **privileged sidecar**: it sets the CarPlay EIR
+  UUID (`ADD_UUID`) and an iPhone-like Class of Device (`SET_DEV_CLASS`,
+  `CARPLAY_DEV_CLASS`) over a raw HCI mgmt socket. It takes no arguments and
+  resolves the adapter itself via bluer's default adapter. **`cap_net_admin`
+  lives on this binary, never on the main `carjack` one** - a
+  capability-carrying process is /proc-locked to root under
+  `fs.suid_dumpable=2`, which makes xdg-desktop-portal fail to introspect it
+  ("Unable to open /proc/<pid>/root") and breaks desktop mode entirely.
+  `just build`'s `_setcap` recipe applies it, skipping the `run0` prompt when
+  `getcap` already shows the capability.
 - iAP2 magic bytes are `0xFF 0x5A`; the iAP1 switch-to-iAP2 command starts with
   `FF 55 02 00 EE 10`.
 - AirPlay/CarPlay video runs over TCP port 7000 on the car.
@@ -115,10 +125,13 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   event on the encoder's src pad** - portable across every backend, no per-row special-casing.
   Requests are deduplicated while one is outstanding, or a sustained stall would pin the encoder
   to an all-IDR stream and make the congestion worse.
-- The detailed, currently-evolving debugging state (what's been tried, ruled
-  out, current hypothesis for any open issue) lives in `summary.md`, not here -
-  check that for where things stand, and update it rather than duplicating its
-  content into this file.
+- The currently-evolving debugging state lives in **`docs/`**, not here. Start at
+  `docs/status.md` (where things stand, what is untested, what to do next);
+  `docs/investigation-log.md` is the dated record of what each capture showed,
+  `docs/captures.md` inventories the captures themselves, and `docs/tooling.md`
+  covers the build/run harness. Update those rather than duplicating their
+  content into this file - and promote anything that turns out to be a durable
+  rule about the code back *into* this file.
 
 ## Video source (`source` config): own app vs desktop portal
 
