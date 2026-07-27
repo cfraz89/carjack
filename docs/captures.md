@@ -30,7 +30,23 @@ Two head units appear throughout:
 
 | Capture | Date | What it shows |
 | --- | --- | --- |
+| `bench_2.pcapng` | 2026-07-27 | The AUTO BOX regressed again, this time from the link-layer rewrite. The SYN handshake never completes: our SYN+ACK claims `ack = 0` instead of the unit's SYN sequence `0xa8`, and the third leg (a bare ack) was being swallowed before the handshake could see it. The unit retransmits its SYN, then falls back to sending `FF 55` every ~1s. |
 | `bench_1.pcapng` | 2026-07-26 | The AUTO BOX regressed; the cause was the bike-targeted fix. Why both dialects have to keep working. |
+
+### The two units negotiate very different link parameters
+
+From their SYNs. Worth keeping in view - anything that assumes one unit's numbers will break on
+the other, which is what `bench_2.pcapng` is a record of.
+
+| | CFMOTO (bike) | AUTO BOX (bench) |
+| --- | --- | --- |
+| `max_outstanding` | **1** | **127** |
+| `max_length` | 4096 | 65535 |
+| `retx_timeout` | 1000 ms | 2000 ms |
+| `cumack_timeout` | 500 ms | 1000 ms |
+| `max_retx` | 15 | 30 |
+| `max_cumack` | **0** (no limit) | **6** |
+| control session id | **2** | **1** |
 
 ## Reference recordings - a real iPhone doing working CarPlay
 

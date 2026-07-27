@@ -35,7 +35,9 @@ impl<S: Stream> Syn<'_, S> {
 
         tracing::debug!("Waiting for SYN from accessory");
 
-        let packet = tokio::time::timeout(Duration::from_secs(5), self.0.receive_packet())
+        // `receive_raw`, not `receive_packet`: the session-level filter swallows bare
+        // acknowledgements, and the third leg of this handshake *is* one.
+        let (packet, _) = tokio::time::timeout(Duration::from_secs(5), self.0.receive_raw())
             .await
             .map_err(|_| Iap2Error::Timeout(String::from("Timeout waiting for SYN")))??;
 
@@ -70,7 +72,7 @@ impl<S: Stream> Syn<'_, S> {
             .await?;
         tracing::debug!("Sent SYN+ACK, waiting for ACK");
 
-        let ack_packet = tokio::time::timeout(Duration::from_secs(5), self.0.receive_packet())
+        let (ack_packet, _) = tokio::time::timeout(Duration::from_secs(5), self.0.receive_raw())
             .await
             .map_err(|_| {
                 Iap2Error::Timeout(String::from("Timeout waiting for ACK after SYN+ACK"))

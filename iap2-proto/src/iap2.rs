@@ -333,48 +333,74 @@ impl<S: Stream> Iap2<S> {
         self.link.lock().await.keepalive_enabled = enabled;
     }
 
+    /// Read the next packet off the wire and apply link-layer bookkeeping, returning **every**
+    /// packet - bare acknowledgements and SYNs included.
+    ///
+    /// The SYN handshake needs those: its third leg *is* a bare acknowledgement, and the SYN it
+    /// answers carries the sequence number our SYN+ACK has to acknowledge. The session doesn't,
+    /// and uses [`Iap2::receive_packet`] instead.
+    ///
+    /// Returns the packet and whether it was new (`false` = a retransmission of a sequence
+    /// number we have already taken).
+    pub(crate) async fn receive_raw(&self) -> Result<(Packet, bool), Iap2Error> {
+        let packet = {
+            let mut stream = self.stream.lock().await;
+            stream.next().await.ok_or(Iap2Error::NoPacket)??
+        };
+        let control = packet.header.control;
+
+        if control.rst {
+            tracing::warn!("Accessory reset the link");
+            return Err(Iap2Error::LinkReset);
+        }
+        if control.sleep {
+            // Nothing to do beyond noting it: we have no power state to enter, and the
+            // accessory carries on talking regardless.
+            tracing::info!("Accessory signalled device sleep");
+        }
+
+        // Every packet carries a cumulative acknowledgement, data or not.
+        if control.ack {
+            let retired = self.link.lock().await.retire_acked(packet.header.ack);
+            if retired > 0 {
+                tracing::trace!(retired, "Acknowledged in-flight packets");
+            }
+        }
+        // An extended ack additionally lists sequence numbers received out of order, which
+        // the cumulative field cannot describe.
+        if control.eak && !packet.payload.is_empty() {
+            let retired = self.link.lock().await.retire_eak(&packet.payload);
+            tracing::debug!(retired, "Extended ack retired out-of-order packets");
+        }
+        // An acknowledgement may have opened the window for something we had queued.
+        self.drain_tx_queue().await?;
+
+        // Anything carrying a payload advances the receive sequence, and that **includes the
+        // SYN** - it is a numbered packet like any other, and its number is what our SYN+ACK
+        // has to acknowledge. Skipping it left the SYN+ACK claiming `ack = 0`, so the accessory
+        // never saw its SYN acknowledged and retransmitted it until it gave up
+        // (`bench_2.pcapng`: our `ff5a 0017 c0 9d 00 00` against its SYN at seq `0xa8`).
+        let is_new = if packet.payload.is_empty() || (control.eak && !control.syn) {
+            true
+        } else {
+            self.link.lock().await.accept_rx(packet.header.seq)
+        };
+
+        Ok((packet, is_new))
+    }
+
     /// Receive the next packet the session should act on.
     ///
-    /// Link-layer housekeeping happens here rather than in the caller: the accessory's
-    /// acknowledgement retires our in-flight packets (freeing the send window), a repeat of a
-    /// sequence number we have already taken is re-acknowledged but not returned twice, and a
-    /// link reset is surfaced as an error rather than being silently ignored.
+    /// Everything the link layer handles for itself is absorbed here: bare acknowledgements,
+    /// extended acks, and a repeat of a sequence number we have already taken (re-acknowledged
+    /// but not returned twice, or the session would act on the same message again).
     pub async fn receive_packet(&self) -> Result<Packet, Iap2Error> {
         loop {
-            let packet = {
-                let mut stream = self.stream.lock().await;
-                stream.next().await.ok_or(Iap2Error::NoPacket)??
-            };
+            let (packet, is_new) = self.receive_raw().await?;
             let control = packet.header.control;
 
-            if control.rst {
-                tracing::warn!("Accessory reset the link");
-                return Err(Iap2Error::LinkReset);
-            }
-            if control.sleep {
-                // Nothing to do beyond noting it: we have no power state to enter, and the
-                // accessory carries on talking regardless.
-                tracing::info!("Accessory signalled device sleep");
-            }
-
-            // Every packet carries a cumulative acknowledgement, data or not.
-            if control.ack {
-                let retired = self.link.lock().await.retire_acked(packet.header.ack);
-                if retired > 0 {
-                    tracing::trace!(retired, "Acknowledged in-flight packets");
-                }
-            }
-            // An extended ack additionally lists sequence numbers received out of order, which
-            // the cumulative field cannot describe.
-            if control.eak && !packet.payload.is_empty() {
-                let retired = self.link.lock().await.retire_eak(&packet.payload);
-                tracing::debug!(retired, "Extended ack retired out-of-order packets");
-            }
-            // An acknowledgement may have opened the window for something we had queued.
-            self.drain_tx_queue().await?;
-
-            // SYN packets are the handshake's business, not the session's - hand them straight
-            // back without touching the receive sequence.
+            // A SYN mid-session means the accessory wants to renegotiate; that is the caller's
+            // problem, not something the link layer can absorb.
             if control.syn {
                 return Ok(packet);
             }
@@ -384,7 +410,7 @@ impl<S: Stream> Iap2<S> {
                 continue;
             }
 
-            if !self.link.lock().await.accept_rx(packet.header.seq) {
+            if !is_new {
                 tracing::debug!(
                     seq = format_args!("{:#04x}", packet.header.seq),
                     "Duplicate packet; re-acknowledging without dispatching"
@@ -473,6 +499,77 @@ mod tests {
     async fn pump<S: Stream>(iap2: &Iap2<S>) {
         let _ =
             tokio::time::timeout(std::time::Duration::from_millis(50), iap2.receive_packet()).await;
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// The full SYN handshake, driven with the AUTO BOX bench unit's real bytes.
+    ///
+    /// Two regressions hid behind the absence of this test, both in `bench_2.pcapng`:
+    /// our SYN+ACK claimed `ack = 0` instead of the accessory's SYN sequence (so it never saw
+    /// its SYN acknowledged and retransmitted until it gave up), and the session-level receive
+    /// filter swallowed bare acknowledgements - which is exactly what the third leg of this
+    /// handshake is, so it could never complete.
+    #[tokio::test]
+    async fn syn_handshake_acknowledges_the_accessorys_sequence() {
+        use crate::ops::syn::Syn;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (ours, mut theirs) = tokio::io::duplex(1024);
+        let iap2 = Iap2::wrap(ours);
+
+        // bench_2.pcapng: SYN at seq 0xa8, control session id 1 (the CFMOTO numbers its 2).
+        theirs
+            .write_all(&hex("ff5a001780a8000068017fffff07d003e81e0601000299"))
+            .await
+            .unwrap();
+
+        let peer = tokio::spawn(async move {
+            let mut buf = [0u8; 128];
+            let n = theirs.read(&mut buf).await.unwrap();
+            let (_, reply) = Packet::from_bytes((&buf[..n], 0)).unwrap();
+            // The third leg: a bare acknowledgement of whatever the SYN+ACK was numbered.
+            let ack = Packet::new(
+                ControlByte::with_ack(),
+                0xa8,
+                reply.header.seq,
+                0,
+                Vec::new(),
+            );
+            theirs.write_all(&ack.to_bytes().unwrap()).await.unwrap();
+            reply
+        });
+
+        let table = Syn(&iap2)
+            .perform()
+            .await
+            .expect("the handshake should complete");
+        let reply = peer.await.unwrap();
+
+        assert!(
+            reply.header.control.syn && reply.header.control.ack,
+            "expected SYN+ACK"
+        );
+        assert_eq!(
+            reply.header.ack, 0xa8,
+            "SYN+ACK must acknowledge the accessory's SYN sequence number"
+        );
+
+        // The accessory's SYN is the sole authority on session numbering.
+        let control = table
+            .find_type(SessionType::Control)
+            .expect("SYN declared a control session");
+        assert_eq!(control.id, 1);
+
+        // And its parameters are now binding on us.
+        let params = iap2.link.lock().await.params;
+        assert_eq!(params.max_outstanding, 127);
+        assert_eq!(params.max_cumack, 6);
     }
 
     /// The CFMOTO head unit negotiates a one-packet window. Anything beyond it has to wait for

@@ -12,6 +12,42 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
 
 ## 2026-07
 
+- **`bench_2.pcapng` (2026-07-27): the AUTO BOX stopped working, and it is a regression from the
+  link-layer rewrite - two bugs, both in the SYN handshake, both mine. Fixed, with the test that
+  should have caught them.**
+  - **What the capture shows.** Bluetooth connects, HFP runs, RFCOMM channel 1 opens. At t=14.29
+    the switch command goes both ways, then the unit sends its SYN
+    (`ff5a 0017 80 a8 0000 68 | 01 7fffff 07d0 03e8 1e 06 01 00 02`) - seq `0xa8`, and a
+    parameter set very different from the bike's: `max_outstanding=127, max_length=65535,
+    retx=2000ms, cumack=1000ms, max_retx=30, max_cumack=6`, **control session id 1**.
+  - **Bug 1: our SYN+ACK carried `ack = 0x00`, not `0xa8`.** `ff5a 0017 c0 9d 00 00 33 ...`. The
+    old code got this right - `cfmoto_11.pcapng` frame 821 shows `c0 9d **2a** 00` against a SYN
+    at seq `0x2a`. The rewrite's `receive_packet` returned SYN packets early, *before* the call
+    that advances the receive sequence, with a comment claiming a SYN was "the handshake's
+    business" and shouldn't touch it. It is a numbered packet like any other and its number is
+    exactly what the SYN+ACK has to acknowledge.
+  - **Bug 2: the handshake could never see its own third leg.** The rewrite made `receive_packet`
+    swallow bare acknowledgements as link-layer noise - and the third leg of the SYN handshake
+    *is* a bare acknowledgement (`ff5a 0009 40 a8 9d 00`, visible at t=14.387). `Syn` was calling
+    that same filtered receive, so it sat waiting for a packet that would never be handed to it.
+  - **How it ends:** each SYN retransmit from the unit arrives where `Syn` expected the ack, so
+    `perform_inner` errors and retries - our SYN+ACK goes out again as seq `0x9e`, then `0x9f`.
+    After the retries are exhausted the unit gives up on iAP2 and falls back to sending `FF 55`
+    every ~1 s from t=19.5 to the end of the capture.
+  - **Fixed** by splitting the receive path in two. `receive_raw` does the link-layer bookkeeping
+    and returns *every* packet, bare acks and SYNs included; `receive_packet` is the session-level
+    filter layered on top. `Syn` uses `receive_raw`. Anything carrying a payload advances the
+    receive sequence, **including the SYN**.
+  - **Why nothing caught it:** there was no test that drove `Syn::perform` at all. The link tests
+    all used `Iap2::wrap` directly and skipped the handshake. There is now one
+    (`syn_handshake_acknowledges_the_accessorys_sequence`) that replays this capture's SYN bytes
+    through the real handshake and asserts both the ack field and the negotiated parameters; it
+    was verified to fail on each bug independently before the fix went in.
+  - **Worth internalising:** the two head units negotiate almost nothing in common (window 1 vs
+    127, control session 2 vs 1, `max_cumack` 0 vs 6). The bench unit is not a weaker version of
+    the bike - it is the better regression test for anything touching the link layer, because it
+    exercises the opposite end of every parameter.
+
 - **iAP2 link-layer + video flow-control review (2026-07-27). Nine gaps found against what the
   SYN actually negotiates and what the car asks for over AirPlay; all nine addressed. Builds and
   tests pass; none of it is retested against the bike yet.**

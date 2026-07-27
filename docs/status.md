@@ -44,6 +44,13 @@ car yet. **This is the next thing to do.**
 three packets at once. If the car behaves *worse* than `cfmoto_11`, relaxing
 `LinkParams::max_outstanding` is the first thing to try.
 
+**Already bitten once.** The link-layer rewrite broke the SYN handshake outright on the bench
+unit (`bench_2.pcapng`, 2026-07-27): our SYN+ACK acknowledged the wrong sequence number, and the
+handshake's third leg was being filtered out before it could be seen. Both are fixed and now
+covered by a test that drives the real handshake. **Test the bench unit as well as the bike** -
+it negotiates the opposite end of nearly every link parameter (window 127 vs 1, control session
+1 vs 2, `max_cumack` 6 vs 0), so it catches things the bike does not.
+
 ## Next move
 
 1. **Run against the bike and capture** (`just test-run`, with a BT+WiFi capture as in
