@@ -97,12 +97,13 @@ async fn live_connection(ssid: &str) -> Result<Option<CarWifi>> {
 /// The `ActiveConnection` object path for an interface. `ActiveWifiConnection` doesn't carry the
 /// path and `get_car_wifi` needs one to read the gateway off IP4Config, so go via the device.
 async fn active_connection_path(iface: &str) -> Result<OwnedObjectPath> {
-    let conn = get_network_manager().await.dbus_connection();
-    let device_path = NetworkManagerProxy::new(conn)
-        .await?
-        .get_device_by_ip_iface(iface)
-        .await?;
-    let active = DeviceProxy::new(conn, device_path)
+    let nm = get_network_manager().await;
+    let device_path = nm.get_device_by_interface(iface).await?;
+    // The last hop is hand-rolled because nmrs has no accessor for `Device.ActiveConnection`:
+    // it *has* an `NMDeviceProxy` with exactly this property, but its `dbus` module is private,
+    // so there is nothing to call. Same reason the gateway lookup below is a pair of local
+    // proxies - nmrs exposes no gateway or IP4Config API at all.
+    let active = DeviceProxy::new(nm.dbus_connection(), device_path)
         .await?
         .active_connection()
         .await?;
@@ -245,14 +246,6 @@ pub(crate) async fn get_wifi_mac() -> Result<String> {
 trait ActiveConnection {
     #[zbus(property)]
     fn ip4_config(&self) -> zbus::Result<OwnedObjectPath>;
-}
-#[proxy(
-    interface = "org.freedesktop.NetworkManager",
-    default_service = "org.freedesktop.NetworkManager",
-    default_path = "/org/freedesktop/NetworkManager"
-)]
-trait NetworkManager {
-    fn get_device_by_ip_iface(&self, iface: &str) -> zbus::Result<OwnedObjectPath>;
 }
 #[proxy(
     interface = "org.freedesktop.NetworkManager.Device",
