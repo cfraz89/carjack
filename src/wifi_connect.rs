@@ -99,10 +99,6 @@ async fn live_connection(ssid: &str) -> Result<Option<CarWifi>> {
 async fn active_connection_path(iface: &str) -> Result<OwnedObjectPath> {
     let nm = get_network_manager().await;
     let device_path = nm.get_device_by_interface(iface).await?;
-    // The last hop is hand-rolled because nmrs has no accessor for `Device.ActiveConnection`:
-    // it *has* an `NMDeviceProxy` with exactly this property, but its `dbus` module is private,
-    // so there is nothing to call. Same reason the gateway lookup below is a pair of local
-    // proxies - nmrs exposes no gateway or IP4Config API at all.
     let active = DeviceProxy::new(nm.dbus_connection(), device_path)
         .await?
         .active_connection()
