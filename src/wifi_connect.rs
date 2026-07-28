@@ -103,8 +103,15 @@ async fn get_car_wifi() -> Result<CarWifi> {
     let ipnet = addr.parse::<IpNet>().expect("Error parsing addr");
     let ip = ipnet.addr();
 
-    let gateway: IpAddr = network
-        .gateway4
+    let nm = get_network_manager().await;
+    let active = nm
+        .get_active_connection(&network.device)
+        .await?
+        .ok_or(eyre!("No active connection on {}", network.device))?;
+    let gateway: IpAddr = nm
+        .get_ip4_config(&active)
+        .await?
+        .and_then(|ip4| ip4.gateway)
         .ok_or(eyre!("No gateway on current connection"))?
         .parse()?;
 
