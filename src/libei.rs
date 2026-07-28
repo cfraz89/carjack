@@ -289,11 +289,7 @@ impl EiSession {
             EiEvent::DeviceResumed(resumed) => {
                 let serial = self.connection.serial();
                 let sequence = self.sequence;
-                let Some(touch) = self
-                    .touch
-                    .as_mut()
-                    .filter(|t| t.device == resumed.device)
-                else {
+                let Some(touch) = self.touch.as_mut().filter(|t| t.device == resumed.device) else {
                     return;
                 };
                 // start_emulating is mandatory after a resume, before any event is accepted.
@@ -334,7 +330,10 @@ impl EiSession {
             EiEvent::Disconnected(disconnected) => {
                 tracing::warn!(
                     "EI server disconnected: {}",
-                    disconnected.explanation.as_deref().unwrap_or("no reason given")
+                    disconnected
+                        .explanation
+                        .as_deref()
+                        .unwrap_or("no reason given")
                 );
                 self.touch = None;
                 self.slots.clear();
@@ -567,7 +566,10 @@ mod tests {
             (1727.0, 1079.0)
         );
         // Overshoot and negatives are pulled in too.
-        assert_eq!(region_position(&r, -5.0, 9000.0, (1080, 600)), (0.0, 1079.0));
+        assert_eq!(
+            region_position(&r, -5.0, 9000.0, (1080, 600)),
+            (0.0, 1079.0)
+        );
     }
 
     /// A region that isn't at the origin (a second monitor) must have its offset added, so touch
@@ -603,9 +605,15 @@ mod tests {
         assert!(!slots.allows(Up, 1));
 
         slots.record(Up, 0);
-        assert!(!slots.allows(Up, 0), "a duplicate up is exactly what crashed gnome-shell");
+        assert!(
+            !slots.allows(Up, 0),
+            "a duplicate up is exactly what crashed gnome-shell"
+        );
         assert!(!slots.allows(Motion, 0));
-        assert!(slots.allows(Down, 0), "the slot can be re-used after the up");
+        assert!(
+            slots.allows(Down, 0),
+            "the slot can be re-used after the up"
+        );
     }
 
     /// A paused/removed device means the compositor dropped its slots; ours must go too, or the

@@ -111,21 +111,16 @@ pub async fn run_video_stream(
     )));
 
     let latency = Duration::from_millis(100);
+
+    // SETUP has to follow the modes assertion straight away - a head unit walks away if we stop
+    // making progress.
     let mut screen_guard = tx.setup_screen(latency).await?;
+
+    // Hold only RECORD, which is the promise that video is coming.
+    let first_frame = wait_for_first_keyframe(&mut video_rx, &keyframe_tx).await?;
 
     tx.record().await?;
     tracing::info!("RECORD sent, streaming video");
-
-    // The encoder has been running (and buffering) since before AirPlay setup completed,
-    // so drop everything queued up to now - otherwise we'd open the stream with a burst of
-    // seconds-old frames. Steady state then only ever pushes near-live frames.
-    let mut dropped = 0;
-    while video_rx.try_recv().is_ok() {
-        dropped += 1;
-    }
-    if dropped > 0 {
-        tracing::info!("Dropped {dropped} stale buffered frames before streaming");
-    }
 
     let mut sent_keyframe = false;
     // Set while a keyframe request is outstanding, so a sustained stall asks once rather than
@@ -148,11 +143,21 @@ pub async fn run_video_stream(
     const AHEAD_LIMIT: Duration = Duration::from_millis(200);
     let mut next_pts: Option<std::time::Instant> = None;
 
-    while let Some(encoded) = video_rx.recv().await {
+    // The held keyframe goes out first, so the stream opens on it.
+    let mut pending = Some(first_frame);
+    loop {
+        let encoded = match pending.take() {
+            Some(frame) => frame,
+            None => match video_rx.recv().await {
+                Some(frame) => frame,
+                None => break,
+            },
+        };
         let data_len = encoded.data.len();
         let is_keyframe = encoded.config.is_some();
 
-        // After draining we may land mid-GOP; the stream has to open on a keyframe.
+        // Backpressure and catplay both re-arm this mid-stream; the stream has to (re)open on a
+        // keyframe, so skip deltas until one arrives.
         if !sent_keyframe && !is_keyframe {
             continue;
         }
@@ -250,6 +255,63 @@ pub async fn run_video_stream(
     Ok(())
 }
 
+/// How long to wait for the encoder's first keyframe before giving up on the session.
+const FIRST_KEYFRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Block until the encoder has produced a keyframe.
+///
+/// RECORD starts the head unit's watchdog, so it must not be sent before there is a frame to send.
+async fn wait_for_first_keyframe(
+    video_rx: &mut mpsc::Receiver<EncodedFrame>,
+    keyframe_tx: &mpsc::Sender<()>,
+) -> Result<EncodedFrame> {
+    // Anything already queued is stale. Dropping it can leave us mid-GOP, so ask for a fresh IDR.
+    let mut dropped = 0;
+    while video_rx.try_recv().is_ok() {
+        dropped += 1;
+    }
+    if dropped > 0 {
+        tracing::info!("Dropped {dropped} stale buffered frames; requesting a keyframe");
+        let _ = keyframe_tx.try_send(());
+    }
+
+    // Warn while waiting: past a second it is the video source that has stalled, not the encoder,
+    // and a silent wait here is near-impossible to diagnose after the fact.
+    let started = std::time::Instant::now();
+    let mut deltas = 0u32;
+    let first = async {
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(1), video_rx.recv()).await;
+            match next {
+                Ok(Some(frame)) if frame.config.is_some() => {
+                    tracing::info!(
+                        "First keyframe after {:?} ({deltas} delta frames skipped)",
+                        started.elapsed()
+                    );
+                    return Ok(frame);
+                }
+                Ok(Some(_)) => deltas += 1,
+                Ok(None) => return Err(eyre!("encoder stopped before producing a keyframe")),
+                Err(_) => tracing::warn!(
+                    "Still waiting for the encoder's first keyframe after {:?} ({deltas} delta \
+                     frames so far) - the car tears the session down ~2s from here",
+                    started.elapsed()
+                ),
+            }
+        }
+    };
+
+    match tokio::time::timeout(FIRST_KEYFRAME_TIMEOUT, first).await {
+        Ok(frame) => frame,
+        Err(_) => Err(eyre!(
+            "no keyframe from the encoder within {:?}; not sending RECORD. The video source \
+             produced nothing - check that the compositor is rendering (source=app) or that the \
+             portal/PipeWire stream is live (source=desktop)",
+            FIRST_KEYFRAME_TIMEOUT
+        )),
+    }
+}
+
 /// Answer the CarPlay control commands the car sends over the AirPlay event channel.
 /// With no real iPhone to proxy to (we stream a desktop), the car just needs each command
 /// acknowledged: ChangeModes gets a mode-state response, everything else an OK. Touch comes
@@ -334,6 +396,85 @@ fn abort_on_drop(handle: tokio::task::JoinHandle<()>) -> impl Drop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn delta() -> EncodedFrame {
+        EncodedFrame {
+            data: vec![0u8; 4],
+            config: None,
+        }
+    }
+
+    fn keyframe() -> EncodedFrame {
+        EncodedFrame {
+            data: vec![1u8; 8],
+            config: Some(AvccConfig {
+                nal_size_len: 4,
+                sps_pps: vec![0x67, 0x42, 0x68, 0xce],
+            }),
+        }
+    }
+
+    /// RECORD must not go out on a delta frame: the car's stream has to open on a keyframe, and
+    /// the whole point of the gate is that we hold the announcement until we have one.
+    #[tokio::test]
+    async fn first_keyframe_skips_deltas() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (kf_tx, _kf_rx) = mpsc::channel(1);
+        // Produced after the wait begins - a cold pipeline emitting into an already-drained
+        // channel, which is the real sequence.
+        let producer = tokio::spawn(async move {
+            for _ in 0..3 {
+                tx.send(delta()).await.unwrap();
+            }
+            tx.send(keyframe()).await.unwrap();
+        });
+
+        let frame = wait_for_first_keyframe(&mut rx, &kf_tx)
+            .await
+            .expect("keyframe");
+        assert!(frame.config.is_some());
+        assert_eq!(frame.data.len(), 8);
+        producer.await.unwrap();
+    }
+
+    /// Frames already queued predate the session. They get dropped, and because dropping can
+    /// land us mid-GOP we ask for a fresh IDR rather than waiting out the keyframe interval.
+    #[tokio::test]
+    async fn stale_frames_dropped_and_keyframe_requested() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (kf_tx, mut kf_rx) = mpsc::channel(1);
+        // Queued before the wait starts, so `try_recv` sees them: a stale keyframe among them
+        // must still be discarded rather than opening the stream on old content.
+        tx.send(keyframe()).await.unwrap();
+        tx.send(delta()).await.unwrap();
+
+        let fresh = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            tx.send(keyframe()).await.unwrap();
+        });
+
+        let frame = wait_for_first_keyframe(&mut rx, &kf_tx)
+            .await
+            .expect("keyframe");
+        assert!(frame.config.is_some());
+        assert!(
+            kf_rx.try_recv().is_ok(),
+            "a keyframe should have been requested"
+        );
+        fresh.await.unwrap();
+    }
+
+    /// A dead encoder has to surface as an error rather than hanging: the caller aborts the
+    /// session instead of leaving an AirPlay connection open that will never carry video.
+    #[tokio::test]
+    async fn encoder_closing_without_a_keyframe_errors() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (kf_tx, _kf_rx) = mpsc::channel(1);
+        tx.send(delta()).await.unwrap();
+        drop(tx);
+
+        assert!(wait_for_first_keyframe(&mut rx, &kf_tx).await.is_err());
+    }
 
     // Real reports captured from the head unit (`HID report (12 bytes)` log lines): the parser
     // must turn a stream of them into a well-formed Down -> Motion* -> Up gesture with the

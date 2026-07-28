@@ -117,6 +117,16 @@ impl EncodeBackend {
     }
 }
 
+/// Initialise GStreamer up front, off the async runtime.
+///
+/// The first `gst::init()` builds the plugin registry, which takes seconds; keep that out of a
+/// session. The app path gets this free via [`resolve_backend`]; desktop mode has to ask.
+/// Blocking and idempotent.
+pub fn init_gstreamer() -> Result<()> {
+    gst::init()?;
+    Ok(())
+}
+
 /// Decide the encode backend once, at startup, honouring the configured [`ZeroCopyMode`]:
 /// - `Off` -> software.
 /// - `Force` -> a zero-copy backend or an error (never silently downgrades).

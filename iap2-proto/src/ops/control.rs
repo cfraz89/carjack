@@ -730,7 +730,9 @@ mod tests {
     #[test]
     fn wifi_config_dialects_are_distinct() {
         assert_eq!(
-            ControlMessage::request_accessory_wifi_config().to_bytes().unwrap(),
+            ControlMessage::request_accessory_wifi_config()
+                .to_bytes()
+                .unwrap(),
             unhex("404000065702")
         );
         let grouped = ControlMessage::request_accessory_wifi_config_grouped("a", "b");

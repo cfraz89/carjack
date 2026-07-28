@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use backon::{ConstantBuilder, Retryable};
@@ -20,7 +21,7 @@ use clap::Parser;
 
 use crate::{
     wifi_connect::{CarWifi, connect_to_car_wifi, wait_for_link_local},
-    wireless::wireless_carplay,
+    wireless::{IapHost, wireless_carplay},
 };
 
 mod libei;
@@ -172,6 +173,9 @@ async fn run_app(config: Config) -> Result<()> {
     // If we've seen a car before, start the compositor at its cached resolution rather than the
     // config default - so the app (even a non-resizable one like Waydroid) can boot at the right
     // size straight away, during the BT/WiFi/AirPlay setup, instead of after the display is known.
+    // Held for the whole run - see `IapHost`.
+    let host = Arc::new(IapHost::start().await?);
+
     let mut cache = DisplayCache::load();
     let cached = cache.last_props();
     let (start_w, start_h, start_fps) = match cached {
@@ -210,7 +214,7 @@ async fn run_app(config: Config) -> Result<()> {
                 tracing::info!("Ctrl-C received, shutting down");
                 break Ok(());
             }
-            result = run_session(&compositor, &backend, &config, &mut app, &mut cache) => {
+            result = run_session(&host, &compositor, &backend, &config, &mut app, &mut cache) => {
                 match result {
                     Ok(()) => {
                         tracing::info!("Session ended cleanly, exiting");
@@ -245,10 +249,18 @@ async fn run_desktop(config: Config) -> Result<()> {
         unsafe { std::env::set_var("GST_VA_ALL_DRIVERS", "1") };
     }
 
+    // Build the GStreamer registry now, not in the first session - see `encode::init_gstreamer`.
+    tokio::task::spawn_blocking(encode::init_gstreamer)
+        .await
+        .map_err(|e| eyre!("gstreamer init task panicked: {e}"))??;
+
     // Ask the portal for ScreenCast + RemoteDesktop access once - a consent dialog appears on the
     // first run (`PersistMode::Application` remembers it after). Touch is then injected over libei
     // (see `src/libei.rs`). The PipeWire node and input session persist across CarPlay reconnects,
     // the way the compositor does in app mode.
+    // Held for the whole run - see `IapHost`.
+    let host = Arc::new(IapHost::start().await?);
+
     let rd = portal::start_remote_desktop().await?;
     tracing::info!("Desktop source ready (PipeWire node {})", rd.node_id());
     // `[graphics] zerocopy` here selects the desktop encode path: GL (GPU) vs software convert.
@@ -262,7 +274,7 @@ async fn run_desktop(config: Config) -> Result<()> {
                 tracing::info!("Ctrl-C received, shutting down");
                 return Ok(());
             }
-            result = run_desktop_session(&rd, zerocopy, bitrate, &bt_device) => {
+            result = run_desktop_session(&host, &rd, zerocopy, bitrate, &bt_device) => {
                 // Lift anything still held: the input session outlives car sessions.
                 rd.end_session();
                 match result {
@@ -360,7 +372,7 @@ async fn connect_airplay_endpoints(
 
 /// Run the Bluetooth -> WiFi -> AirPlay flow and return once AirPlay is connected (so the caller
 /// knows the car's display and can wire up the video source + input). Shared by both source modes.
-async fn establish_carplay(bt_device: &str) -> Result<Established> {
+async fn establish_carplay(host: Arc<IapHost>, bt_device: &str) -> Result<Established> {
     let (touch_tx, touch_rx) = mpsc::channel::<TouchEvent>(64);
     let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCredentials>(4);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
@@ -376,6 +388,7 @@ async fn establish_carplay(bt_device: &str) -> Result<Established> {
     // AbortOnDropHandle guarantees the task (and its BlueZ resources) is torn down when the
     // returned handle is dropped (e.g. before a session restart) rather than detached.
     let mut carplay_handle = AbortOnDropHandle::new(tokio::spawn(wireless_carplay(
+        host,
         bt_device.to_owned(),
         wifi_tx,
         ready_tx,
@@ -487,6 +500,7 @@ async fn establish_carplay(bt_device: &str) -> Result<Established> {
 /// `source = app`: reconfigure the compositor to the car's display, encode its frames, and
 /// inject CarPlay touch back into it.
 async fn run_session(
+    host: &Arc<IapHost>,
     compositor: &Compositor,
     backend: &EncodeBackend,
     config: &Config,
@@ -499,7 +513,7 @@ async fn run_session(
         touch_tx,
         mut touch_rx,
         car_addr_rx,
-    } = establish_carplay(config.bluetooth_device().unwrap_or_default()).await?;
+    } = establish_carplay(host.clone(), config.bluetooth_device().unwrap_or_default()).await?;
 
     // Reconfigure the already-running compositor (and its client) to exactly match the car's size
     // and rate - so it renders at the car's resolution, no scaling needed downstream.
@@ -532,8 +546,10 @@ async fn run_session(
     }
     let frame_rx = compositor.subscribe_frames();
 
-    // Encode the compositor's frames to H264 on its own task (so it keeps buffering through
-    // AirPlay setup) and stream them to the car. The encoder and the video stream are both
+    // Encode the compositor's frames to H264 on its own task and stream them to the car. This
+    // spawn builds the GStreamer pipeline; it cannot move to launch time because the appsrc latches
+    // its caps once, so it must follow `reconfigure`.
+    // The encoder and the video stream are both
     // session-lifetime, so their arms live directly in the loop below alongside the Bluetooth
     // handle and touch - one place for the whole streaming session to end or error.
     // Small on purpose: this is a real-time stream, so a shallow channel (plus the pipeline's leaky
@@ -598,6 +614,7 @@ async fn run_session(
 /// `source = desktop`: encode the portal's PipeWire stream (scaled to the car) and inject CarPlay
 /// touch back into the desktop through the portal's RemoteDesktop session.
 async fn run_desktop_session(
+    host: &Arc<IapHost>,
     rd: &portal::RemoteDesktopStream,
     zerocopy: carjack::config::ZeroCopyMode,
     bitrate: Bitrate,
@@ -609,7 +626,7 @@ async fn run_desktop_session(
         touch_tx,
         mut touch_rx,
         car_addr_rx: _,
-    } = establish_carplay(bt_device).await?;
+    } = establish_carplay(host.clone(), bt_device).await?;
     let (width, height) = (conn.width, conn.height);
     tracing::info!("Streaming desktop to car at {width}x{height}");
 

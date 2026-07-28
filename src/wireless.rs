@@ -1,19 +1,20 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
 use thiserror::Error;
 
-use backon::{ConstantBuilder, ExponentialBuilder, RetryableWithContext};
+use backon::{ConstantBuilder, RetryableWithContext};
 use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
     Address, Device, DiscoveryFilter, Session,
     adv::{Advertisement, Type},
     agent::Agent,
-    rfcomm::{self, ProfileHandle, Role},
+    rfcomm::{self, ProfileHandle, ReqError, Role},
 };
 use eyre::{Result, eyre};
 use iap2_proto::{error::Iap2Error, iap2::Iap2};
@@ -24,9 +25,8 @@ use libcarjack::{
     uuid::{CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID, IAP2_UUID},
 };
 use tap::{Tap, TapFallible};
-use tokio::sync::{Semaphore, TryAcquireError, mpsc, oneshot};
-use tokio_stream::{StreamExt, adapters::Merge};
-use tokio_util::task::AbortOnDropHandle;
+use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio_stream::StreamExt;
 
 use crate::wifi_connect::get_wifi_mac;
 
@@ -111,10 +111,130 @@ async fn run_hci_helper() -> Result<()> {
     Ok(())
 }
 
+/// Which registered profile an inbound connection arrived on; the merged stream loses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileKind {
+    /// Our own outbound channel.
+    Accessory,
+    /// A head unit connecting to us.
+    Device,
+}
+
+impl std::fmt::Display for ProfileKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Accessory => f.write_str("accessory"),
+            Self::Device => f.write_str("device"),
+        }
+    }
+}
+
+/// Inbound profile connections, tagged with the profile they arrived on.
+type TaggedProfiles =
+    Pin<Box<dyn futures::Stream<Item = (ProfileKind, rfcomm::ConnectRequest)> + Send>>;
+
+/// BlueZ session, pairing agent, CarPlay advertisement and iAP profile registrations.
+///
+/// Must outlive every session - dropping it deregisters the profiles.
+pub struct IapHost {
+    adapter: Adapter,
+    identity: DeviceIdentity,
+    /// Inbound connect requests from both iAP profiles; a session takes exclusive use of it.
+    profiles: tokio::sync::Mutex<TaggedProfiles>,
+    _session: Session,
+    _agent: bluer::agent::AgentHandle,
+    _advertisement: bluer::adv::AdvertisementHandle,
+    /// Held only to keep the registration alive; nothing consumes its request stream.
+    _iap_v2: Option<ProfileHandle>,
+}
+
+impl IapHost {
+    /// Register everything once.
+    pub async fn start() -> Result<Self> {
+        let session = Session::new().await?;
+        let agent = session.register_agent(Agent::default()).await?;
+        let adapter = session.default_adapter().await?;
+        adapter.set_alias(String::from("carjack")).await?;
+        adapter.set_powered(true).await?;
+        let identity = DeviceIdentity {
+            name: String::from("carjack"),
+            transport_identifier: adapter.address().await?.to_string(),
+            wifi_mac: get_wifi_mac().await?,
+        };
+        let advertisement = publish_advertisement(&adapter).await?;
+
+        // BR/EDR inquiry needs to show the CarPlay UUID. In a sidecar because cap_net_admin on
+        // this process breaks xdg-desktop-portal. Not known to be required, so don't fail on it.
+        let _ = run_hci_helper()
+            .await
+            .tap_err(|e| tracing::warn!(?e, "Unable to apply hci config"));
+
+        let iap_accessory_handle = session
+            .register_profile(rfcomm::Profile {
+                uuid: IAP_ACCESSORY_UUID,
+                name: Some(String::from("Wireless iAP")),
+                role: Some(Role::Client),
+                auto_connect: Some(true),
+                require_authentication: Some(true),
+                require_authorization: Some(false),
+                ..Default::default()
+            })
+            .await?;
+        let iap_device_handle = session
+            .register_profile(rfcomm::Profile {
+                uuid: IAP_DEVICE_UUID,
+                name: Some(String::from("Wireless iAP")),
+                role: Some(Role::Server),
+                channel: Some(IAP_CHANNEL),
+                require_authentication: Some(true),
+                require_authorization: Some(false),
+                ..Default::default()
+            })
+            .await?;
+        // Some head units look for the v2 UUID. Shares `IAP_CHANNEL`, so BlueZ may refuse it.
+        let iap_v2 = match session
+            .register_profile(rfcomm::Profile {
+                uuid: IAP2_UUID,
+                name: Some(String::from("Wireless iAP v2")),
+                role: Some(Role::Server),
+                channel: Some(IAP_CHANNEL),
+                require_authentication: Some(true),
+                require_authorization: Some(false),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                tracing::debug!(?e, "iAP v2 profile not registered (shares a channel)");
+                None
+            }
+        };
+
+        tracing::info!("Registered iAP profiles and CarPlay advertisement");
+
+        let profiles: TaggedProfiles = Box::pin(
+            iap_accessory_handle
+                .map(|rq| (ProfileKind::Accessory, rq))
+                .merge(iap_device_handle.map(|rq| (ProfileKind::Device, rq))),
+        );
+
+        Ok(Self {
+            adapter,
+            identity,
+            profiles: tokio::sync::Mutex::new(profiles),
+            _session: session,
+            _agent: agent,
+            _advertisement: advertisement,
+            _iap_v2: iap_v2,
+        })
+    }
+}
+
 /// Carried across retry attempts by `backon`: the merged profile streams we accept inbound
-/// connections from, and the single outbound page (dropped, and so cancelled, once any link lands).
+/// connections from, and the device we page as a fallback if the unit doesn't page us first.
 struct LinkCtx {
-    profiles: Merge<ProfileHandle, ProfileHandle>,
+    host: Arc<IapHost>,
     device: Device,
     connect_attempt: Arc<Semaphore>,
 }
@@ -136,117 +256,87 @@ pub enum LinkAttemptError {
     TrueAcquireError(#[from] tokio::sync::TryAcquireError),
 }
 
-/// Wait for an inbound iAP2 profile connection, accept it, and bring the iAP2 link up on it.
+/// Cycle the link - or page, if there is none - so the unit offers a fresh iAP channel.
+///
+/// Spawned, never awaited: `Connect()` blocks until every profile has been tried, and the accept
+/// loop has to stay live. `connect_profile` is not a substitute; it leaves a connection in progress.
+fn spawn_relink(device: &Device, gate: &Arc<Semaphore>) {
+    let device = device.clone();
+    let gate = gate.clone();
+    tokio::spawn(async move {
+        // One at a time: a second disconnect landing on an in-flight connect cancels it.
+        let Ok(_permit) = gate.try_acquire_owned() else {
+            tracing::debug!("Relink already in flight; skipping this one");
+            return;
+        };
+        if device.is_connected().await.unwrap_or(false) {
+            // Cycling the iAP profiles alone is not an option: `disconnect_profile` is refused
+            // for our own server UUID.
+            let dis = device.disconnect().await;
+            tracing::debug!(?dis, "Disconnected stale link");
+        }
+        let res = device.connect().await;
+        tracing::debug!(?res, "Connected");
+    });
+}
+
+/// Accept an iAP connection from the configured head unit and bring the iAP2 link up on it.
+///
+/// One channel per attempt; the caller's retry loop re-arms on failure.
 async fn attempt_iap2_link(
     ctx: &mut LinkCtx,
 ) -> Result<Iap2<bluer::rfcomm::Stream>, LinkAttemptError> {
-    tracing::debug!("Waiting for iAP2 connection requests");
-    let rq = ctx
-        .profiles
-        .next()
-        .await
-        .ok_or(LinkAttemptError::ProfilesClosed)?;
-    tracing::debug!("Got connect request");
-    let _permit = ctx.connect_attempt.acquire().await?;
-    let stream = rq.accept()?;
-    tracing::debug!("Establishing iAP2 link");
-    let iap2 = Iap2::start(stream).await?;
-    Ok(iap2)
-}
-
-pub async fn connect_accessory(
-    device: &Device,
-    connect_attempt: &Semaphore,
-) -> Result<(), LinkAttemptError> {
-    tracing::debug!("Attempting to connect accessory");
-    if !device.is_connected().await? {
-        //We dont actually want to stop iap2 from connecting so we dont block the semaphore while connecting
-        if connect_attempt.available_permits() == 0 {
-            Err(TryAcquireError::NoPermits)?
-        }
-        device
-            .connect()
+    let target = ctx.device.address();
+    // Only one session runs at a time, so this never contends.
+    let mut profiles = ctx.host.profiles.lock().await;
+    loop {
+        tracing::debug!("Waiting for iAP2 connection requests");
+        let (profile, rq) = profiles
+            .next()
             .await
-            .tap(|r| tracing::debug!(?r, "Accessory connection"))?;
+            .ok_or(LinkAttemptError::ProfilesClosed)?;
+        let from = rq.device();
+        // Our profiles are registered adapter-wide, so any bonded head unit lands here.
+        if from != target {
+            tracing::warn!(
+                %from, %target, %profile,
+                "Rejecting iAP2 connection from a device that is not the configured head unit"
+            );
+            rq.reject(ReqError::Rejected);
+            continue;
+        }
+
+        tracing::debug!(%from, %profile, "Got connect request");
+        let stream = rq.accept()?;
+        tracing::debug!("Establishing iAP2 link");
+        return Ok(Iap2::start(stream).await?);
     }
-    Ok(())
 }
 
 pub async fn wireless_carplay(
+    host: Arc<IapHost>,
     target: String,
     wifi_tx: mpsc::Sender<WifiCredentials>,
     ready_tx: oneshot::Sender<()>,
     car_addr_tx: oneshot::Sender<String>,
 ) -> Result<()> {
-    let session = Session::new().await?;
-    let headless_agent = Agent::default();
-    let _agent = session.register_agent(headless_agent).await?;
-    let adapter = session.default_adapter().await?;
-    adapter.set_alias(String::from("carjack")).await?;
-    adapter.set_powered(true).await?;
-    let identity = DeviceIdentity {
-        name: String::from("carjack"),
-        transport_identifier: adapter.address().await?.to_string(),
-        wifi_mac: get_wifi_mac().await?,
-    };
-    let _advertisement_handle = publish_advertisement(&adapter).await?;
+    let adapter = &host.adapter;
+    let identity = host.identity.clone();
 
-    // Apply HCI-level CarPlay config so BR/EDR inquiry shows the CarPlay UUID
-    tracing::trace!("Applying hci config");
-    //We need cap_net_admin to write to the hci socket directly.
-    //However adding that cap to this process is probably a security liability, and breaks
-    //xdg-desktop-portal. So we offload the work to a separate binary.
-    let _ = run_hci_helper().await;
-
-    // let sdp_record = generate_iap2_sdp();
-    let iap_accessory_handle = session
-        .register_profile(rfcomm::Profile {
-            uuid: IAP_ACCESSORY_UUID,
-            name: Some(String::from("Wireless iAP")),
-            role: Some(Role::Client),
-            auto_connect: Some(true),
-            require_authentication: Some(true),
-            require_authorization: Some(false),
-            ..Default::default()
-        })
-        .await?;
-    let iap_device_handle = session
-        .register_profile(rfcomm::Profile {
-            uuid: IAP_DEVICE_UUID,
-            name: Some(String::from("Wireless iAP")),
-            role: Some(Role::Server),
-            channel: Some(IAP_CHANNEL),
-            // service_record: Some(sdp_record),
-            require_authentication: Some(true),
-            require_authorization: Some(false),
-            ..Default::default()
-        })
-        .await?;
-
-    // Register Wireless iAP v2 UUID (some head units look for this)
-    let _iap_v2_handle = session
-        .register_profile(rfcomm::Profile {
-            uuid: IAP2_UUID,
-            name: Some(String::from("Wireless iAP v2")),
-            role: Some(Role::Server),
-            channel: Some(IAP_CHANNEL),
-            require_authentication: Some(true),
-            require_authorization: Some(false),
-            ..Default::default()
-        })
-        .await;
-
-    let device = find_target_device(&adapter, &target).await?;
+    let device = find_target_device(adapter, &target).await?;
     // Surface the car's MAC (known now, early) so the caller can look up its cached display and
     // size the compositor / launch the app before AirPlay reports the display.
     let _ = car_addr_tx.send(device.address().to_string());
 
-    //Disconnecting profile isnt enough, have to to do a full disconnect in order to kick off a new connection
-    let disconnect_res = device.disconnect().await;
-    tracing::debug!(?disconnect_res, "Disconnection");
+    // Gate on relinks: one at a time.
+    let connect_attempt = Arc::new(tokio::sync::Semaphore::new(1));
 
-    //Start listening for iap2 messages before actually connecting anything, otherwise we may miss them
-    let profiles = iap_accessory_handle.merge(iap_device_handle);
+    // Always start from a fresh link: an existing one predates us listening and never carries the
+    // switch.
+    let connected = device.is_connected().await.unwrap_or(false);
+    tracing::info!(connected, "Waiting for the head unit's iAP channel");
+    spawn_relink(&device, &connect_attempt);
+
     let task_device = device.clone();
 
     //Thought maybe we would need to start listening for iap2 packets immdiately in a task,
@@ -277,35 +367,15 @@ pub async fn wireless_carplay(
     //     .1
     // }));
 
-    //Make sure we dont try to establish an iap link on an existing connection as well as trying to make new connections simultaneously
-    let connect_attempt = Arc::new(tokio::sync::Semaphore::new(1));
-    let accessory_connect_attempt = connect_attempt.clone();
-    //It's ok if outbound connection fails, we may still receive an inbound one
-    let accessory_connect_task = AbortOnDropHandle::new(tokio::spawn(async move {
-        (async |device: Device| {
-            let res = connect_accessory(&device, &accessory_connect_attempt).await;
-            (device, res)
-        })
-        .retry(ExponentialBuilder::new().without_max_times())
-        .when(|e| match e {
-            LinkAttemptError::BluerError(e)
-                if (e.kind == bluer::ErrorKind::Failed
-                    && e.message == "br-connection-already-connected") =>
-            {
-                false
-            }
-            _ => true,
-        })
-        .context(device)
-        .await
-    }));
-
     let iap2 = ({
         |mut ctx: LinkCtx| async move {
             let res = attempt_iap2_link(&mut ctx).await;
             if let Err(LinkAttemptError::Iap2(e)) = &res {
-                tracing::warn!(?e, "Got iap2 error bringing up link, disconnecting");
-                let _ = &ctx.device.disconnect().await;
+                tracing::warn!(
+                    ?e,
+                    "No channel carried the iAP2 handshake; nudging the unit"
+                );
+                spawn_relink(&ctx.device, &ctx.connect_attempt);
             }
             (ctx, res)
         }
@@ -317,16 +387,13 @@ pub async fn wireless_carplay(
             .without_max_times(),
     )
     .context(LinkCtx {
-        profiles,
+        host: host.clone(),
         device: task_device,
         connect_attempt,
     })
     .when(|e| !matches!(e, LinkAttemptError::ProfilesClosed))
     .await
     .1?;
-
-    // let iap2 = iap2_task.await??;
-    drop(accessory_connect_task);
 
     tracing::debug!("iAP2 link established");
     carplay::run_carplay_session(iap2, wifi_tx, ready_tx, identity).await?;

@@ -76,31 +76,41 @@ async fn desktop_pipewire_encodes() -> Result<()> {
     // No car here to ask for keyframes; the encoder's request pump just sees a closed channel.
     let (_keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
     let _encoder = AbortOnDropHandle::new(tokio::spawn(async move {
-        if let Err(e) =
-            encode_pipewire_to_channel(
-                node_id,
-                1080,
-                600,
-                mode,
-                Bitrate::default(),
-                video_tx,
-                dsize_tx,
-                keyframe_rx,
-            )
-            .await
+        if let Err(e) = encode_pipewire_to_channel(
+            node_id,
+            1080,
+            600,
+            mode,
+            Bitrate::default(),
+            video_tx,
+            dsize_tx,
+            keyframe_rx,
+        )
+        .await
         {
             eprintln!("encoder error: {e}");
         }
     }));
     let count = Arc::new(AtomicU64::new(0));
     let keyframes = Arc::new(AtomicU64::new(0));
-    let (count2, kf2) = (count.clone(), keyframes.clone());
+    // Time to the *first keyframe*: `run_video_stream` holds RECORD until one exists, and the head
+    // unit tears the session down ~2s after carjack stops making progress, so this is the number
+    // that decides whether a desktop-mode session can ever start.
+    let first_keyframe_ms = Arc::new(AtomicU64::new(0));
+    let started = std::time::Instant::now();
+    let (count2, kf2, kf_at) = (count.clone(), keyframes.clone(), first_keyframe_ms.clone());
     let _counter = AbortOnDropHandle::new(tokio::spawn(async move {
         while let Some(f) = video_rx.recv().await {
             let n = count2.fetch_add(1, Ordering::Relaxed) + 1;
             let is_kf = f.config.is_some();
             if is_kf {
                 kf2.fetch_add(1, Ordering::Relaxed);
+                let _ = kf_at.compare_exchange(
+                    0,
+                    started.elapsed().as_millis() as u64,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
             }
             if n % 30 == 1 {
                 eprintln!("encoded AU #{n} ({} bytes, keyframe={is_kf})", f.data.len());
@@ -111,7 +121,8 @@ async fn desktop_pipewire_encodes() -> Result<()> {
     tokio::time::sleep(Duration::from_secs(5)).await;
     let n = count.load(Ordering::Relaxed);
     let kf = keyframes.load(Ordering::Relaxed);
-    eprintln!("desktop encode: {n} AUs in 5s ({kf} keyframes)");
+    let kf_ms = first_keyframe_ms.load(Ordering::Relaxed);
+    eprintln!("desktop encode: {n} AUs in 5s ({kf} keyframes), first keyframe at {kf_ms}ms");
 
     let _: () = session.call("Stop", &()).await.unwrap_or(());
     // Keep the D-Bus proxies alive until here so the ScreenCast session doesn't close early.

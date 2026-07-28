@@ -3,6 +3,18 @@
 Things about the build/run harness that cost time to work out. The commands themselves are
 documented in `CLAUDE.md`; this is the "why is it like that" layer.
 
+## Worktrees start without a `.env` (2026-07-27)
+
+`.env` is gitignored, so a fresh `git worktree` has none - and **every** setting that matters at
+runtime lives there: `CARJACK.SOURCE`, `CARJACK.BLUETOOTH.DEVICE`, `RUST_LOG`, `TOOLBOX_BUILD`.
+Running from a worktree without copying it silently gets you defaults (`source = "app"`, no
+Bluetooth target, so carjack errors out at startup) rather than the setup you meant to test. Copy
+it in as the first step in any worktree: `cp ../../../.env .`
+
+Keep logs too - `just test-run` only writes to the terminal, so redirect both streams if the run
+is to be diagnosable afterwards. Two captures were analysed blind for want of this, and one of the
+two diagnoses was wrong.
+
 ## `just test-run` (2026-07-26)
 
 - **`just test-run` needs `timeout --foreground`.** Without it `timeout` puts the command in a new

@@ -680,4 +680,55 @@ mod tests {
             ]
         );
     }
+
+    /// A real accessory SYN, used by the `start` tests below.
+    const BENCH_SYN: &str = "ff5a001780a8000068017fffff07d003e81e0601000299";
+
+    /// `Iap2::start` end to end: switch echoed on the raw stream, then the SYN handshake.
+    #[tokio::test]
+    async fn start_echoes_the_switch_for_an_iap1_accessory() {
+        let (ours, mut theirs) = tokio::io::duplex(1024);
+        theirs.write_all(&hex("ff550200ee10")).await.unwrap();
+
+        let peer = tokio::spawn(async move {
+            // The echo comes first, on its own, before the codec is in play.
+            let mut echo = [0u8; 6];
+            theirs.read_exact(&mut echo).await.unwrap();
+            theirs.write_all(&hex(BENCH_SYN)).await.unwrap();
+            let mut buf = [0u8; 128];
+            let n = theirs.read(&mut buf).await.unwrap();
+            let (_, reply) = Packet::from_bytes((&buf[..n], 0)).unwrap();
+            let ack = Packet::new(
+                ControlByte::with_ack(),
+                0xa8,
+                reply.header.seq,
+                0,
+                Vec::new(),
+            );
+            theirs.write_all(&ack.to_bytes().unwrap()).await.unwrap();
+            echo
+        });
+
+        Iap2::start(ours).await.expect("handshake should complete");
+        assert_eq!(peer.await.unwrap(), hex("ff550200ee10").as_slice());
+    }
+
+    /// A silent channel must be abandoned quickly rather than re-read.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_channel_is_abandoned_quickly() {
+        use crate::ops::switch::perform_switch;
+
+        let (mut ours, _theirs) = tokio::io::duplex(1024);
+        let started = tokio::time::Instant::now();
+        let err = perform_switch(&mut ours)
+            .await
+            .expect_err("a silent channel must not hang");
+
+        assert!(matches!(err, Iap2Error::Timeout(_)), "got {err:?}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "gave up after {:?}; the head unit walks away in about two seconds",
+            started.elapsed()
+        );
+    }
 }

@@ -38,11 +38,6 @@ pub struct CarWifi {
 }
 
 pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<CarWifi> {
-    // Already sitting on the car's AP? Reuse the live connection rather than activating a new
-    // profile over the top of it. Reassociating costs several seconds for no gain, and because a
-    // fresh association regenerates the interface's link-local address it drops us straight back
-    // into the duplicate-address-detection window that `wait_for_link_local` exists to cover -
-    // in `cfmoto_11.pcapng` the host was already on the car's SSID and we tore it down anyway.
     match live_connection(ssid).await {
         Ok(Some(car_wifi)) => {
             tracing::info!("Already connected to {ssid}; reusing the live connection");
@@ -94,8 +89,6 @@ async fn live_connection(ssid: &str) -> Result<Option<CarWifi>> {
     Ok(Some(get_car_wifi(active_path).await?))
 }
 
-/// The `ActiveConnection` object path for an interface. `ActiveWifiConnection` doesn't carry the
-/// path and `get_car_wifi` needs one to read the gateway off IP4Config, so go via the device.
 async fn active_connection_path(iface: &str) -> Result<OwnedObjectPath> {
     let nm = get_network_manager().await;
     let device_path = nm.get_device_by_interface(iface).await?;
@@ -223,14 +216,20 @@ fn dad_finished(msg: &AddressMessage) -> bool {
 }
 
 pub(crate) async fn get_wifi_mac() -> Result<String> {
-    let network = get_network_manager()
-        .await
-        .current_network()
-        .await?
-        .ok_or(eyre!("No network connection"))?;
+    let network_manager = get_network_manager().await;
+    let wifi_device = network_manager.current_network().await?.map(|n| n.device);
+    let wifi_device = match wifi_device {
+        Some(d) => d,
+        None => network_manager
+            .list_wireless_devices()
+            .await?
+            .first()
+            .map(|d| d.interface.clone())
+            .ok_or(eyre!("No wifi devices on system with which to obtain mac."))?,
+    };
     let device = get_network_manager()
         .await
-        .wifi_device_by_interface(&network.device)
+        .wifi_device_by_interface(&wifi_device)
         .await?;
     Ok(device.hw_address)
 }

@@ -67,9 +67,144 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   like a present one and won, leaving carjack paging a dead address (Page
   Timeout) while the real unit sat discovered and ignored.
 - Two Bluetooth RFCOMM profiles are registered: `IAP_ACCESSORY_UUID`
-  (`Role::Client`, `auto_connect=false`) and `IAP_DEVICE_UUID` (`Role::Server`,
-  channel=1). `connect_profile(&IAP_ACCESSORY_UUID)` is what actually triggers
-  the connection.
+  (`...deafdecacaff`, `Role::Client`) and `IAP_DEVICE_UUID` (`...deafdecacafe`,
+  `Role::Server`, channel=1). The last byte is the whole distinction: **`cafe` is
+  the device (phone) side, `caff` the accessory (car) side.** The bike advertises
+  `caff` and searches us for `cafe`.
+- **Both channel directions work, and they race. Neither is required.** iAP2 has
+  been observed carrying a full session over each:
+  - **Outbound** (carjack -> the bike's `caff` *accessory* service, RFCOMM ch 2):
+    `cfmoto_12` t=60.059 `Sent SABM Channel=2` -> `Rcvd UA` -> the bike sends
+    `FF 55` on that channel at t=60.392, and the session runs to AirPlay RECORD.
+    Same in `cfmoto_11` (dlci `0x04`). This comes from `auto_connect: Some(true)`
+    on the registered profile - `device.connect()` brings it up; there is no
+    `connect_profile` call in the code and none is needed.
+  - **Inbound** (the bike -> our `cafe` *device* service, RFCOMM ch 1):
+    `cfmoto_14` t=00:09:09.818 `Rcvd SABM Channel=1` -> our `UA` -> `FF 55`.
+    carjack had *also* just queried the bike's iAP record (t=66.568) but the
+    inbound open beat it by 7ms.
+  - **The bike has never rejected us on the accessory profile.** There is not a
+    single `Rcvd DM` in any capture. Do not go looking for a profile-level refusal;
+    it isn't there.
+  - For contrast, in `iphone-cfmoto.pklg` the phone's outbound ch 2 (t=281.789,
+    accepted with `UA`) carries **zero bytes**, and its session arrives inbound on
+    ch 1 at t=419.341. So the iPhone's outbound channel being idle is a fact about
+    that capture, **not** a rule - carjack's outbound channel demonstrably works.
+- **The full `device.connect()` is what makes a head unit engage - never `connect_profile`.**
+  Verified live on the AUTO BOX (2026-07-28, 4/4 runs): the unit only opens its own device-profile
+  channel - the one iAP2 actually runs on - after a reconnect that brings up **all** profiles, HFP
+  included. `connect_profile(&IAP_ACCESSORY_UUID)` is worse than useless here: it leaves a
+  connection in progress, so a follow-up `connect()` fails `br-connection-busy` **every time** and
+  HFP never comes up at all, and the unit stays silent forever. The first channel offered is always
+  carjack's own accessory channel, and it never carries anything.
+- **Start every session from a fresh link.** A link that is already up is stale - the unit settled
+  on it before carjack was listening and it never carries the switch. `spawn_relink` cycles it (or
+  simply pages, if there is none) at session start, gated so a retry cannot queue a second
+  disconnect onto an in-flight connect (`br-connection-canceled`). The stale channel is still
+  accepted, but dies by `ECONNABORTED` when the disconnect lands rather than waiting out
+  `SWITCH_TIMEOUT`, so **nothing in startup is gated on a timeout**. Measured: handshake ~8s,
+  `RECORD sent` ~13-16s.
+- **One channel per attempt.** Concurrent handshakes across several channels were built and removed
+  (2026-07-28): on the AUTO BOX the channels are always offered strictly sequentially - the dead
+  accessory one, then the unit's live device one - so it was never exercised, and removing it was
+  ~5s *faster*. Reinstate only if a unit is actually observed offering two inside one switch window
+  (the bike may: `cfmoto_14` has two 1.7s apart, and there the live channel is the accessory one).
+- **Profile-level cycling is not an option.** `disconnect_profile` on our own *device* (server)
+  UUID is refused with `InvalidArguments` - only a remote's service can be disconnected - so
+  "cycle both iAP profiles" cannot be expressed, and it left the unit ~7s slower to offer its
+  channel. Cycle the device.
+- **Blocking the accept loop loses the switch window.** The AUTO BOX offers `FF 55` **once a second
+  for ~20s** and then goes quiet for good. In `bench_3` carjack committed to a *stale* channel left
+  over from before it started, and the recovery path's `device.connect()` then blocked ~38s - so the
+  unit opened a fresh channel, shouted the switch 21 times into an unread socket, and had given up
+  long before carjack looked. Nothing in the accept path may block on device operations.
+- **Reconnect off the critical path, and still bring up every profile.** BlueZ's `Connect()` does
+  not return until it has tried *all* of them (~38s on the bench unit) - but we do want them all:
+  `connect_profile` alone leaves HFP/A2DP/AVRCP down, and the head unit expects those. So the
+  recovery path spawns `connect_profile(&IAP_ACCESSORY_UUID)` (fast, and the only one the handshake
+  needs) followed by `device.connect()` for the rest, gated by `connect_attempt` so a retry storm
+  cannot queue connects. `ConnectProfile`'s UUID must be a service the **remote** advertises, so the
+  accessory side (`...caff`) - both units list it, neither lists `...cafe`.
+- **Nothing in the accept path may take the `connect_attempt` permit.** It used to serialise accepts
+  against connects; with channels raced, accepting *while* a reconnect is in flight is precisely the
+  behaviour wanted, and holding it would reintroduce the stall the rewrite exists to remove.
+- **Most of carjack's outbound pages never reach the bike at all.** Across
+  `cfmoto_11`..`cfmoto_14`, **9 of 12** `Create Connection`s came back
+  `Connect Complete status=0x04` - Page Timeout. That is baseband: the unit's
+  controller never answered, so nothing above it (SDP, profiles, RFCOMM) was even
+  reached. **Do not read a failure to connect as a profile or SDP problem** - that
+  mistake has been made repeatedly. `connect_accessory` now logs "Outbound page
+  succeeded" vs "Outbound page timed out" explicitly; count those lines first.
+- **There is no pre-emptive disconnect at session start any more, in either
+  direction.** Connected: dropping a healthy link is what pushes the bike out of
+  page-scan and into paging us, and once we let go we often cannot get it back.
+  Not connected: there is nothing to drop, and bluer documents that `disconnect()`
+  "can be also used to cancel a preceding Connect call before a reply to it has
+  been received" - so on an idle device it can only cancel a connection in flight,
+  including one the *bike* is making. Every `Disconnect` in the `cfmoto_14` run
+  returned `Ok(())`, so it was only ever doing the first. The retry loop still
+  disconnects when an attempt genuinely fails, which is the case the original call
+  was written for. When a page *does* land every layer above works: `cfmoto_11` had
+  zero timeouts and ran a full iAP2 session over carjack's own outbound channel.
+- **The ACL is not the trigger; the head unit deciding to start a session is.** In
+  `cfmoto_14` session 2 *our* page created the ACL and the bike still ran its full
+  browse-then-open sequence on it and sent `FF 55`. So do not reason about who
+  paged - reason about whether the bike ran the SDP Service Search for
+  `00000000-deca-fade-deca-deafdecacafe`. If it did, the switch follows within
+  ~250ms; if it did not, the channel stays mute. **What makes it decide is still
+  unknown** - the BLE CarPlay advertisement is the designed trigger and was active
+  during both successes and failures, so it is necessary-at-best, not sufficient.
+- **What actually opens the iAP channel today** is the *bike* browsing our SDP:
+  it sends a Service Search for `00000000-deca-fade-deca-deafdecacafe`, gets our
+  record back (count = 1), opens RFCOMM ch 1, and sends `FF 55`. Verified in
+  `cfmoto_14` session 2 at 00:09:09.006 -> SABM 00:09:09.818 -> `FF 55`
+  00:09:10.074 - **on a laptop-initiated ACL**, so this is not tied to who paged.
+- **The iAP SDP record and the CarPlay advertisement must live for the *process*, not the session.**
+  They used to be locals in `wireless_carplay`, which is spawned per session - so every time a
+  session ended the handles dropped, BlueZ deregistered the profiles, and carjack stopped
+  advertising any iAP service until the next session re-registered. The head unit probes SDP on its
+  own schedule, and hitting that window is fatal: in `bench_4.pcapng` the AUTO BOX asked for
+  `00000000-deca-fade-deca-deafdecacafe` at t=1.665 and t=4.945, got `Attribute Lists [count = 0]`
+  both times, concluded carjack was not an iAP device and **fell back to Android Auto** - after
+  which it speaks AA framing (`00 08 00 04 08 01` = length 8, message id 4, protobuf `08 01`),
+  which surfaces as `UnexpectedBytes` out of `perform_switch`. Reconnecting does not change its
+  mind. Compare `cfmoto_14`, where every such query was answered `count = 1` and the handshake ran.
+  Everything of that kind now lives in `IapHost`, built once behind a `OnceCell`.
+- **`UnexpectedBytes` from `perform_switch` starting `00 08 00 04` means Android Auto**, not a
+  corrupt switch. Check what carjack answered to the unit's SDP query before looking anywhere else.
+- **The inbound accept must be filtered by the configured address.** Those profiles are
+  registered for the whole adapter, so *any* bonded head unit that pages us arrives at
+  `attempt_iap2_link` - and accepting whoever knocks first means carjack runs a full CarPlay
+  session against the wrong unit. Seen 2026-07-27 (`cfmoto_14`): configured for the CFMOTO, the
+  bike went quiet, and 58s later the bench AUTO BOX paged us and got streamed to instead.
+  `attempt_iap2_link` now compares `rq.device()` to the target and `reject()`s anything else. The
+  accept path itself stays - the head unit is what opens the RFCOMM channel (next bullet).
+- **Either side may bring the ACL up; the head unit opens the RFCOMM channel.** Do *not* assume the
+  bike only speaks iAP2 on a connection it originated - `cfmoto_14` session 2 disproves it: our
+  `Sent Create Connection` created the ACL (`Connect Complete status=0x00`), the bike then sent
+  `Rcvd SABM Channel=1` on it and the switch 248ms later, and the whole session ran. So carjack
+  keeps paging outbound concurrently with the accept loop. (The older `cfmoto_6` note that the unit
+  "requires a car-originated ACL" is at best too strong.)
+- **`Accessory connection r=Ok(())` does not mean our page made the link.** `connect_accessory`
+  resolves Ok just as readily when the unit connected first and our in-flight `device.connect()`
+  simply completed. In `cfmoto_14` session 2 our page returned `br-connection-page-timeout` twice
+  and the eventual Ok landed **7ms after** an inbound connect request. Read HCI (`Sent Create
+  Connection` vs `Rcvd Connect Request`, plus the `Connect Complete` status) to know who paged -
+  the log alone cannot tell you.
+- **Why an accepted iAP channel is sometimes silent is still unexplained.** Both a working
+  (`cfmoto_14` session 2) and a dead (session 1) channel arrived as inbound RFCOMM requests from
+  the configured unit. The dead one never carried `FF 55` at all. `ProfileKind` is logged on every
+  accepted request to help narrow this; see the log entry.
+- **A silent iAP channel is the wrong channel - drop it fast.** `SWITCH_TIMEOUT` is 3s with no
+  retry (it was 12s × 3 ≈ 38s). Measured: the bike sends `FF 55` 268ms after the channel opens and
+  the AUTO BOX repeats it every ~1s, so re-reading a mute channel cannot help; only getting a new
+  one can, and failing fast is what lets the caller go get it.
+- **No switch means no SYN either - don't try to skip the switch.** `perform_switch` reads all six
+  bytes and requires them to be `FF 55 02 00 EE 10`. A two-byte magic dispatch was built
+  (2026-07-28) so an accessory already in iAP2 could open with `FF 5A ...` and go straight to its
+  SYN; **tested on the hardware and reverted - an accessory that does not send the switch never
+  sends a SYN either**, so there is no such state to handle. If the six bytes don't arrive, the
+  channel is dead: drop it and get another.
 - `src/bin/carjack-hci-helper.rs` is a **privileged sidecar**: it sets the CarPlay EIR
   UUID (`ADD_UUID`) and an iPhone-like Class of Device (`SET_DEV_CLASS`,
   `CARPLAY_DEV_CLASS`) over a raw HCI mgmt socket. It takes no arguments and
@@ -116,6 +251,28 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
     twice), EAK, and `rst` -> `Iap2Error::LinkReset`. The session loop only ever sees session
     data. The keepalive/retransmit/ack timers are driven by `wait_for_link_work()` (pure, safe to
     cancel in a `select!`) followed by `maintain()` (transmits - must **not** be inside one).
+- **The head unit walks away ~2s after carjack stops making progress**, and it takes down the
+  *entire* session - Bluetooth included, with an RFCOMM DISC and the AP dropping. Seen twice: 2.0s
+  after RECORD in `cfmoto_12.pcapng` and 2.3s after `assert_modes` in `cfmoto_13.pcapng`, so it is
+  not specifically a post-RECORD video watchdog. The failure looks nothing like "no video" - it
+  looks like the car rebooting, because both radios go at once.
+- **Never pause between `assert_modes` and `setup_screen`.** SETUP has to follow the modes
+  assertion immediately (2ms in `cfmoto_12`, which is the only capture where the car went on to
+  answer RECORD). Putting a wait there cost the session twice - `cfmoto_13` and `cfmoto_14` - and
+  when the unit leaves it drops its AP *and* Bluetooth together, so whatever carjack tries to send
+  next never even reaches the wire (the neighbour stops resolving; you see unanswered NS and
+  DHCP Discovers, not a TCP error).
+- **RECORD is a promise: never send it without a keyframe already in hand.** So the gate
+  (`wait_for_first_keyframe`) sits **after `setup_screen`, before `record`** - and nowhere else.
+  It logs a warning every second it waits.
+- **The encode pipeline is not why anything is slow, but a cold GStreamer registry is.** Measured:
+  `tests/encode_startup.rs` (compositor, **34-66ms** to first keyframe across a no-op reconfigure,
+  a real resize and `max_fps=0`) and `tests/desktop.rs` (portal/PipeWire, **~660ms**). But the
+  *first* `gst::init()` builds the plugin registry - **~4.3s** on the dev box - and in desktop mode
+  that used to happen inside the first session: `cfmoto_14` session 1 took 4.9s to its first
+  keyframe and lost the car, session 2 took 296ms. `run_desktop` now calls `encode::init_gstreamer`
+  at startup (app mode already got it via `resolve_backend`). **Anything that can be warmed up must
+  be warmed up before a session starts** - the unit's tolerance is ~2s.
 - **Keyframes are requested by the car and must actually reach the encoder.** The car sends
   `ForceKeyFrame` over the AirPlay event channel when it loses sync, and catplay refuses delta
   frames (`ScreenTransmitError::NeedsKeyframe`) until the stream opens on one. Both used to be

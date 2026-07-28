@@ -336,7 +336,9 @@ impl RemoteDesktopStream {
     /// Whether touch injection is still working (libei only; the D-Bus path is stateless).
     #[cfg(test)]
     pub fn touch_is_healthy(&self) -> bool {
-        self.ei.as_ref().is_none_or(crate::libei::EiTouch::is_connected)
+        self.ei
+            .as_ref()
+            .is_none_or(crate::libei::EiTouch::is_connected)
     }
 
     /// Warn (once) when the advertised stream size is the desktop's *logical* size while the frames
@@ -450,7 +452,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "opens a portal consent dialog, needs a human"]
     async fn portal_session_uses_libei() -> eyre::Result<()> {
-        let _ = tracing_subscriber::fmt().with_env_filter("debug").try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("debug")
+            .try_init();
         let stream = match super::start_remote_desktop().await {
             Ok(stream) => stream,
             Err(e) => {
