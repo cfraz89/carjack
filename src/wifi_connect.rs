@@ -3,19 +3,16 @@ use enclose::enclose;
 use eyre::{ErrReport, Result, eyre};
 use futures::TryStreamExt;
 use ipnet::IpNet;
-use nmrs::NetworkManager;
 use nmrs::builders::{WifiBand, WifiConnectionBuilder};
+use nmrs::{NetworkManager, Persist};
 use rtnetlink::Handle;
 use rtnetlink::packet_route::address::{
     AddressAttribute, AddressFlags, AddressHeaderFlags, AddressMessage,
 };
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use tokio_util::task::AbortOnDropHandle;
-use zbus::zvariant::{ObjectPath, OwnedValue, Value};
-use zbus::{proxy, zvariant::OwnedObjectPath};
 
 static NETWORK_MANAGER: OnceCell<NetworkManager> = OnceCell::const_new();
 
@@ -37,43 +34,6 @@ pub struct CarWifi {
     pub gateway: IpAddr,
     pub iface: String,
     pub iface_mac: String,
-}
-
-/// Create and activate a WiFi profile that NetworkManager keeps **in memory only**.
-///
-/// `nmrs` wraps `AddAndActivateConnection`, which always writes a profile to disk. The car's SSID
-/// and passphrase change from session to session, so that accumulates a saved profile per run -
-/// hundreds of them. `AddAndActivateConnection2` takes a `persist` option; `memory` keeps the
-/// profile only until NetworkManager restarts.
-async fn add_and_activate_in_memory(
-    settings: HashMap<&str, HashMap<&str, Value<'_>>>,
-) -> Result<(OwnedObjectPath, OwnedObjectPath)> {
-    let conn = zbus::Connection::system().await?;
-    let nm = zbus::Proxy::new(
-        &conn,
-        "org.freedesktop.NetworkManager",
-        "/org/freedesktop/NetworkManager",
-        "org.freedesktop.NetworkManager",
-    )
-    .await?;
-
-    let mut options: HashMap<&str, Value<'_>> = HashMap::new();
-    options.insert("persist", Value::from("memory"));
-
-    // "/" for both device and specific object: let NetworkManager pick the wifi device, as the
-    // previous `interface: None` did.
-    let any = ObjectPath::try_from("/")?;
-    let (conn_path, active_path, _result): (
-        OwnedObjectPath,
-        OwnedObjectPath,
-        HashMap<String, OwnedValue>,
-    ) = nm
-        .call(
-            "AddAndActivateConnection2",
-            &(settings, &any, &any, options),
-        )
-        .await?;
-    Ok((conn_path, active_path))
 }
 
 pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<CarWifi> {
@@ -98,9 +58,14 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
     let car_wifi = enclose!(
         (settings)
             || async {
-                let (conn_path, active_path) = add_and_activate_in_memory(settings).await?;
+                // The car's SSID and passphrase are per session, so a profile written to disk
+                // would only accumulate; `Persist::Memory` drops it when NetworkManager restarts.
+                let (conn_path, active_path) = get_network_manager()
+                    .await
+                    .add_and_activate_connection2(settings, None, None, Persist::Memory)
+                    .await?;
                 tracing::info!("Connection created: {}, active: {}", conn_path, active_path);
-                let car_wifi = get_car_wifi(active_path).await?;
+                let car_wifi = get_car_wifi().await?;
                 Ok::<_, ErrReport>(car_wifi)
             }
     )
@@ -121,24 +86,10 @@ async fn live_connection(ssid: &str) -> Result<Option<CarWifi>> {
     if network.ssid != ssid || network.ip4_address.is_none() {
         return Ok(None);
     }
-    let active_path = active_connection_path(&network.device).await?;
-    Ok(Some(get_car_wifi(active_path).await?))
+    Ok(Some(get_car_wifi().await?))
 }
 
-async fn active_connection_path(iface: &str) -> Result<OwnedObjectPath> {
-    let nm = get_network_manager().await;
-    let device_path = nm.get_device_by_interface(iface).await?;
-    let active = DeviceProxy::new(nm.dbus_connection(), device_path)
-        .await?
-        .active_connection()
-        .await?;
-    if active.as_str() == "/" {
-        return Err(eyre!("{iface} has no active connection"));
-    }
-    Ok(active)
-}
-
-async fn get_car_wifi(active_path: OwnedObjectPath) -> Result<CarWifi> {
+async fn get_car_wifi() -> Result<CarWifi> {
     let network = get_network_manager()
         .await
         .current_network()
@@ -150,7 +101,10 @@ async fn get_car_wifi(active_path: OwnedObjectPath) -> Result<CarWifi> {
     let ipnet = addr.parse::<IpNet>().expect("Error parsing addr");
     let ip = ipnet.addr();
 
-    let gateway = get_gateway(active_path).await?;
+    let gateway: IpAddr = network
+        .gateway4
+        .ok_or(eyre!("No gateway on current connection"))?
+        .parse()?;
 
     Ok(CarWifi {
         ssid: network.ssid,
@@ -268,42 +222,6 @@ pub(crate) async fn get_wifi_mac() -> Result<String> {
         .wifi_device_by_interface(&wifi_device)
         .await?;
     Ok(device.hw_address)
-}
-
-#[proxy(
-    interface = "org.freedesktop.NetworkManager.Connection.Active",
-    default_service = "org.freedesktop.NetworkManager"
-)]
-trait ActiveConnection {
-    #[zbus(property)]
-    fn ip4_config(&self) -> zbus::Result<OwnedObjectPath>;
-}
-#[proxy(
-    interface = "org.freedesktop.NetworkManager.Device",
-    default_service = "org.freedesktop.NetworkManager"
-)]
-trait Device {
-    #[zbus(property)]
-    fn active_connection(&self) -> zbus::Result<OwnedObjectPath>;
-}
-#[proxy(
-    interface = "org.freedesktop.NetworkManager.IP4Config",
-    default_service = "org.freedesktop.NetworkManager"
-)]
-trait IP4Config {
-    #[zbus(property)]
-    fn gateway(&self) -> zbus::Result<String>;
-}
-
-async fn get_gateway(active_path: OwnedObjectPath) -> Result<IpAddr> {
-    let conn = get_network_manager().await.dbus_connection();
-    let active_connection_proxy = ActiveConnectionProxy::new(conn, active_path).await?;
-    let ip4_config_path = active_connection_proxy.ip4_config().await?;
-    tracing::debug!(%ip4_config_path);
-    let ip4_config_proxy = IP4ConfigProxy::new(conn, ip4_config_path).await?;
-    let gateway: IpAddr = ip4_config_proxy.gateway().await?.parse()?;
-    tracing::debug!(?gateway);
-    Ok(gateway)
 }
 
 #[cfg(test)]

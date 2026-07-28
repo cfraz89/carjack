@@ -16,7 +16,7 @@ edition.workspace = true
 default-run = "carjack"
 
 [dependencies]
-nmrs = "3.4.0"
+nmrs = { path = "/var/home/chris/Projects/nmrs/nmrs" }
 backon = "1.6.0"
 bluer = { version = "0.17.4", features = ["full", "rfcomm"] }
 color-eyre = "0.6.5"
