@@ -4,7 +4,7 @@ use eyre::{ErrReport, Result, eyre};
 use futures::TryStreamExt;
 use ipnet::IpNet;
 use nmrs::builders::{WifiBand, WifiConnectionBuilder};
-use nmrs::{NetworkManager, Persist};
+use nmrs::{ActivationOptions, BindActivation, NetworkManager, Persist};
 use rtnetlink::Handle;
 use rtnetlink::packet_route::address::{
     AddressAttribute, AddressFlags, AddressHeaderFlags, AddressMessage,
@@ -58,11 +58,13 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
     let car_wifi = enclose!(
         (settings)
             || async {
-                // The car's SSID and passphrase are per session, so a profile written to disk
-                // would only accumulate; `Persist::Memory` drops it when NetworkManager restarts.
+                // Per-session credentials: the profile should not outlive the process.
+                let options = ActivationOptions::new()
+                    .with_persist(Persist::Memory)
+                    .with_bind_activation(BindActivation::DBusClient);
                 let (conn_path, active_path) = get_network_manager()
                     .await
-                    .add_and_activate_connection2(settings, None, None, Persist::Memory)
+                    .add_and_activate_connection2(settings, None, None, options)
                     .await?;
                 tracing::info!("Connection created: {}, active: {}", conn_path, active_path);
                 let car_wifi = get_car_wifi().await?;
