@@ -59,6 +59,12 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 
 - WiFi connectivity is handled only via NetworkManager (`nmrs`) - there was a
   `nl80211.rs`/`iw` fallback path, it was removed; don't re-add it.
+- **The car's WiFi profile is created in memory, not on disk.** Its SSID and
+  passphrase change per session, so a persistent profile per run accumulates
+  without bound. `nmrs` only wraps `AddAndActivateConnection`, which always
+  persists, so `wifi_connect` calls `AddAndActivateConnection2` over zbus with
+  `persist = "memory"`; NetworkManager then keeps it under `/run` and drops it on
+  restart.
 - The target head unit is **configured, never auto-detected** (`[bluetooth]
   device`, MAC or advertised name). `wireless::find_target_device` looks it up in
   BlueZ's known devices, else waits for it in a discovery aimed at that one

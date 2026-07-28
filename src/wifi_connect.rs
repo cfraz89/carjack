@@ -9,10 +9,12 @@ use rtnetlink::Handle;
 use rtnetlink::packet_route::address::{
     AddressAttribute, AddressFlags, AddressHeaderFlags, AddressMessage,
 };
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use tokio_util::task::AbortOnDropHandle;
+use zbus::zvariant::{ObjectPath, OwnedValue, Value};
 use zbus::{proxy, zvariant::OwnedObjectPath};
 
 static NETWORK_MANAGER: OnceCell<NetworkManager> = OnceCell::const_new();
@@ -37,6 +39,43 @@ pub struct CarWifi {
     pub iface_mac: String,
 }
 
+/// Create and activate a WiFi profile that NetworkManager keeps **in memory only**.
+///
+/// `nmrs` wraps `AddAndActivateConnection`, which always writes a profile to disk. The car's SSID
+/// and passphrase change from session to session, so that accumulates a saved profile per run -
+/// hundreds of them. `AddAndActivateConnection2` takes a `persist` option; `memory` keeps the
+/// profile only until NetworkManager restarts.
+async fn add_and_activate_in_memory(
+    settings: HashMap<&str, HashMap<&str, Value<'_>>>,
+) -> Result<(OwnedObjectPath, OwnedObjectPath)> {
+    let conn = zbus::Connection::system().await?;
+    let nm = zbus::Proxy::new(
+        &conn,
+        "org.freedesktop.NetworkManager",
+        "/org/freedesktop/NetworkManager",
+        "org.freedesktop.NetworkManager",
+    )
+    .await?;
+
+    let mut options: HashMap<&str, Value<'_>> = HashMap::new();
+    options.insert("persist", Value::from("memory"));
+
+    // "/" for both device and specific object: let NetworkManager pick the wifi device, as the
+    // previous `interface: None` did.
+    let any = ObjectPath::try_from("/")?;
+    let (conn_path, active_path, _result): (
+        OwnedObjectPath,
+        OwnedObjectPath,
+        HashMap<String, OwnedValue>,
+    ) = nm
+        .call(
+            "AddAndActivateConnection2",
+            &(settings, &any, &any, options),
+        )
+        .await?;
+    Ok((conn_path, active_path))
+}
+
 pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<CarWifi> {
     match live_connection(ssid).await {
         Ok(Some(car_wifi)) => {
@@ -59,10 +98,7 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
     let car_wifi = enclose!(
         (settings)
             || async {
-                let (conn_path, active_path) = get_network_manager()
-                    .await
-                    .add_and_activate_connection(settings, None, None)
-                    .await?;
+                let (conn_path, active_path) = add_and_activate_in_memory(settings).await?;
                 tracing::info!("Connection created: {}, active: {}", conn_path, active_path);
                 let car_wifi = get_car_wifi(active_path).await?;
                 Ok::<_, ErrReport>(car_wifi)
