@@ -1,6 +1,6 @@
 # Where things stand
 
-**Last updated: 2026-07-27.** This is the living document - if it disagrees with
+**Last updated: 2026-07-31.** This is the living document - if it disagrees with
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
 
@@ -9,6 +9,44 @@ works belong in `CLAUDE.md`, not here.
 A wireless CarPlay bridge that impersonates an iPhone to a car head unit: Bluetooth iAP2 to
 authenticate and get handed the car's WiFi credentials, then CarPlay video over that WiFi via
 AirPlay.
+
+## The blocker on the bike (2026-07-31)
+
+**The head unit deauthenticates us off its own AP 20-45 ms after it answers `assert_modes`, in
+every capture ever taken, and takes the whole session with it.** Established with `iw event -t`
+alongside `cfmoto_16`: `deauth <AP> -> <us> reason 2`, **`disconnected (by AP)`**. Not a local
+fault - that run had `disable_11ac=1` and `power_scheme=1` active and behaved identically.
+
+Everything downstream of the modes assertion is a red herring. SETUP, the screen socket, RECORD and
+keyframe latency are simply what the runs that got further happened to be doing; `cfmoto_13` and
+`cfmoto_14` never sent SETUP at all and died on the same 20-30 ms offset. The per-capture table is
+in the log entry.
+
+`cfmoto_16` is still the furthest the bike has got - fresh association on a new subnet (the first
+run on the in-memory profile, so **that path works**), full AirPlay bootstrap, SETUP answered, both
+sockets up - it just got 45 ms instead of 30.
+
+**Current lead: what carjack tells the bike about itself in `0x4300`.** That message is where the
+device names the station that will join the AP, and `assert_modes` is the first point the unit has
+any reason to check it. Against `iphone-cfmoto.pklg`, three things were wrong - a Bluetooth MAC
+where the iPhone sends a 24-character UDID, an uppercase MAC where the iPhone sends lowercase, and
+a NetworkManager-randomised address that is not even guaranteed to be the one that associates
+(carjack builds a new profile every session). All four fixed and unit-tested, **none tested against
+the bike**.
+
+If that is not it, the next thing to vary is `assert_modes` itself - the payload, or whether the
+main-screen resource is taken at all.
+
+Dead ends, recorded so they are not retried:
+
+- **`swcrypto=1`** - iwlmvm refuses to load with it ("iwlmvm doesn't allow to disable HW crypto").
+- **`disable_11ac=1` + `iwlmvm power_scheme=1`** - no effect; reverted. `iwlwifi: Unhandled alg:
+  0x707` (RX status `SEC_UNKNOWN`) in `cfmoto_15` was a *symptom* of the association being pulled,
+  not a cause.
+- The leftover on-disk `CFMOTO-999700` NM profile (`autoconnect: yes`) is deleted - it was
+  re-associating before carjack started, so carjack always took the "reuse the live connection"
+  path. Gone now, and `cfmoto_16` associated fresh. Full detail in the
+2026-07-31 entry of [investigation-log.md](investigation-log.md).
 
 ## What works
 

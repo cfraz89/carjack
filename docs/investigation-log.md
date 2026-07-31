@@ -12,6 +12,186 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
 
 ## 2026-07
 
+- **2026-07-31 (later): the head unit sends the deauth, and it lands ~80 ms after the AirPlay
+  *screen data socket* opens. `cfmoto_16` + `/tmp/iw-events.log`.**
+  - **No longer an inference.** `iw event -t` running alongside the run:
+
+    ```
+    ...204.215  assoc 92:83:8e:ef:a7:d3 -> fe:b2:9f:ed:ea:72 status: 0: Successful
+    ...204.215  connected to 92:83:8e:ef:a7:d3
+    ...206.269  del station 92:83:8e:ef:a7:d3
+    ...206.271  deauth 92:83:8e:ef:a7:d3 -> fe:b2:9f:ed:ea:72 reason 2
+    ...206.271  disconnected (by AP) reason: 2: Previous authentication no longer valid
+    ```
+
+    `deauth <AP> -> <us>`, **`disconnected (by AP)`**. Every subsequent disconnect in the log is
+    `(local request) reason 3` - NM tearing down afterwards. One AP-sent deauth per run.
+  - **The local-driver theories are dead.** This run had `disable_11ac=Y` and `iwlmvm
+    power_scheme=1` active and behaved identically. `Unhandled alg: 0x707` was a *symptom* of the
+    security association being pulled, not its cause. Both options reverted; `swcrypto=1` is not
+    even accepted by iwlmvm. Nothing on this side prevents the drop.
+  - **Best run against the bike so far**, and the first exercising the in-memory profile: fresh
+    association at 23:06:44.215 on a **new subnet** (192.168.155.x, new stable-privacy link-local
+    `fe80::c384:2032:175e:8bc6`), DHCP in 25 ms, full AirPlay bootstrap, `assert_modes`
+    (385 -> 182), **SETUP answered (314 -> 225)**, event socket up, and the screen data socket
+    established. Only RECORD never went out.
+  - **The trigger is that second socket.** Ordering, to the millisecond:
+
+    | t (23:06:xx) | event |
+    | --- | --- |
+    | 46.162 | event socket 41074 -> 35565 SYN/SYN-ACK/ACK |
+    | 46.177 | screen SETUP (314 bytes) |
+    | 46.1925 | car answers SETUP (225 bytes) |
+    | 46.1937 | **screen data socket 41958 -> 44165 SYN**, ACK at 46.1975 |
+    | **46.271** | **AP deauth** |
+    | 48.389 | Bluetooth ACL drops |
+
+    `cfmoto_12` is the same shape: event socket 45.418, SETUP answered 45.4486, screen socket
+    45.4497, RECORD answered 45.4548 - and the deauth in that same 20:16:45 second. The screen
+    socket carries **no data at all** before the deauth in `cfmoto_16` - three-way handshake and
+    nothing else. The BT link following ~2 s later matches the known "the unit walks away, taking
+    both radios" behaviour.
+  - **Correction, same day: it is not the screen socket - it is `assert_modes`.** The proposed
+    "don't open the screen socket" experiment had already been run by `cfmoto_13` and `cfmoto_14`,
+    which never sent SETUP at all and died anyway. Lining every capture up against the *kernel*
+    clock (the `iw event` timestamp is userspace and lags ~60 ms):
+
+    | capture | car's answer to `assert_modes` | deauth (kernel) | delta |
+    | --- | --- | --- | --- |
+    | `cfmoto_12` | 20:16:45.421940 | 20:16:45.457468 | **35.5 ms** |
+    | `cfmoto_13` | 21:37:07.119807 | 21:37:07.149448 | **29.6 ms** |
+    | `cfmoto_14` s1 | 00:08:36.645846 | 00:08:36.665462 | **19.6 ms** |
+    | `cfmoto_14` s2 | 00:09:14.284908 | 00:09:14.307490 | **22.6 ms** |
+    | `cfmoto_15` | 16:06:07.895420 | 16:06:07.926514 (`Unhandled alg`) | **31.1 ms** |
+    | `cfmoto_16` | 23:06:46.167654 | 23:06:46.212410 | **44.8 ms** |
+
+    **20-45 ms after the car answers the modes assertion, in every capture ever taken.** SETUP, the
+    screen socket, RECORD and keyframe latency are all downstream of it and none of them matter -
+    they are simply what the runs that got that far happened to be doing. The head unit accepts the
+    `ModesChanged` request, replies 200 OK, and then deauthenticates the station.
+  - **Ruled out as a signal:** the car repeats `0x4301` at 45.767, 3.0 s after the first and 0.5 s
+    before the deauth. Tempting, but `iphone-cfmoto.pklg` shows the bike repeating `4301` at a real
+    iPhone too - at 434.414 and 437.427, the same 3.0 s gap - which the phone just bare-acks. The
+    repeat is normal.
+
+- **2026-07-31: what carjack tells the bike about itself in `0x4300` does not match the iPhone.
+  Three differences, from `iphone-cfmoto.pklg`.**
+  - **Why this is the thread to pull:** `0x4300`
+    (`RequestAccessoryWiFiConfigurationInformation`) is where the device tells the accessory *which
+    station will join its AP*. If the bike cannot match the station it sees against what it was
+    told, "I have no valid authentication for you" - reason 2 - is exactly the deauth it would
+    send, and `assert_modes` (claiming the main screen as controller) is the first point at which
+    it has any reason to check.
+  - **The wire encoding was already correct.** `request_accessory_wifi_config_grouped` is pinned
+    byte-for-byte against the iPhone by `wifi_config_request_matches_iphone`, whose test vector
+    already uses a 24-character identifier and a lowercase MAC. The fault was entirely in the
+    values `DeviceIdentity` was built from. Decoded side by side:
+
+    | field | iPhone | carjack (before) |
+    | --- | --- | --- |
+    | group 0 identifier | `00008130001C29C40206001C` - 24-char UDID | `4C:79:6E:DA:29:4B` - the **Bluetooth MAC**, 17 chars |
+    | group 1 identifier | `ac:df:a1:b3:87:9d` - **lowercase** | `FE:B2:9F:ED:EA:72` - **uppercase** |
+    | that address | `ac:df:a1` - a real Apple OUI | locally administered, **NetworkManager-randomised** |
+
+  - **The third one is a latent bug in its own right.** `get_wifi_mac` read the device's *current*
+    address, but NM randomises per connection profile and carjack builds a **new in-memory profile
+    every session** - so the address announced over Bluetooth before associating is not reliably
+    the address that then associates. On this machine the permanent address is `4c:79:6e:da:29:47`
+    while the device was carrying `fe:b2:9f:ed:ea:72` during the car runs and `1a:00:63:87:7a:49`
+    afterwards on another profile.
+  - **Fixed:** `transport_identifier` now emits the 24-character shape (zero-padded adapter
+    address); the MAC is lowercased; `get_wifi_mac` returns `permanent_hw_address`; and the car's
+    profile pins `802-11-wireless.assigned-mac-address = "permanent"` so the announced address is
+    the one that associates. The D-Bus key name was confirmed against a throwaway NM profile rather
+    than guessed - NM stores the keyfile's `cloned-mac-address` as `assigned-mac-address` over
+    D-Bus. **Untested against the bike.**
+  - **Also worth correcting:** `captures.md` says the iPhone sends `WirelessCarPlayUpdate`,
+    `DeviceLanguageUpdate` and `NowPlayingUpdate` after the WiFi config. That is not in
+    `iphone-cfmoto.pklg` - its iAP2 traffic ends at the second `4301` and its bare ack, 29 frames
+    total. Whichever capture that came from, it is not this one.
+  - **Not changed, but still a divergence:** carjack sends `0xEA00`
+    (`StartExternalAccessoryProtocolSession`, `com.apple.carplay`); the iPhone sends none. It is
+    3.5 s upstream of the deauth so it is not the trigger, but it is a state the bike never sees
+    from a real phone.
+
+- **2026-07-31: the session does not die at SETUP - the WiFi association does. `cfmoto_15` +
+  `cfmoto_2.log`, desktop mode against the bike.**
+  - **The SETUP-timing fix works.** carjack sends screen SETUP **12 ms** after the modes response
+    (frame 563, 16:06:07.9075), so nothing sits between `assert_modes` and `setup_screen` any more.
+    The AirPlay exchange is the same shape as `cfmoto_12` right up to the point it stops:
+
+    | | `cfmoto_12` (reached RECORD) | `cfmoto_15` |
+    | --- | --- | --- |
+    | `assert_modes` req -> resp | 385 -> 182 | 385 -> 182 |
+    | screen SETUP | 314 -> **225** | 314 -> **nothing** |
+    | RECORD | 80 -> 73 | never sent |
+
+  - **The car never even TCP-ACKs SETUP.** No ack, no RST, no FIN - the segment is retransmitted
+    four times (t=08.12, 08.33, 08.74, 09.59) into silence. The car's last packet in either
+    direction is a UDP timing reply at 16:06:07.919; after that, unanswered neighbour solicitations
+    and DHCP Discovers. So the bytes went to a dead radio link, not to a CarPlay stack that
+    rejected them.
+  - **The journal names the cause**, 31 ms after the modes exchange:
+
+    ```
+    16:06:07.9265  iwlwifi 0000:00:14.3: Unhandled alg: 0x707
+    16:06:09.7794  wlp0s20f3: deauthenticating from 92:83:8e:ef:a7:d3
+                   by local choice (Reason: 2=PREV_AUTH_NOT_VALID)
+    ```
+
+    `Unhandled alg` is `iwl_mvm_rx_crypto` reporting an RX frame whose hardware-decrypt status it
+    cannot classify (`0x700` = the security-encryption-error bits). mac80211 drops the association
+    1.85 s later. carjack does not notice for another 9 s, when `setup_screen` finally gives up
+    ("Request/channel timeout" at 06:06:18.9).
+  - **This has happened on every bike run, including the one that "worked".** Checking the journal
+    against each capture, every session ends in a reason-2 `PREV_AUTH_NOT_VALID` deauth at the
+    moment the screen session starts:
+
+    | capture | deauth | who sent it | relative to the session |
+    | --- | --- | --- | --- |
+    | `cfmoto_12` | 20:16:45 | **the AP** | RECORD 200 OK landed at 45.45 - it finished microseconds ahead |
+    | `cfmoto_13` | 21:37:07 | **the AP** | at the modes exchange (07.116) |
+    | `cfmoto_14` | 00:08:36, 00:09:14 | **the AP** | both sessions |
+    | `cfmoto_15` | 16:06:09.78 | locally, after the decrypt error | 1.9 s after the modes exchange |
+
+    So `cfmoto_12` was not a working configuration that later regressed - it was a race won by a
+    hair. **The security association between the laptop and the head unit's AP breaks the instant
+    CarPlay video is meant to start**, and it has been under every capture since. The SETUP-timing
+    work fixed a real bug; it was not this one.
+  - **carjack was riding a stale association.** The log says `Already connected to CFMOTO-999700;
+    reusing the live connection`, because an on-disk NM profile
+    (`CFMOTO-999700-8da53b88-....nmconnection`, mtime 2026-07-28 00:09, predating the in-memory
+    change, `autoconnect: yes`) auto-activated at **16:05:23** - 39 s before carjack even started
+    its session. Two consequences: the association was 46 s old rather than fresh (`cfmoto_12`, the
+    run that got furthest, is the only one that freshly associated), and the
+    `AddAndActivateConnection2` / `persist = "memory"` path has never actually run against the car.
+  - **Changed:** deleted that profile. Also tried `options iwlwifi swcrypto=1` to take the failing
+    hardware decrypt engine out of the path - **that does not exist as an option**: iwlmvm refuses
+    it outright (`iwlmvm doesn't allow to disable HW crypto, check swcrypto module parameter`) and
+    the error persists. Reverted. Replaced with `/etc/modprobe.d/iwlwifi-carplay.conf`:
+    `disable_11ac=1` (this card already needs `disable_11ax=1` to negotiate rates with this AP, and
+    a mis-handled A-MPDU/A-MSDU presents exactly as SEC_UNKNOWN) and `iwlmvm power_scheme=1` (CAM -
+    buffered group-addressed frames across a DTIM/rekey are the other classic source). **Untested.**
+  - **The status word decodes.** `0x707` is the full `iwl_rx_mpdu_desc` status: bits 0-2
+    `CRC_OK | OVERRUN_OK | SRC_STA_FOUND`, and the security field `0x700` = **`SEC_UNKNOWN`**, with
+    `KEY_VALID`, `ICV_OK` and `MIC_OK` all clear. So the frame arrived intact and from a known
+    station, and the hardware could not work out which cipher applied to it - a protected frame
+    with no matching key, not a corrupt one.
+  - **A local module option can only ever fix the `cfmoto_15` variant.** In `12`/`13`/`14` the
+    **AP** sent the deauth, which no driver tweak touches. And after the drop, the reassociation at
+    16:06:11.78 sat in `4way_handshake` for the full 10 s and timed out with Bluetooth completely
+    idle - the head unit's own AP is unstable at exactly that moment, which reads more like it
+    restarting its AP/WPA state when the screen session starts than like anything local.
+  - **Hardware note:** the card is a **CNVi** part (Intel 500-series, AX201), so Bluetooth and WiFi
+    are the same silicon on the same antennas - and carjack holds a continuously busy BT ACL
+    (iAP2 + HFP + A2DP + AVRCP, active mode, multi-slot, no sniff) across the whole session. No
+    SCO/eSCO is ever set up (checked - the capture has no `Setup Synchronous Connection`), so it is
+    ACL airtime only, but it is constant. `bt_coex_active=0` is the test for that, held back
+    because turning coex off can degrade the Bluetooth link, which is the fragile half.
+  - **Worth fixing in carjack regardless:** the radio died at 07.92 and the first sign in the log is
+    a generic `Request/channel timeout` 11 s later. Watching NM's device state and logging "the
+    car's WiFi link dropped" would have made this a 30-second diagnosis.
+
 - **2026-07-28: a full session works on the AUTO BOX, 4/4 runs. Three faults, all required.**
   - **Method:** iterated `just test-run` directly against the bench unit (setcap disabled, so no
     human gate; `--source app` to skip the portal consent dialog, since the bug was below the video
