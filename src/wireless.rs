@@ -148,6 +148,14 @@ pub struct IapHost {
     _iap_v2: Option<ProfileHandle>,
 }
 
+/// The 24-character device identifier the accessory expects in `RequestAccessoryWiFiConfiguration`
+/// (an iPhone sends its UDID there, not an address). Derived from the adapter address so it is
+/// stable for a given machine.
+fn transport_identifier(addr: bluer::Address) -> String {
+    let hex: String = addr.iter().map(|b| format!("{b:02X}")).collect();
+    format!("{hex:0>24}")
+}
+
 impl IapHost {
     /// Register everything once.
     pub async fn start() -> Result<Self> {
@@ -158,7 +166,7 @@ impl IapHost {
         adapter.set_powered(true).await?;
         let identity = DeviceIdentity {
             name: String::from("carjack"),
-            transport_identifier: adapter.address().await?.to_string(),
+            transport_identifier: transport_identifier(adapter.address().await?),
             wifi_mac: get_wifi_mac().await?,
         };
         let advertisement = publish_advertisement(&adapter).await?;
@@ -499,4 +507,18 @@ async fn prepare_device(device: Device) -> Result<Device> {
     }
     let _ = device.set_trusted(true).await;
     Ok(device)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transport_identifier;
+
+    /// The accessory expects the iPhone's 24-character identifier shape here, not an address -
+    /// a 17-character MAC string in this field is what the bike was being sent.
+    #[test]
+    fn transport_identifier_is_24_hex_chars() {
+        let id = transport_identifier(bluer::Address::new([0x4c, 0x79, 0x6e, 0xda, 0x29, 0x4b]));
+        assert_eq!(id, "0000000000004C796EDA294B");
+        assert_eq!(id.len(), 24);
+    }
 }

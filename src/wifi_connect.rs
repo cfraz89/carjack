@@ -13,6 +13,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use tokio_util::task::AbortOnDropHandle;
+use zbus::zvariant::Value;
 
 static NETWORK_MANAGER: OnceCell<NetworkManager> = OnceCell::const_new();
 
@@ -48,12 +49,18 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
         }
     }
 
-    let settings = WifiConnectionBuilder::new(ssid)
+    let mut settings = WifiConnectionBuilder::new(ssid)
         .wpa_psk(passphrase)
         .band(WifiBand::A)
         .hidden(true)
         .ipv4_auto()
         .build();
+    // The accessory is told our station address over iAP2 before we associate, so the address it
+    // is told has to be the one it then sees. NetworkManager randomises per profile by default,
+    // and this profile is new every session - pin it to the permanent address instead.
+    if let Some(wireless) = settings.get_mut("802-11-wireless") {
+        wireless.insert("assigned-mac-address", Value::from("permanent"));
+    }
 
     let car_wifi = enclose!(
         (settings)
@@ -230,7 +237,12 @@ pub(crate) async fn get_wifi_mac() -> Result<String> {
         .await
         .wifi_device_by_interface(&wifi_device)
         .await?;
-    Ok(device.hw_address)
+    // The permanent address, not the current one: NetworkManager randomises per profile, and the
+    // car's connection pins itself to `permanent` so that what we announce is what associates.
+    Ok(device
+        .permanent_hw_address
+        .unwrap_or(device.hw_address)
+        .to_lowercase())
 }
 
 #[cfg(test)]
