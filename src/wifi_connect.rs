@@ -97,37 +97,28 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
 
 /// The connection profile for the car's access point.
 fn car_profile(ssid: &str, passphrase: &str) -> ConnectionProfile {
-    let mut profile = ConnectionProfile {
-        wireless: Some(WirelessSetting {
-            ssid: Some(Ssid::from(ssid)),
-            mode: Some(WirelessMode::Infrastructure),
-            band: Some(WirelessBand::A),
-            hidden: Some(true),
-            // The accessory is told our station address over iAP2 before we associate, so the address
-            // it is told has to be the one it then sees. NetworkManager randomises per profile by
-            // default, and this profile is new every session - pin it to the permanent address.
-            assigned_mac_address: Some(AssignedMacAddress::Permanent),
-            ..Default::default()
-        }),
-        wireless_security: Some(WirelessSecuritySetting {
-            key_mgmt: Some(WirelessSecurityKeyMgmt::WpaPsk),
-            psk: Some(String::from(passphrase)),
-            ..Default::default()
-        }),
-        ipv4: Some(Ipv4Setting {
-            method: Some(Ipv4Method::Auto),
-            ..Default::default()
-        }),
+    ConnectionProfile::new(ssid)
+        .wireless(
+            WirelessSetting::default()
+                .ssid(ssid)
+                .mode(WirelessMode::Infrastructure)
+                .band(WirelessBand::A)
+                .hidden(true)
+                // The accessory is told our station address over iAP2 before we associate, so the address
+                // it is told has to be the one it then sees. NetworkManager randomises per profile by
+                // default, and this profile is new every session - pin it to the permanent address.
+                .assigned_mac_address(AssignedMacAddress::Permanent),
+        )
+        .wireless_security(
+            WirelessSecuritySetting::default()
+                .key_mgmt(WirelessSecurityKeyMgmt::WpaPsk)
+                .psk(passphrase),
+        )
+        .ipv4(Ipv4Setting::default().method(Ipv4Method::Auto))
         // Link-local rather than `auto`: the car answers no router solicitation, so SLAAC would only
         // ever time out, and the AirPlay address it hands us over iAP2 is link-local anyway. It also
         // makes NetworkManager's `IP6_READY` mean exactly "the link-local address is usable".
-        ipv6: Some(Ipv6Setting {
-            method: Some(Ipv6Method::LinkLocal),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    profile
+        .ipv6(Ipv6Setting::default().method(Ipv6Method::LinkLocal))
 }
 
 /// Wait until the activation has both address families configured.
