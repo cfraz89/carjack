@@ -59,8 +59,10 @@ build +flags="":
 test +flags="":
     {{toolbox_build}}cargo test {{flags}} < /dev/null
 
-test-bin +flags="": 
-    cargo test --bin carjack {{flags}} < /dev/null
+# The carjack binary's own unit tests. Needs the toolbox like `just build` - the binary links
+# dbus/EGL/gbm/gstreamer, none of which the host has.
+test-bin +flags="":
+    {{toolbox_build}}cargo test --bin carjack {{flags}} < /dev/null
 
 # The iAP2 protocol unit tests (message encode/decode against bytes captured from a working
 # iPhone session). Pure Rust - no GPU, gstreamer or toolbox needed, unlike `just test`.
