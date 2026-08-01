@@ -118,11 +118,19 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   on a channel opened after a relink; it costs ~11s once, then the retry loop recovers and every
   later (bonded) run takes the first channel. It is **not** an SDP-registration race: registering
   before pairing was tried specifically to fix this and changed nothing, which is why the profile
-  now goes up in `IapHost::start` (a correct ordering worth keeping, but not a fix). Nor is it the
-  accessory profile - the silent channel arrives on the device profile with no client profile
-  registered at all. Untested top suspect: `carjack-hci-helper`'s CarPlay EIR UUID and iPhone-like
-  Class of Device, which are exactly what a unit inspects when classifying what it just bonded with
-  and are currently switched off, so we bond as a generic computer.
+  now goes up in `IapHost::start` (a correct ordering worth keeping, but not a fix). The dead
+  channel is independent of **which profile carries it** (device or accessory), **who opened it**
+  (the unit's own page, or a deliberate `connect_profile` to the accessory's service after pairing
+  settles), and **who speaks first** - sending the switch instead of waiting for it gets no echo
+  either, so the channel is mute in both directions. On a channel that works the unit sends the
+  switch ~1s in, unprompted. Reads more like the unit's iAP service not being bound to that first
+  channel than a protocol error our side; cycling the link is the only thing that has produced a
+  live one. Untested: `carjack-hci-helper`'s CarPlay EIR UUID and iPhone-like Class of Device,
+  currently switched off, so we bond as a generic computer.
+  Also ruled out by the same runs: the documented first-connection direction (**iPhone connects to
+  the accessory's channel, the accessory only initiates on later connections** -
+  <https://wiomoc.de/misc/posts/mfi_iap.html>) does not apply here - this unit pages *us* on a
+  fresh bond, and paging it instead changes nothing.
 - **Skipping the startup relink does not avoid a relink**, it defers it to the failure path and
   costs ~4s (unbonded, discovery to link: 10.8s with, 14.6s without). A device channel that carries
   the switch has only ever appeared *after* a relink's disconnect - in the no-startup-relink run the
