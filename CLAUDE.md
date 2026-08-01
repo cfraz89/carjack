@@ -113,10 +113,19 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   SDP search as the link comes up.
 - **`auto_connect` on the client profile follows the bond state** (`!was_paired`). It is what makes
   BlueZ open the outbound channel on link-up; once bonded the unit opens its own, so paging out as
-  well only yields a redundant channel. Every switch ever observed arrived on the device profile -
-  accepting both anyway costs nothing (a wrong channel just fails the switch and the retry loop
-  re-arms) and it is what answers the outbound channel rather than leaving it to pin an fd, since
-  bluer buffers one request per profile (`mpsc::channel(1)`) behind BlueZ's `NewConnection` call.
+  well only yields a redundant channel. **No switch has ever arrived on the accessory profile.**
+  Unbonded, it is offered first and then aborted ~120us after accept (fd already dead), and the
+  unit's device channel follows ~4s later and carries the session; bonded, it is not offered at
+  all. Both profiles are accepted on anyway: a dead channel just fails the switch and the retry
+  loop re-arms, and answering it beats leaving it to pin an fd, since bluer buffers one request per
+  profile (`mpsc::channel(1)`) behind BlueZ's `NewConnection` call.
+- **Skipping the startup relink does not avoid a relink**, it defers it to the failure path and
+  costs ~4s (unbonded, discovery to link: 10.8s with, 14.6s without). Across both unbonded runs a
+  device channel has only ever appeared *after* a relink's disconnect - in the no-startup-relink
+  run the pairing-established link sat live for 5s carrying nothing but our own outbound channel,
+  and the device channel came 3.9s after the disconnect. Suggestive, not conclusive: the accessory
+  failure is what triggers that relink, so a relink with no accessory attempt in front of it is
+  what would actually separate the two.
 - **One channel per attempt.** Handshaking several concurrently was built and removed: units offer
   channels strictly sequentially - our own accessory channel first, which never carries the switch,
   then the unit's device channel, which does.
