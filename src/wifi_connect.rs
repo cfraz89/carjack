@@ -2,22 +2,20 @@ use backon::{ConstantBuilder, Retryable, RetryableWithContext};
 use eyre::{Result, eyre};
 use futures::{StreamExt, TryStreamExt};
 use nm_automata::{
-    ActivationStateFlags, ActiveConnectionState, ActiveProxy, AssignedMacAddress,
-    ConnectionProfile, ConnectionSetting, DeviceProxy, DeviceState, DeviceType, Ipv4Method,
-    Ipv4Setting, Ipv6Method, Ipv6Setting, NetworkManagerProxy, NmPath, NonEmpty, ProxyExt, Ssid,
-    WirelessBand, WirelessMode, WirelessProxy, WirelessSecurityKeyMgmt, WirelessSecuritySetting,
-    WirelessSetting,
+    ActivationBinding, ActivationOptions, ActivationPersist, ActivationStateFlags,
+    ActiveConnectionState, ActiveProxy, AssignedMacAddress, ConnectionProfile, DeviceProxy,
+    DeviceState, DeviceType, Ipv4Method, Ipv4Setting, Ipv6Method, Ipv6Setting, NetworkManagerProxy,
+    NonEmpty, ProxyExt, Ssid, WirelessBand, WirelessMode, WirelessProxy, WirelessSecurityKeyMgmt,
+    WirelessSecuritySetting, WirelessSetting,
 };
 use rtnetlink::Handle;
 use rtnetlink::packet_route::address::{
     AddressAttribute, AddressFlags, AddressHeaderFlags, AddressMessage,
 };
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use tokio_util::task::AbortOnDropHandle;
-use zbus::zvariant::Value;
 
 /// How long to give NetworkManager to bring the car's connection all the way up before treating
 /// the attempt as failed and retrying it. Association plus DHCP is a couple of seconds when it
@@ -67,22 +65,20 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
     (|| async {
         let nm = get_network_manager().await;
         let device = wifi_device().await?;
-        // Per-session credentials: the profile should not outlive the process, and the SSID and
-        // passphrase change every session, so a profile per run would accumulate on disk.
-        let persist = Value::from("memory");
-        let bind = Value::from("dbus-client");
-        let options = HashMap::from([("persist", &persist), ("bind-activation", &bind)]);
-        let (conn_path, active_path, _) = nm
+        let (conn, active, _) = nm
             .add_and_activate_connection2(
                 &profile,
                 &device.object_path(),
                 &Default::default(),
-                options,
+                // Per-session credentials: the profile should not outlive the process, and the SSID and
+                // passphrase change every session, so a profile per run would accumulate on disk.
+                &ActivationOptions::default()
+                    .persist(ActivationPersist::Memory)
+                    .bind_activation(ActivationBinding::DbusClient),
             )
             .await?;
-        tracing::info!("Connection created: {conn_path}, active: {active_path}");
+        tracing::info!(path = ?conn.object_path(), "Connection created");
 
-        let active = active_path.connect(nm.inner().connection()).await?;
         tokio::time::timeout(ACTIVATION_TIMEOUT, wait_for_activation(&active))
             .await
             .map_err(|_| eyre!("Timed out bringing up the car's WiFi connection"))??;
@@ -185,11 +181,16 @@ async fn live_connection(ssid: &str) -> Result<Option<CarWifi>> {
 
 /// The SSID the device is currently associated with, if it is associated at all.
 async fn current_ssid(device: &DeviceProxy<'_>) -> Result<Option<Ssid>> {
-    let wifi: WirelessProxy = device.cast().await?;
-    let Some(access_point) = wifi.active_access_point().await? else {
-        return Ok(None);
+    let ssid = match device
+        .cast::<WirelessProxy>()
+        .await?
+        .active_access_point()
+        .await?
+    {
+        Some(access_point) => Some(access_point.ssid().await?),
+        None => None,
     };
-    Ok(Some(access_point.ssid().await?))
+    Ok(ssid)
 }
 
 /// What the rest of carjack needs from an activated connection to the car.
