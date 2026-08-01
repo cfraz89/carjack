@@ -171,6 +171,75 @@ advertisement, iAP profile registrations - lives in an `IapHost` created once pe
 `run_app`/`run_desktop` and threaded through to `wireless_carplay`. It is an owned value, not a
 global; dropping it deregisters the profiles, which is exactly the failure it exists to prevent.
 
+## Fixed: nm-automata serialised a profile that dbus-broker rejected (2026-08-01)
+
+For a while roughly half of all runs died before WiFi, unrecoverably - the bus dropped carjack's
+connection, so every retry and every following session failed `Broken pipe` on a dead cached
+proxy. The broker said why:
+
+```
+dbus-broker[1031]: Peer :1.917 is being disconnected as it sent a message with an invalid body.
+```
+
+**zvariant serialises a value twice** - once to size the buffer, then again to fill it - and the
+length written into the message comes from the first pass. `ConnectionProfile::serialize` called
+`to_map()`, which builds a **fresh `HashMap` every call**, so the two passes iterated in
+different orders; dict entries are padded to their alignment, so a different order is a different
+length. The message then declared one length and carried another. Same profile, back to back:
+99 bytes or 102 bytes depending on the call, and `serialized_size` disagreeing with `to_bytes`.
+
+The fix is in nm-automata (`settings::serialize_profile` / `serialize_setting`, and the two
+templates in `codegen/src/render.rs` that emit the impls): serialise through a key-ordered view,
+so the layout cannot depend on which map instance produced it. D-Bus dictionaries are unordered,
+so nothing downstream can tell. Three regression tests in `nm-automata/tests/serialisation.rs`
+pin it - the crucial one being that reserved size must equal bytes written.
+
+Verified: the profile round-trip test went 15/15 (was ~50%), a raw send went 20/20, and the bench
+unit ran clean with no retries.
+
+Worth remembering, because both misled for a while: the same symptom was first blamed on leftover
+`carplay_wifi_*` profiles (deleting them "fixed" it - that was a lucky process) and then on
+`persist=volatile` (changed nothing, reverted). A ~50% failure that follows process boundaries is
+a hash-order tell; chasing it as *state* wasted the most time.
+
+## Housekeeping landed 2026-08-01 (unrun against a car)
+
+Not aimed at the deauth; all three are things that were making iteration harder.
+
+- **NetworkManager now goes through `nm-automata`**, our own bindings generated in full from
+  NetworkManager's spec, replacing the hand-written `nmrs`. The car's profile is a typed
+  `ConnectionProfile` rather than a settings map with two properties patched in by string key -
+  and the values are typed too, not strings spelled by hand: `WirelessMode::Infrastructure`,
+  `WirelessBand::A`, `WirelessSecurityKeyMgmt::WpaPsk`, `AssignedMacAddress::Permanent`,
+  `Ipv4Method::Auto`, `Ipv6Method::LinkLocal`, and an `Ssid` (bytes, as an access point actually
+  names itself) that the current-network comparison goes through instead of `String::from_utf8`.
+  A property whose object is absent now reads as `None` rather than a proxy for `/`, so
+  `current_ssid` no longer compares a path against a literal and `car_wifi` says plainly that the
+  activation has no IPv4 configuration yet - which is what the stray `IP4Config ... path "/"`
+  warning in the logs was.
+  Three `#[ignore]` tests in `wifi_connect` check it against the running daemon: the read path
+  (`live_connection`, the permanent MAC) and a round-trip of the car's profile through
+  `AddConnectionUnsaved` → `GetSettings` → `Delete`. The round-trip one is what surfaced the
+  serialisation bug above - run it a few times, not once, since that failure was intermittent.
+  They share one tokio runtime rather than taking one each: `get_network_manager` caches its
+  D-Bus connection for the process, and a `#[tokio::test]` dropping its own runtime kills that
+  connection's driver task, so the next test to use it blocks forever.
+- **The activation gate needs `IP4_READY` *and* `IP6_READY`, not just `Activated`.** Caught on
+  the bench: NetworkManager reports a connection activated once one address family is done, so
+  gating on the state alone handed back a connection whose `Ip4Config` was still `/` and the
+  attempt failed into a silent retry (a second profile, no log line). backon now `notify`s, so a
+  retry says why.
+- **`ipv6.method` is now `link-local`, and the IPv6 gate is `IP6_READY`.** It was defaulting to
+  `auto`, i.e. waiting on SLAAC - and the car answers no router solicitation, in `cfmoto_12` or
+  `cfmoto_16` (only our own RSes appear, retried into silence). The rtnetlink DAD watcher is
+  still called and now logs how long it waited *after* `IP6_READY`; if that stays at zero over a
+  few sessions, the flag is sufficient and `wait_for_link_local` and the `rtnetlink` dependency
+  can both go.
+- **The HCI sidecar is no longer invoked**, and `just build` no longer setcaps it (`just setcap`
+  does it by hand). Neither the CarPlay EIR UUID nor the iPhone-like class of device was ever
+  shown to be required, and granting `cap_net_admin` on every build prompted through polkit,
+  which broke non-interactive runs. `src/bin/carjack-hci-helper.rs` is kept, unused.
+
 ## Next move
 
 0. **Count the two new page-outcome log lines.** "Outbound page succeeded" vs "Outbound page timed
@@ -197,6 +266,8 @@ global; dropping it deregisters the profiles, which is exactly the failure it ex
    - the car does *not* send RFCOMM DISC ~2 s later.
 2. **Then** the video path proper: whether the car requests keyframes, whether backpressure
    fires, and whether the picture holds up. Frame orientation is the first thing to eyeball.
+   While you are in the log, read the `link-local ... is usable as a source address, N after
+   IP6_READY` line - that is the whole test of whether the DAD watcher can be deleted.
 3. **Also retest the bench unit** - the RECORD gate is on the shared `run_video_stream` path, so
    it affects the AUTO BOX too.
 

@@ -1,11 +1,14 @@
 set dotenv-load
 mod armbian
 
+# Grant the `carjack-hci-helper` sidecar the cap_net_admin it needs for the raw HCI mgmt socket.
+# Not part of `build` - the sidecar is currently unused (see src/bin/carjack-hci-helper.rs), and
+# escalating on every build prompts through polkit.
 [script]
-_setcap +flags="":
-    # Only the tiny `carjack-hci-helper` sidecar carries cap_net_admin (for the raw HCI mgmt socket).
-    # The main carjack binary stays unprivileged so xdg-desktop-portal can introspect it in
-    # desktop mode (a capability-carrying process is /proc-locked to root under fs.suid_dumpable=2).
+setcap +flags="":
+    # Only the sidecar carries the capability. The main carjack binary stays unprivileged so
+    # xdg-desktop-portal can introspect it in desktop mode (a capability-carrying process is
+    # /proc-locked to root under fs.suid_dumpable=2).
     binary="target/debug/carjack-hci-helper"
     case " {{flags}} " in *" --release "*|*" -r "*) binary="target/release/carjack-hci-helper";; esac
     # Only escalate when the capability is actually missing. Relinking the sidecar drops the cap,
@@ -49,7 +52,7 @@ test-run timeout="60" +flags="": (build flags)
     waydroid session stop || true
     timeout --foreground --kill-after=5s "{{timeout}}s" cargo run {{flags}} < /dev/null || true
 
-build +flags="": && (_setcap flags)
+build +flags="":
     {{toolbox_build}}cargo build {{flags}} < /dev/null
 
 # Run cargo tests

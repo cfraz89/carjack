@@ -57,14 +57,26 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 
 ## CarPlay / iAP2 protocol notes
 
-- WiFi connectivity is handled only via NetworkManager (`nmrs`) - there was a
-  `nl80211.rs`/`iw` fallback path, it was removed; don't re-add it.
+- WiFi connectivity is handled only via NetworkManager (`nm-automata`, our own
+  fully-generated bindings) - there was a `nl80211.rs`/`iw` fallback path, it was
+  removed; don't re-add it. Every profile property is an `Option`: absent means
+  "NetworkManager decides", so only set what actually matters.
 - **The car's WiFi profile is created in memory, not on disk.** Its SSID and
   passphrase change per session, so a persistent profile per run accumulates
-  without bound. `nmrs` only wraps `AddAndActivateConnection`, which always
-  persists, so `wifi_connect` calls `AddAndActivateConnection2` over zbus with
-  `persist = "memory"`; NetworkManager then keeps it under `/run` and drops it on
-  restart.
+  without bound. `wifi_connect` calls `AddAndActivateConnection2` with
+  `persist = "memory"` and `bind-activation = "dbus-client"`; NetworkManager then
+  keeps it under `/run` and drops it when carjack's bus connection goes - which is
+  why the `NetworkManagerProxy` is a process-lifetime `OnceCell`.
+- **The car's profile sets `ipv6.method = "link-local"`.** The car answers no
+  router solicitation, so `auto` can only ever time out on SLAAC; and its AirPlay
+  address is link-local anyway. That setting is also what makes the activation's
+  `IP6_READY` state flag mean "the link-local address has finished duplicate-address
+  detection" - a link-local destination is unreachable from a *tentative* source
+  (`connect()` fails `EADDRNOTAVAIL` before anything hits the wire), so
+  `wait_for_activation` gates on that flag. The older rtnetlink DAD watcher
+  (`wait_for_link_local`) is still called from `main.rs` to check the flag against
+  reality; it logs how long it had to wait, and once that stays at zero over a few
+  car sessions it can go.
 - The target head unit is **configured, never auto-detected** (`[bluetooth]
   device`, MAC or advertised name). `wireless::find_target_device` looks it up in
   BlueZ's known devices, else waits for it in a discovery aimed at that one
@@ -111,16 +123,17 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   help; only getting a different one can.
 - **No switch means no SYN either - don't try to skip the switch.** An accessory that does not send
   `FF 55 02 00 EE 10` never sends a SYN either, so there is no already-switched state to handle.
-- `src/bin/carjack-hci-helper.rs` is a **privileged sidecar**: it sets the CarPlay EIR
-  UUID (`ADD_UUID`) and an iPhone-like Class of Device (`SET_DEV_CLASS`,
-  `CARPLAY_DEV_CLASS`) over a raw HCI mgmt socket. It takes no arguments and
-  resolves the adapter itself via bluer's default adapter. **`cap_net_admin`
-  lives on this binary, never on the main `carjack` one** - a
-  capability-carrying process is /proc-locked to root under
-  `fs.suid_dumpable=2`, which makes xdg-desktop-portal fail to introspect it
-  ("Unable to open /proc/<pid>/root") and breaks desktop mode entirely.
-  `just build`'s `_setcap` recipe applies it, skipping the `run0` prompt when
-  `getcap` already shows the capability.
+- `src/bin/carjack-hci-helper.rs` is a **privileged sidecar, currently not invoked**: it sets
+  the CarPlay EIR UUID (`ADD_UUID`) and an iPhone-like Class of Device
+  (`SET_DEV_CLASS`, `CARPLAY_DEV_CLASS`) over a raw HCI mgmt socket. Neither
+  tweak is known to be required, and granting the capability on every build
+  prompted through polkit, so `IapHost::start` no longer spawns it and `just
+  build` no longer setcaps it - `just setcap` does that by hand if it is
+  re-enabled. **If it ever is: `cap_net_admin` lives on this binary, never on
+  the main `carjack` one** - a capability-carrying process is /proc-locked to
+  root under `fs.suid_dumpable=2`, which makes xdg-desktop-portal fail to
+  introspect it ("Unable to open /proc/<pid>/root") and breaks desktop mode
+  entirely.
 - iAP2 magic bytes are `0xFF 0x5A`; the iAP1 switch-to-iAP2 command starts with
   `FF 55 02 00 EE 10`.
 - AirPlay/CarPlay video runs over TCP port 7000 on the car.

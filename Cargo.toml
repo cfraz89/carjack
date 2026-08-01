@@ -16,7 +16,8 @@ edition.workspace = true
 default-run = "carjack"
 
 [dependencies]
-nmrs = { path = "/var/home/chris/Projects/nmrs/nmrs" }
+# Defaults off deliberately: `tokio` alone would leave zbus's `async-io` enabled too.
+nm-automata = { git = "ssh://git@github.com/cfraz89/nm-automata.git", default-features = false, features = ["tokio"] }
 backon = "1.6.0"
 bluer = { version = "0.17.4", features = ["full", "rfcomm"] }
 color-eyre = "0.6.5"
@@ -67,8 +68,6 @@ serde_json = "1.0.151"
 ashpd = { version = "0.13", default-features = false, features = ["remote_desktop", "screencast", "tokio"] }
 zbus = { version = "5.18.0", features = ["tokio"] }
 thiserror = "2.0.19"
-ipnet = "2.12.0"
-enclose = "1.2.1"
 reis = { version = "0.7.0", features = ["tokio"] }
 rtnetlink = "0.21.0"
 

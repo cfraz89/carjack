@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::OsString,
     pin::Pin,
     sync::Arc,
     time::Duration,
@@ -24,7 +23,6 @@ use libcarjack::{
     carplay_session::{DeviceIdentity, WifiCredentials},
     uuid::{CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID, IAP2_UUID},
 };
-use tap::{Tap, TapFallible};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_stream::StreamExt;
 
@@ -83,33 +81,6 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 //         IAP_ACCESSORY_UUID, IAP_CHANNEL
 //     )
 // }
-
-fn bin_path() -> Option<OsString> {
-    let current_exe = std::env::current_exe()
-        .tap_err(|e| tracing::warn!("Unable to get path of current binary: {e}"))
-        .ok()?;
-    let path = std::env::var_os("PATH")?;
-    let paths = std::env::split_paths(&path)
-        .chain(std::iter::once(current_exe.parent()?.to_path_buf()))
-        .tap(|i| tracing::trace!(paths = ?i, "paths"));
-    std::env::join_paths(paths)
-        .tap_err(|e| tracing::warn!("Unable to join paths: {e}"))
-        .ok()
-}
-
-/// Exec the `carjack-hci-helper` sidecar (found next to our own binary) to apply the BR/EDR mgmt
-/// tweaks (add the CarPlay EIR UUID and set an iPhone-like Class of Device). The sidecar carries
-/// `cap_net_admin`; we don't. It resolves the adapter itself via bluer's default adapter.
-async fn run_hci_helper() -> Result<()> {
-    let status = tokio::process::Command::new("carjack-hci-helper")
-        .env("PATH", bin_path().unwrap_or_default())
-        .status()
-        .await?;
-    if !status.success() {
-        return Err(eyre!("carjack-hci-helper exited with {status}"));
-    }
-    Ok(())
-}
 
 /// Which registered profile an inbound connection arrived on; the merged stream loses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,12 +141,6 @@ impl IapHost {
             wifi_mac: get_wifi_mac().await?,
         };
         let advertisement = publish_advertisement(&adapter).await?;
-
-        // BR/EDR inquiry needs to show the CarPlay UUID. In a sidecar because cap_net_admin on
-        // this process breaks xdg-desktop-portal. Not known to be required, so don't fail on it.
-        let _ = run_hci_helper()
-            .await
-            .tap_err(|e| tracing::warn!(?e, "Unable to apply hci config"));
 
         let iap_accessory_handle = session
             .register_profile(rfcomm::Profile {

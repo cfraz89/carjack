@@ -8,6 +8,10 @@
 //!
 //! Usage: `carjack-hci-helper` (no arguments). It resolves the adapter the same way carjack does,
 //! via `bluer`'s default adapter. Exits 0 on success.
+//!
+//! **carjack does not currently run this.** Neither tweak is known to be required, and the
+//! capability has to be granted out of band (`just setcap`) - to re-enable, spawn it from
+//! `IapHost::start` before the profile registrations.
 
 use std::io::{Read, Write};
 use std::process::ExitCode;
