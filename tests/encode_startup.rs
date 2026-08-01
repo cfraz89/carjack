@@ -105,10 +105,14 @@ async fn first_keyframe_arrives_before_the_car_gives_up() -> Result<()> {
     //   - the cache was wrong or absent, so the compositor actually resizes;
     //   - the car reported no refresh rate at all (`max_fps` is optional in `/info`, and
     //     `run_session` forwards the raw 0).
-    let cases: [(&str, (u32, u32), (u32, u32), u32); 3] = [
+    let cases: [(&str, (u32, u32), (u32, u32), u32); 4] = [
         ("cache hit, no-op reconfigure", (1280, 720), (1280, 720), 30),
         ("cache miss, real resize", (1280, 720), (800, 480), 30),
         ("car reported no fps", (1280, 720), (800, 480), 0),
+        // A real head unit's geometry, whose width is not a round multiple: the allocator can
+        // pick a different modifier for it than for the tidy sizes above, and the zero-copy
+        // import has to cope with whatever it gets.
+        ("head unit geometry", (1280, 720), (1080, 600), 30),
     ];
 
     let mut failures = Vec::new();

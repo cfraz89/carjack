@@ -158,11 +158,29 @@ pub fn resolve_backend(mode: ZeroCopyMode, render_node: &str) -> Result<EncodeBa
     }
 }
 
-/// Try to construct a zero-copy backend for `render_node` by probing [`HW_BACKENDS`] in order,
-/// honouring an explicit `CARPLAY_ENCODE_BACKEND` (`cuda`/`vaapi`/`v4l2`) override. Returns `None`
-/// if none are usable.
+/// Try to construct a zero-copy backend for `render_node` by probing [`HW_BACKENDS`], honouring an
+/// explicit `CARPLAY_ENCODE_BACKEND` (`cuda`/`vaapi`/`v4l2`) override. Returns `None` if none are
+/// usable.
+///
+/// Rows whose `drivers` match the node's actual kernel driver are tried first, because a zero-copy
+/// import only works within one GPU: with `drm_device` pointed at an Intel node on a hybrid box,
+/// plain table order reaches `cuda` first, whose elements all probe fine while every frame's
+/// `eglCreateImageKHR` then fails `BAD_MATCH`. Sorting rather than filtering keeps the rest as
+/// fallbacks, in table order - same as the desktop path.
 fn try_zero_copy(render_node: &str) -> Option<EncodeBackend> {
-    for backend in HW_BACKENDS.iter().filter(|b| wanted(b) && b.available()) {
+    let driver = crate::config::render_node_driver(render_node);
+    let mut candidates: Vec<&HwBackend> = HW_BACKENDS
+        .iter()
+        .filter(|b| wanted(b) && b.available())
+        .collect();
+    candidates.sort_by_key(|b| !b.matches_driver(driver.as_deref()));
+    tracing::info!(
+        "{render_node} is driven by {}; preferring '{}' encode backend",
+        driver.as_deref().unwrap_or("an unknown driver"),
+        candidates.first().map(|b| b.name).unwrap_or("none"),
+    );
+
+    for backend in candidates {
         match backend.import {
             Import::DmaBuf => {
                 return Some(EncodeBackend::Hw {
@@ -321,7 +339,17 @@ pub async fn encode_h264_to_channel(
                     match importer.import(&plane) {
                         Ok(buf) => buf,
                         Err(e) => {
-                            tracing::warn!("cuda import failed: {e}");
+                            // The plane description is the whole story for an EGL import failure.
+                            tracing::warn!(
+                                fourcc = %fourcc_str(plane.fourcc),
+                                modifier = format!("{:#018x}", plane.modifier),
+                                planes = dmabuf.handles().count(),
+                                width = plane.width,
+                                height = plane.height,
+                                stride = plane.stride,
+                                offset = plane.offset,
+                                "cuda import failed: {e}"
+                            );
                             continue;
                         }
                     }
@@ -1012,6 +1040,11 @@ fn cuda_caps(dmabuf: &Dmabuf) -> gst::Caps {
         .field("height", dmabuf.height() as i32)
         .field("framerate", gst::Fraction::new(30, 1))
         .build()
+}
+
+/// A DRM fourcc as its four characters, for logs.
+fn fourcc_str(fourcc: u32) -> String {
+    String::from_utf8_lossy(&fourcc.to_le_bytes()).into_owned()
 }
 
 /// Extract plane 0 of a dmabuf as a `cuda_dmabuf::DmabufPlane` (the compositor renders a single

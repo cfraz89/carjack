@@ -383,9 +383,13 @@ variant always matches the pipeline. Two families:
 
 - **Zero-copy**: the compositor forwards its rendered dmabuf and
   `resolve_backend` picks a same-GPU hardware backend - a row of the single
-  `HW_BACKENDS` table, probed in order (or forced via
-  `CARPLAY_ENCODE_BACKEND=cuda|vaapi|v4l2`, which applies to the desktop path
-  too). A row carries both video sources' chains (`import`/`postproc` for the
+  `HW_BACKENDS` table (or forced via `CARPLAY_ENCODE_BACKEND=cuda|vaapi|v4l2`,
+  which applies to the desktop path too). Rows whose `drivers` match the render
+  node's actual kernel driver (`config::render_node_driver`) are probed first,
+  the rest in table order behind them - as on the desktop path. **Table order
+  alone is not enough**: point `drm_device` at the Intel node of a hybrid box and
+  `cuda`'s elements all probe fine, then every frame's `eglCreateImageKHR` fails
+  `BAD_MATCH` because the import is cross-GPU. A row carries both video sources' chains (`import`/`postproc` for the
   compositor, `desktop`/`desktop_memory` for the portal) plus its tuned encoder,
   so **adding a platform = one row**:
   - **NVIDIA** (`cuda`, `import: Cuda`, no postproc): the `cuda-dmabuf` crate

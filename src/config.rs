@@ -317,6 +317,15 @@ pub fn desktop_render_driver() -> Option<String> {
     None
 }
 
+/// The kernel driver behind a `/dev/dri/renderD*` path. `None` if sysfs can't say.
+pub fn render_node_driver(node: &str) -> Option<String> {
+    let name = Path::new(node).file_name()?.to_string_lossy().into_owned();
+    std::fs::read_link(format!("/sys/class/drm/{name}/device/driver"))
+        .ok()?
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+}
+
 /// Resolve the configured `drm_device` selector to a concrete render-node path.
 pub fn resolve_render_node(selector: &str) -> Result<String> {
     let sel = selector.trim();
