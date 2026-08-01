@@ -1,38 +1,39 @@
 //! `carjack-hci-helper` - a privileged one-shot sidecar for carjack.
 //!
-//! It applies the two BR/EDR presentation tweaks a head unit needs to treat us as an iPhone:
-//!   1. add the CarPlay device UUID to the adapter's EIR (mgmt `ADD_UUID`), and
-//!   2. set an iPhone-like Class of Device (mgmt `SET_DEV_CLASS`).
+//! It sets an iPhone-like Class of Device (mgmt `SET_DEV_CLASS`), which needs a raw
+//! `AF_BLUETOOTH`/HCI control socket and so `CAP_NET_ADMIN`.
 //!
-//! Both need a raw `AF_BLUETOOTH`/HCI control socket, which requires `CAP_NET_ADMIN`.
+//! It used to add the CarPlay UUID to the EIR (`ADD_UUID`) as well. Registering an RFCOMM profile
+//! with that UUID does the same thing - bluetoothd puts a registered profile's UUID in the EIR -
+//! without any privilege, and unlike the raw write it is visible in `bluetoothctl show`, so it can
+//! actually be verified. `IapHost::start` does that; this binary is only the Class of Device now.
 //!
 //! Usage: `carjack-hci-helper` (no arguments). It resolves the adapter the same way carjack does,
 //! via `bluer`'s default adapter. Exits 0 on success.
 //!
-//! **carjack does not currently run this.** Neither tweak is known to be required, and the
-//! capability has to be granted out of band (`just setcap`) - to re-enable, spawn it from
-//! `IapHost::start` before the profile registrations.
+//! `IapHost::start` runs this before registering the iAP profile. The capability has to be granted
+//! out of band (`just setcap`); without it this exits non-zero and carjack carries on unadorned.
 
 use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use eyre::{Result, WrapErr, eyre};
-use libcarjack::uuid::CARPLAY_DEVICE_UUID;
 use socket2::{Domain, Protocol, SockAddr, SockAddrStorage, Socket, Type, socklen_t};
 
 const AF_BLUETOOTH: i32 = 31;
 const BTPROTO_HCI: i32 = 1;
 const HCI_CHANNEL_CONTROL: u16 = 3;
 const MGMT_INDEX_NONE: u16 = 0xffff;
-const MGMT_OP_ADD_UUID: u16 = 0x0010;
 const MGMT_OP_SET_DEV_CLASS: u16 = 0x000E;
 
 /// `SET_DEV_CLASS` takes `[major, minor]` (2 bytes), NOT the raw 3-byte CoD - the kernel derives
 /// the service-class byte from the enabled UUIDs. `[0x02, 0x0c]` = Phone / Smartphone, i.e. the low
-/// two bytes of a real iPhone's `0x7a020c`. NOTE: bluetoothd owns the adapter class (see
-/// `/etc/bluetooth/main.conf` `[General] Class`) and will re-assert it, so this raw write is
-/// best-effort / mostly redundant when bluetoothd is running.
+/// two bytes of a real iPhone's `0x7a020c`.
+///
+/// Setting `[General] Class` in `/etc/bluetooth/main.conf` does the same thing and bluetoothd will
+/// re-assert it - but that is a machine the deployment does not control, so this write is what
+/// makes the class portable rather than redundant.
 const CARPLAY_DEV_CLASS: [u8; 2] = [0x02, 0x0c];
 
 #[repr(C)]
@@ -55,12 +56,6 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<()> {
     let adapter_index = default_adapter_index().await?;
-
-    // Add the CarPlay device UUID to the BR/EDR EIR: payload is the 16-byte UUID (LE) + a
-    // service-visibility flag byte.
-    let mut payload = CARPLAY_DEVICE_UUID.to_bytes_le().to_vec();
-    payload.push(0x00);
-    send_mgmt_command(adapter_index, MGMT_OP_ADD_UUID, &payload).wrap_err("ADD_UUID failed")?;
 
     // Present an iPhone-like Class of Device. Without this the adapter keeps BlueZ's default class
     // (Computer); a head unit then gives us HFP/A2DP but never starts CarPlay - it opens the iAP

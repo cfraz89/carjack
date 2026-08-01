@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 use tap::TapFallible;
 use thiserror::Error;
 
@@ -11,7 +7,6 @@ use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
     Address, Device, DiscoveryFilter, Session,
-    adv::{Advertisement, Type},
     agent::Agent,
     rfcomm::{self, ProfileHandle, ReqError, Role},
 };
@@ -19,9 +14,8 @@ use eyre::{Result, eyre};
 use iap2_proto::{error::Iap2Error, iap2::Iap2};
 use libcarjack::carplay;
 use libcarjack::{
-    bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
     carplay_session::{DeviceIdentity, WifiCredentials},
-    uuid::{CARPLAY_DEVICE_UUID, IAP_DEVICE_UUID, IAP2_UUID},
+    uuid::{CARPLAY_DEVICE_UUID, IAP_DEVICE_UUID},
 };
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use tokio_stream::StreamExt;
@@ -93,7 +87,6 @@ pub struct IapHost {
     /// Registered at startup, not per target: a unit runs its SDP search for it while bonding.
     iap_profile: Mutex<ProfileHandle>,
     _agent: bluer::agent::AgentHandle,
-    _advertisement: bluer::adv::AdvertisementHandle,
     // Held only to keep the registration alive; nothing consumes its request stream.
     // _iap_v2: Option<ProfileHandle>,
 }
@@ -109,6 +102,44 @@ fn device_profile() -> rfcomm::Profile {
         require_authentication: Some(true),
         require_authorization: Some(false),
         ..Default::default()
+    }
+}
+
+/// The CarPlay service. Registered purely for its UUID: bluetoothd adds a registered profile's
+/// UUID to the adapter's EIR, which is what a head unit inspects while bonding. Server role so
+/// bluetoothd actually publishes it; the channel is BlueZ's to pick.
+fn carplay_profile() -> rfcomm::Profile {
+    rfcomm::Profile {
+        uuid: CARPLAY_DEVICE_UUID,
+        name: Some(String::from("CarPlay")),
+        role: Some(Role::Server),
+        require_authentication: Some(true),
+        require_authorization: Some(false),
+        ..Default::default()
+    }
+}
+
+/// Run the privileged sidecar that gives the adapter an iPhone-like Class of Device.
+///
+/// Best-effort, and deliberately not fatal: the capability is granted out of band (`just setcap`,
+/// on the sidecar binary only - never on `carjack`, which a capability would /proc-lock to root and
+/// break desktop mode). Without it carjack still runs, the unit just sees a plain computer.
+async fn apply_device_class() {
+    let Some(exe) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("carjack-hci-helper")))
+    else {
+        tracing::warn!("Could not locate carjack-hci-helper; skipping Class of Device setup");
+        return;
+    };
+    match tokio::process::Command::new(&exe).output().await {
+        Ok(out) if out.status.success() => tracing::info!("Applied iPhone Class of Device"),
+        Ok(out) => tracing::warn!(
+            status = ?out.status,
+            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+            "carjack-hci-helper failed; continuing without the Class of Device (try `just setcap`)"
+        ),
+        Err(e) => tracing::warn!(?e, "Could not run carjack-hci-helper; continuing without it"),
     }
 }
 
@@ -133,8 +164,6 @@ impl IapHost {
             transport_identifier: transport_identifier(adapter.address().await?),
             wifi_mac: get_wifi_mac().await?,
         };
-        let advertisement = publish_advertisement(&adapter).await?;
-
         // Some head units look for the v2 UUID. Shares `IAP_CHANNEL`, so BlueZ may refuse it.
         // let iap_v2 = match session
         //     .register_profile(rfcomm::Profile {
@@ -156,8 +185,23 @@ impl IapHost {
         // };
 
         let iap_profile = Mutex::new(session.register_profile(device_profile()).await?);
+        // Registered only so bluetoothd puts the CarPlay UUID in the adapter's EIR. The drain task
+        // owns the handle for the process lifetime (dropping it would deregister) and rejects
+        // anything that arrives - an unanswered request would pin its fd, since bluer buffers one
+        // per profile behind BlueZ's `NewConnection` call.
+        let mut carplay_profile = session.register_profile(carplay_profile()).await?;
+        tokio::spawn(async move {
+            while let Some(rq) = carplay_profile.next().await {
+                tracing::debug!(from = %rq.device(), "Rejecting connection on the CarPlay profile");
+                rq.reject(ReqError::Rejected);
+            }
+        });
 
-        tracing::info!("Registered iAP profile and published CarPlay advertisement");
+        // After the registrations: bluetoothd re-asserts the adapter class as its service set
+        // changes, so set ours once that has settled. Best-effort - see `apply_device_class`.
+        apply_device_class().await;
+
+        tracing::info!("Registered iAP and CarPlay profiles");
 
         Ok(Self {
             adapter,
@@ -165,7 +209,6 @@ impl IapHost {
             _session: session,
             iap_profile,
             _agent: agent,
-            _advertisement: advertisement,
             // _iap_v2: iap_v2,
         })
     }
@@ -309,17 +352,6 @@ pub async fn wireless_carplay(
     Ok(())
 }
 
-async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::AdvertisementHandle> {
-    let handle = adapter
-        .advertise(Advertisement {
-            advertisement_type: Type::Peripheral,
-            service_uuids: BTreeSet::from([CARPLAY_DEVICE_UUID, IAP2_UUID]),
-            manufacturer_data: BTreeMap::from([(MANUFACTURER_APPLE, CARPLAY_ADV_PAYLOAD.to_vec())]),
-            ..Default::default()
-        })
-        .await?;
-    Ok(handle)
-}
 
 /// Resolve the we paired it this sessionconfigured accesory and get it ready to connect.
 async fn find_target_device(adapter: &Adapter, target: &str) -> Result<Device> {

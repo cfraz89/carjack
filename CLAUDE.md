@@ -113,24 +113,24 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   under the stream we just accepted, and `perform_switch` fails `ECONNABORTED` seconds in - looking
   exactly like the unit hanging up on us. `relink` therefore awaits the teardown and spawns only
   the page.
-- **The first channel after a fresh bond is always silent - cause unknown.** On first pairing the
-  unit opens a channel ~1s later, sends nothing for the full 3s switch timeout, and only speaks iAP
-  on a channel opened after a relink; it costs ~11s once, then the retry loop recovers and every
-  later (bonded) run takes the first channel. It is **not** an SDP-registration race: registering
-  before pairing was tried specifically to fix this and changed nothing, which is why the profile
-  now goes up in `IapHost::start` (a correct ordering worth keeping, but not a fix). The dead
-  channel is independent of **which profile carries it** (device or accessory), **who opened it**
-  (the unit's own page, or a deliberate `connect_profile` to the accessory's service after pairing
-  settles), and **who speaks first** - sending the switch instead of waiting for it gets no echo
-  either, so the channel is mute in both directions. On a channel that works the unit sends the
-  switch ~1s in, unprompted. Reads more like the unit's iAP service not being bound to that first
-  channel than a protocol error our side; cycling the link is the only thing that has produced a
-  live one. Untested: `carjack-hci-helper`'s CarPlay EIR UUID and iPhone-like Class of Device,
-  currently switched off, so we bond as a generic computer.
-  Also ruled out by the same runs: the documented first-connection direction (**iPhone connects to
-  the accessory's channel, the accessory only initiates on later connections** -
-  <https://wiomoc.de/misc/posts/mfi_iap.html>) does not apply here - this unit pages *us* on a
-  fresh bond, and paging it instead changes nothing.
+- **The first channel after a fresh bond is usually dead - cause unknown, and it is not us.** On
+  first pairing the unit opens a channel ~1s later, sends nothing for the full 3s switch timeout,
+  and only speaks iAP on a channel opened after a relink; ~11s once, then the retry loop recovers
+  and every later (bonded) run takes the first channel in about a second. **Intermittent: 1 clean
+  first bond in 17 across a day of runs** - so never conclude anything about it from a single run,
+  in either direction. Everything on our side has been eliminated, each against a dead channel:
+  SDP-registration ordering (registering before pairing changed nothing - the profile still goes up
+  in `IapHost::start`, a correct ordering worth keeping but not a fix); **which profile carries it**
+  (device or accessory); **who opened it** (its page, or a deliberate `connect_profile` to its own
+  iAP service after pairing settles); **who speaks first** (sending the switch instead of waiting
+  gets no echo either - the channel is mute both ways); and **adapter identity** (CarPlay UUID in
+  the EIR and an iPhone Class of Device, below). On a channel that works the unit volunteers the
+  switch ~1s in. Reads like its iAP service not being bound to that first channel; cycling the link
+  is the only thing that has ever produced a live one, which the retry loop already does.
+  Also ruled out: the documented first-connection direction (**iPhone connects to the accessory's
+  channel, the accessory only initiates on later connections** -
+  <https://wiomoc.de/misc/posts/mfi_iap.html>) does not apply here - this unit pages *us* on a fresh
+  bond, and paging it instead changes nothing.
 - **Skipping the startup relink does not avoid a relink**, it defers it to the failure path and
   costs ~4s (unbonded, discovery to link: 10.8s with, 14.6s without). A device channel that carries
   the switch has only ever appeared *after* a relink's disconnect - in the no-startup-relink run the
@@ -158,19 +158,26 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   help; only getting a different one can.
 - **No switch means no SYN either - don't try to skip the switch.** An accessory that does not send
   `FF 55 02 00 EE 10` never sends a SYN either, so there is no already-switched state to handle.
-- `src/bin/carjack-hci-helper.rs` is a **privileged sidecar, currently not invoked**: it sets
-  the CarPlay EIR UUID (`ADD_UUID`) and an iPhone-like Class of Device
-  (`SET_DEV_CLASS`, `CARPLAY_DEV_CLASS`) over a raw HCI mgmt socket. Neither
-  tweak is known to be required - though both are the top untested suspect for
-  the silent first channel after a fresh bond (above), since they are what a unit
-  inspects to classify what it just bonded with - and granting the capability on
-  every build prompted through polkit, so `IapHost::start` no longer spawns it and `just
-  build` no longer setcaps it - `just setcap` does that by hand if it is
-  re-enabled. **If it ever is: `cap_net_admin` lives on this binary, never on
-  the main `carjack` one** - a capability-carrying process is /proc-locked to
-  root under `fs.suid_dumpable=2`, which makes xdg-desktop-portal fail to
-  introspect it ("Unable to open /proc/<pid>/root") and breaks desktop mode
-  entirely.
+- **The CarPlay UUID reaches the EIR by registering an RFCOMM profile for it**, not by a raw mgmt
+  write: bluetoothd puts a registered profile's UUID in the adapter's EIR, which needs no privilege
+  and - unlike `ADD_UUID` on a separate mgmt socket - is visible in `bluetoothctl show`, so it can
+  be verified. `IapHost::start` registers `CARPLAY_DEVICE_UUID` purely for that; nothing handshakes
+  on it and a drain task rejects anything that arrives (an unanswered request would pin its fd).
+  A raw `ADD_UUID` never showed up in `bluetoothctl` at all, in either registration order.
+- `src/bin/carjack-hci-helper.rs` is a **privileged sidecar, run by `IapHost::start`** after the
+  profile registrations. It now does one thing: an iPhone-like Class of Device (`SET_DEV_CLASS`,
+  `CARPLAY_DEV_CLASS`) over a raw HCI mgmt socket. Setting `[General] Class` in
+  `/etc/bluetooth/main.conf` (this dev box has `0x7a020c`) does the same, but a deployment target's
+  BlueZ config is not ours to control, so this is what makes the class portable - don't drop it as
+  redundant. **`cap_net_admin` lives on this binary, never on the main `carjack` one** - a
+  capability-carrying process is /proc-locked to root under `fs.suid_dumpable=2`, which makes
+  xdg-desktop-portal fail to introspect it ("Unable to open /proc/<pid>/root") and breaks desktop
+  mode entirely. `just build` does *not* setcap (it prompted on every build); `just setcap` does,
+  and **a relink drops the capability again**. Missing capability is **not fatal**:
+  `apply_device_class` warns and carries on.
+- **No BLE advertisement.** `publish_advertisement` (CarPlay + iAP2 service UUIDs and Apple
+  manufacturer data) was removed: head units reach us over BR/EDR, where an LE advertisement is not
+  visible at all. Adapter identity that matters is the BR/EDR EIR, above.
 - iAP2 magic bytes are `0xFF 0x5A`; the iAP1 switch-to-iAP2 command starts with
   `FF 55 02 00 EE 10`.
 - AirPlay/CarPlay video runs over TCP port 7000 on the car.

@@ -2,22 +2,27 @@ set dotenv-load
 mod armbian
 
 # Grant the `carjack-hci-helper` sidecar the cap_net_admin it needs for the raw HCI mgmt socket.
-# Not part of `build` - the sidecar is currently unused (see src/bin/carjack-hci-helper.rs), and
-# escalating on every build prompts through polkit.
+# Not part of `build`: escalating on every build prompts, and a build only needs this when the
+# relink has dropped the capability. Run it after rebuilding the sidecar.
+#
+# Passwordless via /etc/sudoers.d/carjack-setcap:
+#   chris ALL=(root) NOPASSWD: /usr/bin/setcap cap_net_admin+ep <abs>/target/debug/carjack-hci-helper, \
+#                              /usr/bin/setcap cap_net_admin+ep <abs>/target/release/carjack-hci-helper
+# sudoers matches arguments literally, which is why the paths below are absolute.
 [script]
 setcap +flags="":
     # Only the sidecar carries the capability. The main carjack binary stays unprivileged so
     # xdg-desktop-portal can introspect it in desktop mode (a capability-carrying process is
     # /proc-locked to root under fs.suid_dumpable=2).
-    binary="target/debug/carjack-hci-helper"
-    case " {{flags}} " in *" --release "*|*" -r "*) binary="target/release/carjack-hci-helper";; esac
+    binary="{{justfile_directory()}}/target/debug/carjack-hci-helper"
+    case " {{flags}} " in *" --release "*|*" -r "*) binary="{{justfile_directory()}}/target/release/carjack-hci-helper";; esac
     # Only escalate when the capability is actually missing. Relinking the sidecar drops the cap,
-    # so `getcap` is an exact test for "needs setting" - and skipping it otherwise avoids a `run0`
-    # polkit prompt on every single build (which outright fails in a non-interactive shell).
+    # so `getcap` is an exact test for "needs setting" - and skipping it otherwise avoids a prompt
+    # on every single build (which outright fails in a non-interactive shell).
     if getcap "$binary" 2>/dev/null | grep -q cap_net_admin; then
         echo "cap_net_admin already set on ${binary}"
     else
-        run0 setcap cap_net_admin+ep "$binary"
+        sudo setcap cap_net_admin+ep "$binary"
         echo "Gave cap_net_admin to ${binary}"
     fi
 
