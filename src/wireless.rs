@@ -23,10 +23,7 @@ use libcarjack::{
     carplay_session::{DeviceIdentity, WifiCredentials},
     uuid::{CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID, IAP2_UUID},
 };
-use tokio::{
-    sync::{Mutex, Semaphore, mpsc, oneshot},
-    task::JoinHandle,
-};
+use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, Semaphore, mpsc, oneshot};
 use tokio_stream::StreamExt;
 
 use crate::wifi_connect::get_wifi_mac;
@@ -90,13 +87,45 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 pub struct IapHost {
     adapter: Adapter,
     identity: DeviceIdentity,
-    accessory_profile_handle: Mutex<ProfileHandle>,
-    device_profile_handle: Mutex<ProfileHandle>,
-    _session: Session,
+    session: Session,
+    /// The one iAP profile in use, registered on first use - see `iap_profile`.
+    iap_profile: Mutex<Option<IapProfile>>,
     _agent: bluer::agent::AgentHandle,
     _advertisement: bluer::adv::AdvertisementHandle,
     // Held only to keep the registration alive; nothing consumes its request stream.
     // _iap_v2: Option<ProfileHandle>,
+}
+
+/// A registered iAP profile and the bond state it was chosen for.
+struct IapProfile {
+    paired: bool,
+    handle: ProfileHandle,
+}
+
+/// The head unit connects in to this one; it is what its SDP search looks for.
+fn device_profile() -> rfcomm::Profile {
+    rfcomm::Profile {
+        uuid: IAP_DEVICE_UUID,
+        name: Some(String::from("Wireless iAP")),
+        role: Some(Role::Server),
+        channel: Some(IAP_CHANNEL),
+        require_authentication: Some(true),
+        require_authorization: Some(false),
+        ..Default::default()
+    }
+}
+
+/// Our outbound channel to a unit we have not bonded with yet.
+fn accessory_profile() -> rfcomm::Profile {
+    rfcomm::Profile {
+        uuid: IAP_ACCESSORY_UUID,
+        name: Some(String::from("Wireless iAP")),
+        role: Some(Role::Client),
+        auto_connect: Some(true),
+        require_authentication: Some(true),
+        require_authorization: Some(false),
+        ..Default::default()
+    }
 }
 
 /// The 24-character device identifier the accessory expects in `RequestAccessoryWiFiConfiguration`
@@ -122,32 +151,6 @@ impl IapHost {
         };
         let advertisement = publish_advertisement(&adapter).await?;
 
-        let accessory_profile_handle = Mutex::new(
-            session
-                .register_profile(rfcomm::Profile {
-                    uuid: IAP_ACCESSORY_UUID,
-                    name: Some(String::from("Wireless iAP")),
-                    role: Some(Role::Client),
-                    auto_connect: Some(true),
-                    require_authentication: Some(true),
-                    require_authorization: Some(false),
-                    ..Default::default()
-                })
-                .await?,
-        );
-        let device_profile_handle = Mutex::new(
-            session
-                .register_profile(rfcomm::Profile {
-                    uuid: IAP_DEVICE_UUID,
-                    name: Some(String::from("Wireless iAP")),
-                    role: Some(Role::Server),
-                    channel: Some(IAP_CHANNEL),
-                    require_authentication: Some(true),
-                    require_authorization: Some(false),
-                    ..Default::default()
-                })
-                .await?,
-        );
         // Some head units look for the v2 UUID. Shares `IAP_CHANNEL`, so BlueZ may refuse it.
         // let iap_v2 = match session
         //     .register_profile(rfcomm::Profile {
@@ -168,18 +171,47 @@ impl IapHost {
         //     }
         // };
 
-        tracing::info!("Registered iAP profiles and CarPlay advertisement");
+        tracing::info!("Published CarPlay advertisement");
 
         Ok(Self {
             adapter,
             identity,
-            accessory_profile_handle,
-            device_profile_handle,
-            _session: session,
+            session,
+            iap_profile: Mutex::new(None),
             _agent: agent,
             _advertisement: advertisement,
             // _iap_v2: iap_v2,
         })
+    }
+
+    /// The iAP profile the target's bond state calls for, registered on first use.
+    ///
+    /// Only ever one is registered. BlueZ opens a channel on every registered profile it can, and
+    /// bluer buffers one request per profile behind BlueZ's `NewConnection` call - so a profile we
+    /// never accept on pins that channel's fd until BlueZ gives up and tears it down.
+    async fn iap_profile(
+        &self,
+        was_paired: bool,
+    ) -> Result<MappedMutexGuard<'_, ProfileHandle>, bluer::Error> {
+        let mut slot = self.iap_profile.lock().await;
+        if !slot.as_ref().is_some_and(|p| p.paired == was_paired) {
+            // Deregister the other one before claiming `IAP_CHANNEL` for this one.
+            *slot = None;
+            let profile = if was_paired {
+                device_profile()
+            } else {
+                accessory_profile()
+            };
+            let handle = self.session.register_profile(profile).await?;
+            tracing::info!(was_paired, "Registered iAP profile");
+            *slot = Some(IapProfile {
+                paired: was_paired,
+                handle,
+            });
+        }
+        Ok(MutexGuard::map(slot, |slot| {
+            &mut slot.as_mut().expect("just registered").handle
+        }))
     }
 }
 
@@ -210,24 +242,26 @@ pub enum LinkAttemptError {
 
 /// Cycle the link - or page, if there is none - so the unit offers a fresh iAP channel.
 ///
-/// Spawned, never awaited: `Connect()` blocks until every profile has been tried, and the accept
-/// loop has to stay live. `connect_profile` is not a substitute; it leaves a connection in progress.
-fn spawn_relink(device: &Device, gate: &Arc<Semaphore>) -> JoinHandle<()> {
+/// The teardown happens before this returns, the page after: a `disconnect` racing the accept loop
+/// aborts the very channel the unit just opened, while `Connect()` blocks until every profile has
+/// been tried and so cannot be awaited there. `connect_profile` is not a substitute for either; it
+/// leaves a connection in progress.
+async fn relink(device: &Device, gate: &Arc<Semaphore>) {
+    // One at a time: a second disconnect landing on an in-flight connect cancels it.
+    let Ok(permit) = gate.clone().try_acquire_owned() else {
+        tracing::debug!("Relink already in flight; skipping this one");
+        return;
+    };
+    if device.is_connected().await.unwrap_or(false) {
+        let dis = device.disconnect().await;
+        tracing::debug!(?dis, "Disconnected stale link");
+    }
     let device = device.clone();
-    let gate = gate.clone();
     tokio::spawn(async move {
-        // One at a time: a second disconnect landing on an in-flight connect cancels it.
-        let Ok(_permit) = gate.try_acquire_owned() else {
-            tracing::debug!("Relink already in flight; skipping this one");
-            return;
-        };
-        if device.is_connected().await.unwrap_or(false) {
-            let dis = device.disconnect().await;
-            tracing::debug!(?dis, "Disconnected stale link");
-        }
+        let _permit = permit;
         let res = device.connect().await;
         tracing::debug!(?res, "Connected");
-    })
+    });
 }
 
 /// Accept an iAP connection from the configured head unit and bring the iAP2 link up on it.
@@ -238,36 +272,14 @@ async fn attempt_iap2_link(
     was_paired: bool,
 ) -> Result<Iap2<bluer::rfcomm::Stream>, LinkAttemptError> {
     let target = ctx.device.address();
-    // A bonded unit opens its own channel on our server profile; an unbonded one is reached by
-    // our outbound client profile. The other profile still has to be drained: bluer buffers one
-    // request per profile and parks BlueZ's `NewConnection` call until we answer it, so a queue
-    // nobody polls holds the fd open until BlueZ times out and tears the channel down.
-    let (wanted, unwanted) = if was_paired {
-        tracing::debug!(was_paired, "Targeting device profile");
-        (
-            &ctx.host.device_profile_handle,
-            &ctx.host.accessory_profile_handle,
-        )
-    } else {
-        tracing::debug!(was_paired, "Targeting accessory profile");
-        (
-            &ctx.host.accessory_profile_handle,
-            &ctx.host.device_profile_handle,
-        )
-    };
-    let mut wanted_guard = wanted.lock().await;
-    let mut unwanted_guard = unwanted.lock().await;
+    let mut profile = ctx.host.iap_profile(was_paired).await?;
 
     loop {
         tracing::debug!("Waiting for iAP2 connection requests");
-        let rq = tokio::select! {
-            rq = wanted_guard.next() => rq.ok_or(LinkAttemptError::ProfilesClosed)?,
-            Some(rq) = unwanted_guard.next() => {
-                tracing::debug!(from = %rq.device(), "Rejecting connection on the unused iAP profile");
-                rq.reject(ReqError::Rejected);
-                continue;
-            }
-        };
+        let rq = profile
+            .next()
+            .await
+            .ok_or(LinkAttemptError::ProfilesClosed)?;
         let from = rq.device();
         // Our profiles are registered adapter-wide, so any bonded head unit lands here.
         if from != target {
@@ -304,8 +316,12 @@ pub async fn wireless_carplay(
     // Gate on relinks: one at a time.
     let connect_attempt = Arc::new(tokio::sync::Semaphore::new(1));
 
+    // Register before the relink, not on first accept: the unit runs its SDP search for our iAP
+    // service as the link comes up, and finding none makes it speak Android Auto framing instead.
+    drop(host.iap_profile(was_paired).await?);
+
     tracing::info!("Establishing fresh connection with head unit");
-    spawn_relink(&device, &connect_attempt);
+    relink(&device, &connect_attempt).await;
 
     let task_device = device.clone();
 
@@ -315,7 +331,7 @@ pub async fn wireless_carplay(
             if let Err(LinkAttemptError::Iap2(e)) = &res {
                 tracing::warn!(?e, "No channel carried the iAP2 handshake");
                 // ctx.device.disconnect().await?;
-                spawn_relink(&ctx.device, &ctx.connect_attempt);
+                relink(&ctx.device, &ctx.connect_attempt).await;
             }
             (ctx, res)
         }

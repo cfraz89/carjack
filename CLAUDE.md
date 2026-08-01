@@ -99,6 +99,18 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   not return from `Connect()` until it has tried every profile, so awaiting it on the accept loop
   means the channel the unit opens meanwhile goes unread. Cycling only the iAP profiles is not an
   option either - `disconnect_profile` is refused for our own server UUID.
+- **The relink's `disconnect` must finish before the accept loop runs; only its `connect` may
+  overlap.** A `disconnect()` still in flight when the unit opens its channel tears the ACL down
+  under the stream we just accepted, and `perform_switch` fails `ECONNABORTED` seconds in - looking
+  exactly like the unit hanging up on us. `relink` therefore awaits the teardown and spawns only
+  the page.
+- **Only one iAP profile is ever registered, chosen by the target's bond state** (`IapHost::iap_profile`,
+  registered on first use): a bonded unit opens its own channel on our `IAP_DEVICE_UUID` server
+  profile, an unbonded one is reached by the `IAP_ACCESSORY_UUID` client profile. Registering both
+  means BlueZ opens a channel on the one we don't accept on, and bluer buffers one request per
+  profile (`mpsc::channel(1)`) behind BlueZ's `NewConnection` call - so that channel pins its fd
+  until BlueZ gives up and tears it down. **Register before the relink**, not on first accept: the
+  unit runs its SDP search as the link comes up.
 - **One channel per attempt.** Handshaking several concurrently was built and removed: units offer
   channels strictly sequentially - our own accessory channel first, which never carries the switch,
   then the unit's device channel, which does.
