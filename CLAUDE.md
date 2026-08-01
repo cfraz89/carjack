@@ -104,13 +104,19 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   under the stream we just accepted, and `perform_switch` fails `ECONNABORTED` seconds in - looking
   exactly like the unit hanging up on us. `relink` therefore awaits the teardown and spawns only
   the page.
-- **Only one iAP profile is ever registered, chosen by the target's bond state** (`IapHost::iap_profile`,
-  registered on first use): a bonded unit opens its own channel on our `IAP_DEVICE_UUID` server
-  profile, an unbonded one is reached by the `IAP_ACCESSORY_UUID` client profile. Registering both
-  means BlueZ opens a channel on the one we don't accept on, and bluer buffers one request per
-  profile (`mpsc::channel(1)`) behind BlueZ's `NewConnection` call - so that channel pins its fd
-  until BlueZ gives up and tears it down. **Register before the relink**, not on first accept: the
-  unit runs its SDP search as the link comes up.
+- **The `IAP_DEVICE_UUID` server profile is registered unconditionally, and both profiles are
+  accepted on** (`IapHost::iap_profiles`, registered on first use). Registering only the
+  `IAP_ACCESSORY_UUID` client profile was tried and reverted: with no iAP service for the unit's
+  SDP search to find, it decides we are an Android Auto sender and speaks AA framing at us - the
+  CFMOTO bench unit answers `00 08 00 04 08 01` on every attempt, surfacing as `UnexpectedBytes`
+  from `perform_switch`. **Register before the relink**, not on first accept: the unit runs that
+  SDP search as the link comes up.
+- **`auto_connect` on the client profile follows the bond state** (`!was_paired`). It is what makes
+  BlueZ open the outbound channel on link-up; once bonded the unit opens its own, so paging out as
+  well only yields a redundant channel. Every switch ever observed arrived on the device profile -
+  accepting both anyway costs nothing (a wrong channel just fails the switch and the retry loop
+  re-arms) and it is what answers the outbound channel rather than leaving it to pin an fd, since
+  bluer buffers one request per profile (`mpsc::channel(1)`) behind BlueZ's `NewConnection` call.
 - **One channel per attempt.** Handshaking several concurrently was built and removed: units offer
   channels strictly sequentially - our own accessory channel first, which never carries the switch,
   then the unit's device channel, which does.
