@@ -21,9 +21,9 @@ use libcarjack::carplay;
 use libcarjack::{
     bluetooth::{CARPLAY_ADV_PAYLOAD, MANUFACTURER_APPLE},
     carplay_session::{DeviceIdentity, WifiCredentials},
-    uuid::{CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID, IAP2_UUID},
+    uuid::{CARPLAY_DEVICE_UUID, IAP_DEVICE_UUID, IAP2_UUID},
 };
-use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, Semaphore, mpsc, oneshot};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use tokio_stream::StreamExt;
 
 use crate::wifi_connect::get_wifi_mac;
@@ -87,47 +87,25 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 pub struct IapHost {
     adapter: Adapter,
     identity: DeviceIdentity,
-    session: Session,
-    /// Both iAP profiles, registered on first use - see `iap_profiles`.
-    iap_profiles: Mutex<Option<IapProfiles>>,
+    /// Held only to keep the registrations alive for the process lifetime.
+    _session: Session,
+    /// The iAP profile the head unit connects in to; a session takes exclusive use of its stream.
+    /// Registered at startup, not per target: a unit runs its SDP search for it while bonding.
+    iap_profile: Mutex<ProfileHandle>,
     _agent: bluer::agent::AgentHandle,
     _advertisement: bluer::adv::AdvertisementHandle,
     // Held only to keep the registration alive; nothing consumes its request stream.
     // _iap_v2: Option<ProfileHandle>,
 }
 
-/// Both iAP registrations, and the bond state the accessory one's auto-connect was chosen for.
-struct IapProfiles {
-    device: ProfileHandle,
-    accessory: ProfileHandle,
-    paired: bool,
-}
-
-/// The head unit connects in to this one, and it is what its SDP search looks for. **Always
-/// registered**: with no iAP service to find, the unit decides we are an Android Auto sender and
-/// speaks AA framing at us instead (`UnexpectedBytes` out of `perform_switch`).
+/// The one iAP profile. The head unit connects in to it, and finding this record in our SDP is
+/// what makes it speak iAP rather than Android Auto.
 fn device_profile() -> rfcomm::Profile {
     rfcomm::Profile {
         uuid: IAP_DEVICE_UUID,
         name: Some(String::from("Wireless iAP")),
         role: Some(Role::Server),
         channel: Some(IAP_CHANNEL),
-        require_authentication: Some(true),
-        require_authorization: Some(false),
-        ..Default::default()
-    }
-}
-
-/// Our outbound channel, used to reach a unit we have not bonded with yet.
-///
-/// `auto_connect` is what makes BlueZ open this channel on link-up, so it is off once bonded: the
-/// unit opens its own channel then, and paging out as well only produces a redundant one.
-fn accessory_profile(was_paired: bool) -> rfcomm::Profile {
-    rfcomm::Profile {
-        uuid: IAP_ACCESSORY_UUID,
-        name: Some(String::from("Wireless iAP")),
-        role: Some(Role::Client),
-        auto_connect: Some(!was_paired),
         require_authentication: Some(true),
         require_authorization: Some(false),
         ..Default::default()
@@ -177,49 +155,25 @@ impl IapHost {
         //     }
         // };
 
-        tracing::info!("Published CarPlay advertisement");
+        let iap_profile = Mutex::new(session.register_profile(device_profile()).await?);
+
+        tracing::info!("Registered iAP profile and published CarPlay advertisement");
 
         Ok(Self {
             adapter,
             identity,
-            session,
-            iap_profiles: Mutex::new(None),
+            _session: session,
+            iap_profile,
             _agent: agent,
             _advertisement: advertisement,
             // _iap_v2: iap_v2,
         })
     }
 
-    /// Both iAP profiles, registered on first use and re-registered if the target's bond state has
-    /// changed since (only the accessory one depends on it, but they are registered as a pair).
-    async fn iap_profiles(
-        &self,
-        was_paired: bool,
-    ) -> Result<MappedMutexGuard<'_, IapProfiles>, bluer::Error> {
-        let mut slot = self.iap_profiles.lock().await;
-        if !slot.as_ref().is_some_and(|p| p.paired == was_paired) {
-            // Drop the old pair before re-registering; the device profile holds `IAP_CHANNEL`.
-            *slot = None;
-            let device = self.session.register_profile(device_profile()).await?;
-            let accessory = self
-                .session
-                .register_profile(accessory_profile(was_paired))
-                .await?;
-            tracing::info!(was_paired, "Registered iAP profiles");
-            *slot = Some(IapProfiles {
-                device,
-                accessory,
-                paired: was_paired,
-            });
-        }
-        Ok(MutexGuard::map(slot, |slot| {
-            slot.as_mut().expect("just registered")
-        }))
-    }
 }
 
-/// Carried across retry attempts by `backon`: the merged profile streams we accept inbound
-/// connections from, and the device we page as a fallback if the unit doesn't page us first.
+/// Carried across retry attempts by `backon`: the host holding the profile we accept on, and the
+/// device we relink so the unit offers a fresh channel.
 struct LinkCtx {
     host: Arc<IapHost>,
     device: Device,
@@ -272,23 +226,16 @@ async fn relink(device: &Device, gate: &Arc<Semaphore>) {
 /// One channel per attempt; the caller's retry loop re-arms on failure.
 async fn attempt_iap2_link(
     ctx: &mut LinkCtx,
-    was_paired: bool,
 ) -> Result<Iap2<bluer::rfcomm::Stream>, LinkAttemptError> {
     let target = ctx.device.address();
-    let mut profiles = ctx.host.iap_profiles(was_paired).await?;
-    let profiles = &mut *profiles;
+    let mut profile = ctx.host.iap_profile.lock().await;
 
     loop {
         tracing::debug!("Waiting for iAP2 connection requests");
-        // Take whichever profile offers a channel. Every switch ever observed arrived on the
-        // device one, but accepting both costs nothing - a wrong channel fails the switch and the
-        // retry loop re-arms - and it is what covers the unbonded case, where the outbound channel
-        // is the one BlueZ opens. Answering both also keeps either from pinning an fd: bluer
-        // buffers one request per profile behind BlueZ's `NewConnection` call.
-        let (which, rq) = tokio::select! {
-            rq = profiles.device.next() => ("device", rq.ok_or(LinkAttemptError::ProfilesClosed)?),
-            Some(rq) = profiles.accessory.next() => ("accessory", rq),
-        };
+        let rq = profile
+            .next()
+            .await
+            .ok_or(LinkAttemptError::ProfilesClosed)?;
         let from = rq.device();
         // Our profiles are registered adapter-wide, so any bonded head unit lands here.
         if from != target {
@@ -300,7 +247,7 @@ async fn attempt_iap2_link(
             continue;
         }
 
-        tracing::debug!(%from, which, "Got connect request");
+        tracing::debug!(%from, "Got connect request");
         let stream = rq.accept()?;
         tracing::debug!("Establishing iAP2 link");
         return Ok(Iap2::start(stream).await?);
@@ -317,17 +264,13 @@ pub async fn wireless_carplay(
     let adapter = &host.adapter;
     let identity = host.identity.clone();
 
-    let (device, was_paired) = find_target_device(adapter, &target).await?;
+    let device = find_target_device(adapter, &target).await?;
     // Surface the car's MAC (known now, early) so the caller can look up its cached display and
     // size the compositor / launch the app before AirPlay reports the display.
     let _ = car_addr_tx.send(device.address().to_string());
 
     // Gate on relinks: one at a time.
     let connect_attempt = Arc::new(tokio::sync::Semaphore::new(1));
-
-    // Register before the relink, not on first accept: the unit runs its SDP search for our iAP
-    // service as the link comes up, and finding none makes it speak Android Auto framing instead.
-    drop(host.iap_profiles(was_paired).await?);
 
     tracing::info!("Establishing fresh connection with head unit");
     relink(&device, &connect_attempt).await;
@@ -336,7 +279,7 @@ pub async fn wireless_carplay(
 
     let iap2 = ({
         |mut ctx: LinkCtx| async move {
-            let res = attempt_iap2_link(&mut ctx, was_paired).await;
+            let res = attempt_iap2_link(&mut ctx).await;
             if let Err(LinkAttemptError::Iap2(e)) = &res {
                 tracing::warn!(?e, "No channel carried the iAP2 handshake");
                 // ctx.device.disconnect().await?;
@@ -379,7 +322,7 @@ async fn publish_advertisement(adapter: &Adapter) -> Result<bluer::adv::Advertis
 }
 
 /// Resolve the we paired it this sessionconfigured accesory and get it ready to connect.
-async fn find_target_device(adapter: &Adapter, target: &str) -> Result<(Device, bool)> {
+async fn find_target_device(adapter: &Adapter, target: &str) -> Result<Device> {
     let wanted: Option<Address> = target.parse().ok();
 
     // Whatever BlueZ already knows about (bonded from a previous run, or currently connected).
@@ -432,8 +375,8 @@ async fn device_matches(device: &Device, target: &str, wanted: Option<Address>) 
     }
 }
 
-/// Pair (if needed) and trust the target, as well as whether it was already paired
-async fn prepare_device(device: Device) -> Result<(Device, bool)> {
+/// Pair (if needed) and trust the target.
+async fn prepare_device(device: Device) -> Result<Device> {
     let alias = device.alias().await.unwrap_or_default();
     let rssi = device.rssi().await.ok().flatten();
     let class = device.class().await.ok().flatten();
@@ -455,7 +398,7 @@ async fn prepare_device(device: Device) -> Result<(Device, bool)> {
     }
     //We try keeping trust off so it only connects when we're ready to listen
     let _ = device.set_trusted(false).await;
-    Ok((device, was_paired))
+    Ok(device)
 }
 
 #[cfg(test)]

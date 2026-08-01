@@ -84,13 +84,22 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   bonded device's cached RSSI/UUIDs, so a powered-off head unit looked exactly
   like a present one and won, leaving carjack paging a dead address (Page
   Timeout) while the real unit sat discovered and ignored.
-- Two Bluetooth RFCOMM profiles are registered: `IAP_ACCESSORY_UUID`
-  (`...deafdecacaff`, `Role::Client`) and `IAP_DEVICE_UUID` (`...deafdecacafe`,
-  `Role::Server`, channel=1). The last byte is the whole distinction: **`cafe` is
-  the device (phone) side, `caff` the accessory (car) side.** The bike advertises
-  `caff` and searches us for `cafe`.
+- **One Bluetooth RFCOMM profile is registered: `IAP_DEVICE_UUID`** (`...deafdecacafe`,
+  `Role::Server`, channel=1), in `IapHost::start` - before any discovery or pairing, since a unit
+  runs its SDP search while it bonds. The last byte is the whole distinction: **`cafe` is the
+  device (phone) side, `caff` the accessory (car) side.** The bike advertises `caff` and searches
+  us for `cafe`, so `cafe` is the record that matters. **Registering it is what makes a unit speak
+  iAP at all**: with only the `IAP_ACCESSORY_UUID` client profile registered, the bench unit's SDP
+  search finds no iAP service, decides we are an Android Auto sender, and answers `00 08 00 04 08
+  01` on every attempt (`UnexpectedBytes` out of `perform_switch`).
+- **The `IAP_ACCESSORY_UUID` client profile was removed - do not re-add it.** It never carried a
+  switch in any run: bonded (its `auto_connect` off) the unit never even offered it, and unbonded
+  it was offered first and was either aborted ~120us after accept or silent through the whole 3s
+  timeout. A client-role profile publishes no SDP record, so dropping it cannot change how the unit
+  sees us. Removing it also removed the bond-state plumbing that existed only to serve it - the
+  accept is one stream again, and `was_paired` no longer reaches the link path.
 - **A head unit offers its iAP channel only on a freshly established link.** An existing link
-  predates us listening and never carries the switch, so `spawn_relink` cycles it at session start;
+  predates us listening and never carries the switch, so `relink` cycles it at session start;
   with no link, it simply pages. One relink at a time - a second disconnect landing on an in-flight
   connect cancels it.
 - **Relink with `connect`, never `connect_profile`, and never await it inline.** `connect_profile`
@@ -104,31 +113,22 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   under the stream we just accepted, and `perform_switch` fails `ECONNABORTED` seconds in - looking
   exactly like the unit hanging up on us. `relink` therefore awaits the teardown and spawns only
   the page.
-- **The `IAP_DEVICE_UUID` server profile is registered unconditionally, and both profiles are
-  accepted on** (`IapHost::iap_profiles`, registered on first use). Registering only the
-  `IAP_ACCESSORY_UUID` client profile was tried and reverted: with no iAP service for the unit's
-  SDP search to find, it decides we are an Android Auto sender and speaks AA framing at us - the
-  CFMOTO bench unit answers `00 08 00 04 08 01` on every attempt, surfacing as `UnexpectedBytes`
-  from `perform_switch`. **Register before the relink**, not on first accept: the unit runs that
-  SDP search as the link comes up.
-- **`auto_connect` on the client profile follows the bond state** (`!was_paired`). It is what makes
-  BlueZ open the outbound channel on link-up; once bonded the unit opens its own, so paging out as
-  well only yields a redundant channel. **No switch has ever arrived on the accessory profile.**
-  Unbonded, it is offered first and then aborted ~120us after accept (fd already dead), and the
-  unit's device channel follows ~4s later and carries the session; bonded, it is not offered at
-  all. Both profiles are accepted on anyway: a dead channel just fails the switch and the retry
-  loop re-arms, and answering it beats leaving it to pin an fd, since bluer buffers one request per
-  profile (`mpsc::channel(1)`) behind BlueZ's `NewConnection` call.
+- **The first channel after a fresh bond is always silent - cause unknown.** On first pairing the
+  unit opens a channel ~1s later, sends nothing for the full 3s switch timeout, and only speaks iAP
+  on a channel opened after a relink; it costs ~11s once, then the retry loop recovers and every
+  later (bonded) run takes the first channel. It is **not** an SDP-registration race: registering
+  before pairing was tried specifically to fix this and changed nothing, which is why the profile
+  now goes up in `IapHost::start` (a correct ordering worth keeping, but not a fix). Nor is it the
+  accessory profile - the silent channel arrives on the device profile with no client profile
+  registered at all. Untested top suspect: `carjack-hci-helper`'s CarPlay EIR UUID and iPhone-like
+  Class of Device, which are exactly what a unit inspects when classifying what it just bonded with
+  and are currently switched off, so we bond as a generic computer.
 - **Skipping the startup relink does not avoid a relink**, it defers it to the failure path and
-  costs ~4s (unbonded, discovery to link: 10.8s with, 14.6s without). Across both unbonded runs a
-  device channel has only ever appeared *after* a relink's disconnect - in the no-startup-relink
-  run the pairing-established link sat live for 5s carrying nothing but our own outbound channel,
-  and the device channel came 3.9s after the disconnect. Suggestive, not conclusive: the accessory
-  failure is what triggers that relink, so a relink with no accessory attempt in front of it is
-  what would actually separate the two.
+  costs ~4s (unbonded, discovery to link: 10.8s with, 14.6s without). A device channel that carries
+  the switch has only ever appeared *after* a relink's disconnect - in the no-startup-relink run the
+  pairing-established link sat live for 5s and produced nothing usable.
 - **One channel per attempt.** Handshaking several concurrently was built and removed: units offer
-  channels strictly sequentially - our own accessory channel first, which never carries the switch,
-  then the unit's device channel, which does.
+  channels strictly sequentially, and after a fresh bond the first one offered is dead (above).
 - **Outbound pages frequently return Page Timeout.** That is baseband - the unit's controller never
   answered - so nothing above it was reached. Do not read a failure to connect as a profile or SDP
   problem; `connect_accessory` logs page success/timeout explicitly.
@@ -136,7 +136,7 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   for our iAP service and opens a channel - not who paged. If it finds no iAP service it decides we
   are an Android Auto sender and speaks AA framing instead, which surfaces as `UnexpectedBytes` from
   `perform_switch`.
-- **The inbound accept must be filtered by the configured address.** Those profiles are
+- **The inbound accept must be filtered by the configured address.** The profile is
   registered for the whole adapter, so *any* bonded head unit that pages us arrives at
   `attempt_iap2_link` - and accepting whoever knocks first means carjack runs a full CarPlay
   session against the wrong unit. Seen 2026-07-27 (`cfmoto_14`): configured for the CFMOTO, the
@@ -153,8 +153,10 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 - `src/bin/carjack-hci-helper.rs` is a **privileged sidecar, currently not invoked**: it sets
   the CarPlay EIR UUID (`ADD_UUID`) and an iPhone-like Class of Device
   (`SET_DEV_CLASS`, `CARPLAY_DEV_CLASS`) over a raw HCI mgmt socket. Neither
-  tweak is known to be required, and granting the capability on every build
-  prompted through polkit, so `IapHost::start` no longer spawns it and `just
+  tweak is known to be required - though both are the top untested suspect for
+  the silent first channel after a fresh bond (above), since they are what a unit
+  inspects to classify what it just bonded with - and granting the capability on
+  every build prompted through polkit, so `IapHost::start` no longer spawns it and `just
   build` no longer setcaps it - `just setcap` does that by hand if it is
   re-enabled. **If it ever is: `cap_net_admin` lives on this binary, never on
   the main `carjack` one** - a capability-carrying process is /proc-locked to
