@@ -44,12 +44,28 @@ pub async fn connect_airplay(
     let bootstrap = AirPlayTransmitterBootstrap {
         homekit,
         peer_ip: peer_addr,
+        // iAP2 over AirPlay (`iap2_tunnel`) is a negotiated feature - `ControllerFeature::IApChannel`
+        // is what claims it. Not claimed yet: the only unit we can test against advertises just
+        // `VocoderInfo` and never tunnels anything, so the claim is unexercised, and an unexercised
+        // claim is exactly what broke the bike's WiFi request (afd6605). The `Accessory AirPlay
+        // features` log below says whether a given unit supports it; add the feature here once one
+        // does.
         controller_features: vec![],
         remote_homekit_id,
     };
 
     let tx = AirPlayTransmitterProxy::connect(bootstrap).await?;
     tracing::info!("AirPlay bootstrap complete!");
+    {
+        // Whether the accessory will tunnel iAP2 here at all is a property of *its* feature set,
+        // not just ours - log it so a silent tunnel can be told apart from an unsupported one.
+        let info = tx.info_cached();
+        tracing::info!(
+            extended_features = ?info.extended_features,
+            bluetooth_ids = ?info.bluetooth_ids,
+            "Accessory AirPlay features"
+        );
+    }
 
     let disp = tx
         .info_cached()
@@ -103,11 +119,22 @@ pub async fn run_video_stream(
     // and blocks its event server waiting for our response; if we never answer, the car
     // tears the whole session down within ~100ms of the first command (it sends a
     // HidSendReport right after RECORD). Runs for the session lifetime.
+    // iAP2 moves onto this channel when the accessory drops Bluetooth; without someone reading it
+    // the control channel simply ends at the handover.
+    let (tunnel_stream, tunnel) = crate::iap2_tunnel::open(tx.clone());
+    let _tunnel_guard = abort_on_drop(tokio::spawn(async move {
+        match crate::iap2_tunnel::start_session(tunnel_stream).await {
+            Ok(iap2) => crate::iap2_tunnel::run(iap2).await,
+            Err(e) => tracing::warn!(?e, "iAP2 tunnel session did not come up"),
+        }
+    }));
+
     let _cmd_guard = abort_on_drop(tokio::spawn(handle_car_commands(
         tx.clone(),
         modes,
         touch_tx,
         keyframe_tx.clone(),
+        tunnel,
     )));
 
     let latency = Duration::from_millis(100);
@@ -322,6 +349,7 @@ async fn handle_car_commands(
     mut modes: ResourceController,
     touch_tx: mpsc::Sender<TouchEvent>,
     keyframe_tx: mpsc::Sender<()>,
+    tunnel: crate::iap2_tunnel::Tunnel,
 ) {
     let mut touching = false;
     while let Some(mut cmd) = tx.pop_command().await {
@@ -347,6 +375,14 @@ async fn handle_car_commands(
                     let _ = touch_tx.try_send(event);
                 }
                 cmd.respond_ok();
+            }
+            Command::IApSendMessage(m) => {
+                // iAP2 continues here once the accessory drops the Bluetooth link - see
+                // `iap2_tunnel`. Answer first: catplay blocks its event server on our response.
+                let data = m.data.as_ref().to_vec();
+                cmd.respond_ok();
+                tunnel.deliver(data);
+                continue;
             }
             _ => cmd.respond_ok(),
         }

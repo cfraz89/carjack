@@ -125,6 +125,18 @@ impl<S: Stream> Iap2<S> {
         }
     }
 
+    /// Bring the link up on a transport that is already established, skipping the iAP1 switch.
+    ///
+    /// The switch (`FF 55 02 00 EE 10`) is an artefact of the RFCOMM channel: it is how an
+    /// accessory asks a serial link to change protocol. The AirPlay tunnel carries iAP2 frames
+    /// directly, so there is nothing to switch - the link starts at the SYN.
+    pub async fn start_established(stream: S) -> Result<Self, Iap2Error> {
+        let iap2 = Iap2::wrap(stream);
+        let table = Syn(&iap2).perform().await?;
+        *iap2.session_table.lock().await = table;
+        Ok(iap2)
+    }
+
     pub async fn start(mut stream: S) -> Result<Self, Iap2Error> {
         perform_switch(&mut stream).await?;
 
