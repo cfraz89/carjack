@@ -107,6 +107,10 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   carjack powers it, closing the window entirely. **Do not force it down at startup** - tried, and
   it makes things worse: dropping a link the unit has already made means it never comes back
   (0/2 runs got any connection afterwards), the same way a disconnect without a page does.
+  On the way out carjack powers the adapter **down** (`IapHost::power_down`, from both `run_app`
+  and `run_desktop`), so between runs it is never reachable without carjack behind it. Best-effort:
+  a second Ctrl-C or a SIGKILL - including `just test-run`'s timeout kill - exits first, and then
+  `AutoEnable = false` is what keeps it down.
 - **Only cycle a link that predates us; otherwise never page.** A link carjack just made by pairing,
   or one the unit brought up while we were already listening, carries the switch on its first
   channel - `prepare_device` samples `is_connected()` *before* pairing and reports it as

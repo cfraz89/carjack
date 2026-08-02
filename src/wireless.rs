@@ -152,6 +152,19 @@ fn transport_identifier(addr: bluer::Address) -> String {
 }
 
 impl IapHost {
+    /// Power the adapter down on the way out, so it is never reachable without carjack behind it.
+    ///
+    /// Paired with powering up only after the profiles register: between runs the adapter stays
+    /// dark, so a unit cannot connect into a carjack that is not listening. Best-effort - a second
+    /// Ctrl-C or a SIGKILL exits before this runs, and then `[Policy] AutoEnable = false` is what
+    /// keeps the adapter down until the next start.
+    pub async fn power_down(&self) {
+        match self.adapter.set_powered(false).await {
+            Ok(()) => tracing::info!("Adapter powered down"),
+            Err(e) => tracing::warn!(?e, "Could not power the adapter down"),
+        }
+    }
+
     /// Register everything once.
     pub async fn start() -> Result<Self> {
         let session = Session::new().await?;

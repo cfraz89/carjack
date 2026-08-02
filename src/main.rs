@@ -234,6 +234,7 @@ async fn run_app(config: Config) -> Result<()> {
     // Deterministic cleanup (Drop would also handle these, but do it before returning).
     app.kill();
     drop(compositor);
+    host.power_down().await;
     exit
 }
 
@@ -268,11 +269,11 @@ async fn run_desktop(config: Config) -> Result<()> {
     let bitrate = Bitrate::from_kbps(config.graphics.bitrate);
     let bt_device = config.bluetooth_device().unwrap_or_default().to_owned();
 
-    loop {
+    let exit = loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("Ctrl-C received, shutting down");
-                return Ok(());
+                break Ok(());
             }
             result = run_desktop_session(&host, &rd, zerocopy, bitrate, &bt_device) => {
                 // Lift anything still held: the input session outlives car sessions.
@@ -280,18 +281,21 @@ async fn run_desktop(config: Config) -> Result<()> {
                 match result {
                     Ok(()) => {
                         tracing::info!("Session ended cleanly, exiting");
-                        return Ok(());
+                        break Ok(());
                     }
                     Err(e) => {
                         tracing::warn!("Session failed, restarting from Bluetooth: {e}");
                         if backoff_or_ctrl_c().await {
-                            return Ok(());
+                            break Ok(());
                         }
                     }
                 }
             }
         }
-    }
+    };
+
+    host.power_down().await;
+    exit
 }
 
 /// Result of the shared Bluetooth -> WiFi -> AirPlay handshake, common to both source modes: the
