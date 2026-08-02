@@ -98,6 +98,15 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   timeout. A client-role profile publishes no SDP record, so dropping it cannot change how the unit
   sees us. Removing it also removed the bond-state plumbing that existed only to serve it - the
   accept is one stream again, and `was_paired` no longer reaches the link path.
+- **Power the adapter up only after the profiles are registered, and never force it down.**
+  `IapHost::start` registers the iAP and CarPlay profiles first and calls `set_powered(true)` last.
+  A unit that connects while the adapter is live but our profiles are not offers its iAP channel to
+  nobody, and that link then needs cycling - which the bike will not tolerate. On a box that boots
+  with the unit (**the carjack box is powered by the bike**, so the race is otherwise unavoidable)
+  set `[Policy] AutoEnable = false` in `/etc/bluetooth/main.conf`: the adapter then stays down until
+  carjack powers it, closing the window entirely. **Do not force it down at startup** - tried, and
+  it makes things worse: dropping a link the unit has already made means it never comes back
+  (0/2 runs got any connection afterwards), the same way a disconnect without a page does.
 - **Only cycle a link that predates us; otherwise never page.** A link carjack just made by pairing,
   or one the unit brought up while we were already listening, carries the switch on its first
   channel - `prepare_device` samples `is_connected()` *before* pairing and reports it as

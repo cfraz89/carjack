@@ -158,7 +158,6 @@ impl IapHost {
         let agent = session.register_agent(Agent::default()).await?;
         let adapter = session.default_adapter().await?;
         adapter.set_alias(String::from("carjack")).await?;
-        adapter.set_powered(true).await?;
         let identity = DeviceIdentity {
             name: String::from("carjack"),
             transport_identifier: transport_identifier(adapter.address().await?),
@@ -201,7 +200,15 @@ impl IapHost {
         // changes, so set ours once that has settled. Best-effort - see `apply_device_class`.
         apply_device_class().await;
 
-        tracing::info!("Registered iAP and CarPlay profiles");
+        // Powered only once the profiles are up, never before: a unit that connects while the
+        // adapter is live but our profiles are not offers its iAP channel to nobody, and that link
+        // then needs cycling, which the bike will not tolerate. On a box that boots with the unit
+        // (the bike powers the carjack box) set `[Policy] AutoEnable = false` in
+        // `/etc/bluetooth/main.conf` so the adapter stays down until this line runs - that closes
+        // the window entirely. Deliberately *not* forcing it down first: if a unit has already
+        // connected, dropping the link does not help, because it will not reconnect.
+        adapter.set_powered(true).await?;
+        tracing::info!("Registered iAP and CarPlay profiles, adapter powered up");
 
         Ok(Self {
             adapter,
