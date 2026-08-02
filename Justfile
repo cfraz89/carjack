@@ -44,7 +44,11 @@ test-run timeout="60" +flags="": (build flags)
         # it here. It also leaves the next run starting from a dark adapter, which is the state a
         # deployment box boots in with `[Policy] AutoEnable = false` - so test-run exercises the
         # real ordering: profiles registered first, adapter powered up after.
-        bluetoothctl power off >/dev/null 2>&1 || true
+        # Via D-Bus, *not* `bluetoothctl power off`: that rfkill soft-blocks the adapter, and a
+        # soft-blocked adapter cannot be powered back up over D-Bus at all - the next run then dies
+        # with "Bluetooth operation failed". Recover from that with `rfkill unblock bluetooth`.
+        busctl --system set-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 \
+            Powered b false >/dev/null 2>&1 || true
         if [ -n "$original" ]; then
             current=$(nmcli -t -f NAME,ACTIVE connection show --active 2>/dev/null | awk -F: '$2=="yes"{print $1; exit}')
             if [ "$current" != "$original" ]; then

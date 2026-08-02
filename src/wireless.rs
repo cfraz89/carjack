@@ -119,6 +119,19 @@ fn carplay_profile() -> rfcomm::Profile {
     }
 }
 
+/// Whether any Bluetooth rfkill switch is soft-blocked. A soft-blocked adapter refuses to power
+/// up over D-Bus, and the error BlueZ returns for it says only "Failed".
+fn rfkill_soft_blocked() -> bool {
+    let Ok(entries) = std::fs::read_dir("/sys/class/rfkill") else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let kind = std::fs::read_to_string(e.path().join("type")).unwrap_or_default();
+        let soft = std::fs::read_to_string(e.path().join("soft")).unwrap_or_default();
+        kind.trim() == "bluetooth" && soft.trim() == "1"
+    })
+}
+
 /// Run the privileged sidecar that gives the adapter an iPhone-like Class of Device.
 ///
 /// Best-effort, and deliberately not fatal: the capability is granted out of band (`just setcap`,
@@ -220,7 +233,18 @@ impl IapHost {
         // `/etc/bluetooth/main.conf` so the adapter stays down until this line runs - that closes
         // the window entirely. Deliberately *not* forcing it down first: if a unit has already
         // connected, dropping the link does not help, because it will not reconnect.
-        adapter.set_powered(true).await?;
+        adapter.set_powered(true).await.map_err(|e| {
+            if rfkill_soft_blocked() {
+                eyre!(
+                    "cannot power the Bluetooth adapter up: it is rfkill soft-blocked, which no \
+                     D-Bus call can undo - run `rfkill unblock bluetooth` (note `bluetoothctl \
+                     power off` is what blocks it, and systemd-rfkill persists that across \
+                     reboots): {e}"
+                )
+            } else {
+                eyre!("cannot power the Bluetooth adapter up: {e}")
+            }
+        })?;
         tracing::info!("Registered iAP and CarPlay profiles, adapter powered up");
 
         Ok(Self {
