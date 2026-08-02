@@ -229,6 +229,13 @@ impl ParameterId {
     /// what carjack keys off rather than guessing.
     pub const MESSAGES_RECEIVED_FROM_DEVICE: Self = Self(0x0007);
     pub const DEVICE_NAME: Self = Self(0x0000);
+    /// `DeviceTimeUpdate`: seconds since the Unix epoch, minutes east of UTC, DST flag.
+    pub const TIME_SECONDS: Self = Self(0x0000);
+    pub const TIME_OFFSET_MINUTES: Self = Self(0x0001);
+    pub const TIME_DST: Self = Self(0x0002);
+    /// `DeviceLanguageUpdate`, `WirelessCarPlayUpdate`.
+    pub const LANGUAGE: Self = Self(0x0000);
+    pub const WIRELESS_CARPLAY: Self = Self(0x0000);
     pub const REQUEST_TRANSPORT_GROUP: Self = Self(0x0000);
     pub const REQUEST_WIFI_GROUP: Self = Self(0x0001);
     pub const TRANSPORT_KIND: Self = Self(0x0000);
@@ -318,6 +325,16 @@ impl IntoParameter for u16 {
 }
 
 impl IntoParameter for u32 {
+    fn into_parameter(self, id: ParameterId) -> Parameter {
+        Parameter {
+            total_length: 0,
+            id,
+            data: self.to_be_bytes().to_vec(),
+        }
+    }
+}
+
+impl IntoParameter for u64 {
     fn into_parameter(self, id: ParameterId) -> Parameter {
         Parameter {
             total_length: 0,
@@ -509,13 +526,16 @@ impl ControlMessage {
         Self::new(ControlMessageId::AuthenticationSucceeded, vec![])
     }
 
-    pub fn wireless_carplay_update() -> Self {
+    /// Tells the accessory wireless CarPlay is active. One `u8` in parameter 0 - the previous
+    /// two-parameter form was a guess and matches nothing an iPhone sends. An iPhone sends this
+    /// unprompted once it has the WiFi configuration (`iphone-first-pair.pklg` t=124.605).
+    pub fn wireless_carplay_update(active: bool) -> Self {
         Self::new(
             ControlMessageId::WirelessCarPlayUpdate,
-            vec![
-                Parameter::new(ParameterId(0x0001), 0x00000001u32),
-                Parameter::new(ParameterId(0x0002), 0x01u8),
-            ],
+            vec![Parameter::new(
+                ParameterId::WIRELESS_CARPLAY,
+                u8::from(active),
+            )],
         )
     }
 
@@ -527,6 +547,28 @@ impl ControlMessage {
         Self::new(
             ControlMessageId::DeviceInformationUpdate,
             vec![Parameter::new(ParameterId::DEVICE_NAME, name)],
+        )
+    }
+
+    /// What an iPhone sends the moment it has the accessory's WiFi configuration, before anything
+    /// else (`iphone-first-pair.pklg` t=123.544). Without it the unit asks for the clock over HFP
+    /// (`AT+CCLK?`) instead, which we cannot answer.
+    pub fn device_time_update(unix_seconds: u64, offset_minutes: u16, dst: u8) -> Self {
+        Self::new(
+            ControlMessageId::DeviceTimeUpdate,
+            vec![
+                Parameter::new(ParameterId::TIME_SECONDS, unix_seconds),
+                Parameter::new(ParameterId::TIME_OFFSET_MINUTES, offset_minutes),
+                Parameter::new(ParameterId::TIME_DST, dst),
+            ],
+        )
+    }
+
+    /// The device's language, as an iPhone sends it right after `DeviceTimeUpdate` (`"en"`).
+    pub fn device_language_update(language: &str) -> Self {
+        Self::new(
+            ControlMessageId::DeviceLanguageUpdate,
+            vec![Parameter::new(ParameterId::LANGUAGE, language)],
         )
     }
 
@@ -624,6 +666,34 @@ mod tests {
     fn device_information_update_matches_iphone() {
         let msg = ControlMessage::device_information_update("TestDevice");
         assert_eq!(msg.to_bytes().unwrap(), payload(IPHONE_DEVICE_INFO));
+    }
+
+    /// From `iphone-first-pair.pklg` t=123.544/123.545/124.605 - the three messages carjack never
+    /// sent, captured against the AUTO BOX bench unit.
+    const IPHONE_TIME_UPDATE: &str =
+        "ff5a002740a0f801be4040001d4e0b000c0000000000006a6edf2d0006000102580005000200b2";
+    const IPHONE_LANGUAGE_UPDATE: &str = "ff5a001740a1f801bd4040000d4e0a00070000656e0041";
+    const IPHONE_WIRELESS_CARPLAY_UPDATE: &str = "ff5a001540a2f801bc4040000b4e0d00050000010f";
+
+    #[test]
+    fn device_time_update_matches_iphone() {
+        let msg = ControlMessage::device_time_update(0x6a6e_df2d, 600, 0);
+        assert_eq!(msg.to_bytes().unwrap(), payload(IPHONE_TIME_UPDATE));
+    }
+
+    #[test]
+    fn device_language_update_matches_iphone() {
+        let msg = ControlMessage::device_language_update("en");
+        assert_eq!(msg.to_bytes().unwrap(), payload(IPHONE_LANGUAGE_UPDATE));
+    }
+
+    #[test]
+    fn wireless_carplay_update_matches_iphone() {
+        let msg = ControlMessage::wireless_carplay_update(true);
+        assert_eq!(
+            msg.to_bytes().unwrap(),
+            payload(IPHONE_WIRELESS_CARPLAY_UPDATE)
+        );
     }
 
     #[test]

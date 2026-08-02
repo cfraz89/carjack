@@ -2219,6 +2219,7 @@ dependencies = [
  "catplay_carplay",
  "catplay_hap",
  "catplay_util",
+ "chrono",
  "deku",
  "eyre",
  "iap2-proto",

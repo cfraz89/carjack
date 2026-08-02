@@ -15,6 +15,18 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 
+/// Wall clock for `DeviceTimeUpdate`: seconds since the Unix epoch, minutes east of UTC, and the
+/// DST flag - the three parameters an iPhone sends. The offset is signed on the wire (16-bit two's
+/// complement), so zones west of UTC wrap rather than saturate. The DST flag is sent as 0: the
+/// reference capture has 0 in a zone that does not observe DST, so its encoding elsewhere is a
+/// guess we have no capture for.
+fn local_time() -> (u64, u16, u8) {
+    let now = chrono::Local::now();
+    let secs = now.timestamp().max(0) as u64;
+    let offset_minutes = ((now.offset().local_minus_utc() / 60) as i16) as u16;
+    (secs, offset_minutes, 0)
+}
+
 #[derive(DekuRead, Debug, Clone, Copy, PartialEq, Eq)]
 #[deku(id_type = "u8")]
 pub enum TouchEventType {
@@ -464,15 +476,22 @@ impl<S: Stream> CarplaySession<S> {
                         );
                     }
                 }
-                // Now start EA session and signal ready - but only the first time. The
-                // accessory repeats its WiFi configuration every ~3s until we show up on its
-                // AP (an iPhone gets it twice and answers neither, `iphone-cfmoto.pklg`), and
-                // answering each repeat with another EA session start sent it eight times in
-                // `cfmoto_10.pcapng`.
+                // What an iPhone sends the moment it has the configuration, in this order
+                // (`iphone-first-pair.pklg` t=123.544-124.605). Only the first time: the accessory
+                // repeats its WiFi configuration every ~3s until we show up on its AP.
+                //
+                // Note what is *not* here: `StartExternalAccessoryProtocolSession`. carjack used to
+                // send one unprompted, which no iPhone ever does - the EA session is started only
+                // when the accessory asks (`RequestAppLaunch`/`StatusExternalAccessoryProtocolSession`).
                 if !matches!(self.phase, SessionPhase::EaReady) {
-                    let payload = ControlMessage::start_ea_session("com.apple.carplay");
-                    self.send_ctrl(payload).await?;
-                    tracing::info!("Started EA session");
+                    let (secs, offset_minutes, dst) = local_time();
+                    self.send_ctrl(ControlMessage::device_time_update(secs, offset_minutes, dst))
+                        .await?;
+                    self.send_ctrl(ControlMessage::device_language_update("en"))
+                        .await?;
+                    self.send_ctrl(ControlMessage::wireless_carplay_update(true))
+                        .await?;
+                    tracing::info!("Sent time, language and wireless-CarPlay updates");
                     self.phase = SessionPhase::EaReady;
                 }
                 if let Some(tx) = self.ready_tx.take() {
@@ -515,7 +534,7 @@ impl<S: Stream> CarplaySession<S> {
                         p.data.len()
                     );
                 }
-                self.send_ctrl(ControlMessage::wireless_carplay_update())
+                self.send_ctrl(ControlMessage::wireless_carplay_update(true))
                     .await?;
             }
             ControlMessageId::BluetoothComponentInformation => {
