@@ -40,6 +40,11 @@ test-run timeout="60" +flags="": (build flags)
         # Anchored: unanchored, this matches *any* process whose command line merely contains the
         # path - a tail on the log, an editor, a wrapper script driving this recipe - and kills it.
         pkill -f '^target/(debug|release)/carjack$' 2>/dev/null || true
+        # carjack powers the adapter down on a graceful exit, but the kill above skips that, so do
+        # it here. It also leaves the next run starting from a dark adapter, which is the state a
+        # deployment box boots in with `[Policy] AutoEnable = false` - so test-run exercises the
+        # real ordering: profiles registered first, adapter powered up after.
+        bluetoothctl power off >/dev/null 2>&1 || true
         if [ -n "$original" ]; then
             current=$(nmcli -t -f NAME,ACTIVE connection show --active 2>/dev/null | awk -F: '$2=="yes"{print $1; exit}')
             if [ "$current" != "$original" ]; then
