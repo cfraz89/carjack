@@ -107,8 +107,11 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   clean fresh, 0/3 bonded; stale-link rule - 3/3 and 3/3**, with **zero `connect()`/`disconnect()`
   calls on a fresh bond**. That matters for the bike, which refuses inbound ACL connections and only
   reconnects from its dash: start carjack before the bike attaches and it is never paged.
-  Half-measures do not work - dropping a stale link *without* paging leaves the unit silent (2/3
-  runs got no offer at all), so when a cycle is needed it needs both halves. One relink at a time -
+  Half-measures do not work, all re-measured *with* the unit trusted: dropping a stale link without
+  paging leaves it silent (2/3 runs got no offer); deregistering and re-registering the iAP profile
+  instead of touching the ACL gets **no offer at all, 0/3**; and there is nothing to close at the
+  fd level either, since on a stale link no channel is ever offered. When a cycle is needed it needs
+  both halves. One relink at a time -
   a second disconnect landing on an in-flight connect cancels it.
 - **Relink with `connect`, never `connect_profile`, and never await it inline.** `connect_profile`
   leaves a connection in progress so a following `connect()` fails busy and HFP never comes up,
