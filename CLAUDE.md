@@ -144,6 +144,20 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   Reset options, all measured on a fresh bond - **relink**: unit re-offers, channel live, ~11s;
   **nothing**: no re-offer, hangs; **reject unread**: re-offers twice ~19s apart then quits;
   **deregister/re-register**: re-offers after ~57s, still dead. Do not re-try these.
+- **The iPhone's reset is an L2CAP disconnect of the RFCOMM mux (PSM 0x0003), not an ACL cycle** -
+  its ACL is continuous from t=94.881 to t=130.260, spanning the whole reset. That matters because
+  the bike refuses inbound ACL connections and only reconnects when driven from its dash, so a
+  relink is a poor fit there; a mux teardown leaves the baseband link alone and the unit rebuilds
+  RFCOMM on its own initiative (it re-ran SDP and re-opened the mux unprompted, t=121.389/121.603).
+  **We cannot currently do this, and the reason is mux ownership** (inferred, not yet confirmed by
+  a capture of our own side): the iPhone *created* the RFCOMM session - `Sent SABM Channel=0` at
+  t=99.056, because it connected HFP outbound 95ms after bonding - so it could tear it down. carjack
+  initiates nothing over RFCOMM, so the unit creates and owns the mux, and closing our DLC leaves
+  the session up. **Disabling HFP to make our channel the only DLC was tried and does not help** -
+  the unit still never re-offered (72s) - and the reasoning was backwards anyway: HFP is not
+  incidental to the iPhone's reset, it is what makes the iPhone the session initiator. To copy this
+  we would have to own the mux, which means connecting something outbound over RFCOMM before the
+  unit opens its own.
   Everything else on our side was eliminated first, each against a dead channel: SDP-registration
   ordering (registering before pairing changed nothing - the profile still goes up in
   `IapHost::start`, a correct ordering worth keeping but not a fix); **which profile carries it**;
