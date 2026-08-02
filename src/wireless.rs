@@ -428,8 +428,9 @@ async fn prepare_device(device: Device) -> Result<Device> {
             tracing::warn!(?e, "Pairing failed, continuing to the connection attempt")
         });
     }
-    //We try keeping trust off so it only connects when we're ready to listen
-    let _ = device.set_trusted(false).await;
+    // Trust the unit, or BlueZ refuses its inbound profile connections - HFP gets `DM`, AVDTP and
+    // HID get "security block" - and it will not drive iAP until its profile set is up.
+    let _ = device.set_trusted(true).await;
     Ok(device)
 }
 

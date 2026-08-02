@@ -113,61 +113,37 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   under the stream we just accepted, and `perform_switch` fails `ECONNABORTED` seconds in - looking
   exactly like the unit hanging up on us. `relink` therefore awaits the teardown and spawns only
   the page.
-- **The first channel after a fresh bond is dead, and the relink is what fixes it - not optional.**
-  On first pairing the unit opens a channel ~1s later and sends nothing; the switch timeout expires,
-  `relink` cycles the ACL, and the channel the unit opens next carries the session. ~11s once, then
-  every later (bonded) run takes the first channel in about a second.
-  **Accepting is what strands us.** With the relink suppressed the unit *never offers another
-  channel* - verified over 73s of a live run, exactly one offer in the whole session. Once we accept,
-  the unit believes its iAP channel is open and has no reason to retry; it simply never drives it.
-  So the ACL cycle is not redundant work, it is the only thing that makes the unit start over.
-  `iphone-first-pair.pklg` shows the same unit doing this to a real iPhone, which handles it
-  differently: the unit offers the iAP channel **8 times over 20s** and the iPhone refuses every one
-  with RFCOMM `DM` - keeping the unit in its 2-3s retry loop - then tears down the RFCOMM session
-  itself (L2CAP disconnect, PSM 0x0003), after which the unit rebuilds the mux and the next channel
-  carries `ff 55 02 00 EE 10` within 0.8s. Bonding to iAP2 takes the iPhone 23.5s against carjack's
-  7-19s, but that is not a like-for-like win: the phone is most likely gated on the user granting
-  CarPlay permission during those refusals, so its 20s is human latency that costs it nothing,
-  where our accept actively strands the unit.
-  **Rejecting instead of accepting was measured and is worse than the relink.** Refusing offers
-  unread keeps the unit alive - it does re-offer, unlike after an accept - but only once, ~19s
-  later, and then it gives up (56s of silence). Recovery ranking, all measured on a fresh bond:
-  accept+relink ~11s and reliable; accept without relink hangs forever; reject-unread gets two
-  offers then nothing. We cannot reproduce the iPhone's `DM` directly - BlueZ answers the SABM
-  before bluer hands us the request, so `reject()` closes an already-open DLC and the unit sees
-  connect-then-disconnect, which plausibly explains the backoff. **Deregistering the profile so
-  BlueZ answers a real `DM` was also measured, and it fails differently: the unit does come back,
-  but after ~57s, and the channel it then offers is still dead.** That is the finding that settles
-  it - the ACL cycle is not merely a way to make the unit retry, it resets something in the *unit's*
-  state that no profile-level trick reaches. The RFCOMM-only teardown is not available either:
-  BlueZ owns the mux and refuses `disconnect_profile` for our own server UUID.
-  Reset options, all measured on a fresh bond - **relink**: unit re-offers, channel live, ~11s;
-  **nothing**: no re-offer, hangs; **reject unread**: re-offers twice ~19s apart then quits;
-  **deregister/re-register**: re-offers after ~57s, still dead. Do not re-try these.
-- **The iPhone's reset is an L2CAP disconnect of the RFCOMM mux (PSM 0x0003), not an ACL cycle** -
-  its ACL is continuous from t=94.881 to t=130.260, spanning the whole reset. That matters because
-  the bike refuses inbound ACL connections and only reconnects when driven from its dash, so a
-  relink is a poor fit there; a mux teardown leaves the baseband link alone and the unit rebuilds
-  RFCOMM on its own initiative (it re-ran SDP and re-opened the mux unprompted, t=121.389/121.603).
-  **We cannot currently do this, and the reason is mux ownership** (inferred, not yet confirmed by
-  a capture of our own side): the iPhone *created* the RFCOMM session - `Sent SABM Channel=0` at
-  t=99.056, because it connected HFP outbound 95ms after bonding - so it could tear it down. carjack
-  initiates nothing over RFCOMM, so the unit creates and owns the mux, and closing our DLC leaves
-  the session up. **Disabling HFP to make our channel the only DLC was tried and does not help** -
-  the unit still never re-offered (72s) - and the reasoning was backwards anyway: HFP is not
-  incidental to the iPhone's reset, it is what makes the iPhone the session initiator. To copy this
-  we would have to own the mux, which means connecting something outbound over RFCOMM before the
-  unit opens its own.
-  Everything else on our side was eliminated first, each against a dead channel: SDP-registration
-  ordering (registering before pairing changed nothing - the profile still goes up in
-  `IapHost::start`, a correct ordering worth keeping but not a fix); **which profile carries it**;
-  **who opened it** (its page, or a deliberate `connect_profile` to its own iAP service after
-  pairing settles); **who speaks first** (sending the switch gets no echo - the channel is mute both
-  ways); and **adapter identity** (CarPlay UUID in the EIR and an iPhone Class of Device, below).
-  Also ruled out: the documented first-connection direction (**iPhone connects to the accessory's
-  channel, the accessory only initiates on later connections** -
-  <https://wiomoc.de/misc/posts/mfi_iap.html>) does not apply - this unit pages *us* on a fresh
-  bond, and paging it instead changes nothing.
+- **Trust the head unit (`set_trusted(true)`), or its first channel after a fresh bond is dead.**
+  Untrusted, BlueZ refuses the unit's *inbound* profile connections - HFP is answered `DM`, AVDTP
+  and HID get `Connection Response - Refused - security block` - and the unit will not drive iAP
+  until its profile set is up. It opens the iAP channel anyway and then never sends the switch, so
+  the handshake times out. **Measured: 6/6 clean first bonds trusted, against 1/17 untrusted** (and
+  that one was chance). `prepare_device` used to `set_trusted(false)` deliberately, to keep the unit
+  from connecting before we were listening; that is what cost us the handshake.
+  This also explains the two things that never fitted. **Why the relink worked**: its outbound
+  `connect()` brings the profile set up from our side, sidestepping the inbound refusals. **Why
+  bonded reconnects were always clean**: the startup relink's `connect()` lands before the unit
+  offers iAP, whereas on a fresh bond the pairing link already exists and the unit gets in first.
+  Found by capturing our own side with `btmon` and diffing against `iphone-first-pair.pklg` - the
+  refusals (`Sent DM Channel=13`, five times; `security block`, ten) are invisible from carjack's
+  logs, which is why a day of black-box experiments went the wrong way. **Reach for a capture sooner.**
+- **Everything below about the dead first channel was measured while we were refusing the unit's
+  profiles, so treat it as conditional on that bug** rather than as current behaviour. Kept because
+  the measurements are real and may matter again if the symptom returns. Ruled out as causes, each
+  against a dead channel: SDP-registration ordering; which profile carries it; who opened it; who
+  speaks first (sending the switch gets no echo - mute both ways); and adapter identity (CarPlay
+  UUID in the EIR, iPhone Class of Device). Reset options, all on a fresh bond - **relink**: unit
+  re-offers, channel live, ~11s; **nothing**: no re-offer, hangs indefinitely; **reject unread**:
+  re-offers twice ~19s apart then quits; **deregister/re-register**: re-offers after ~57s, still
+  dead; **own the mux then drop it** (outbound `connect_profile`, then `disconnect_profile`, which
+  BlueZ *does* allow for a client UUID): re-offer after ~61s, still dead. The ~57s/~61s look like a
+  timer in the unit rather than a reaction to us.
+- **The iPhone's own reset is an L2CAP disconnect of the RFCOMM mux (PSM 0x0003), not an ACL cycle**
+  - its ACL runs unbroken from t=94.881 to t=130.260 across the reset. We *can* collapse the mux
+  (the kernel does it on idle - `Sent DISC Channel=0` two seconds after the last DLC closes, seen in
+  our own btmon capture), but the unit owns the session when it creates it, and doing so never
+  produced a live channel. Relevant if the bike proves awkward: it refuses inbound ACL connections
+  and only reconnects when driven from its dash.
 - **Skipping the startup relink does not avoid a relink**, it defers it to the failure path and
   costs ~4s (unbonded, discovery to link: 10.8s with, 14.6s without). A device channel that carries
   the switch has only ever appeared *after* a relink's disconnect - in the no-startup-relink run the
