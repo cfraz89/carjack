@@ -98,10 +98,18 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   timeout. A client-role profile publishes no SDP record, so dropping it cannot change how the unit
   sees us. Removing it also removed the bond-state plumbing that existed only to serve it - the
   accept is one stream again, and `was_paired` no longer reaches the link path.
-- **A head unit offers its iAP channel only on a freshly established link.** An existing link
-  predates us listening and never carries the switch, so `relink` cycles it at session start;
-  with no link, it simply pages. One relink at a time - a second disconnect landing on an in-flight
-  connect cancels it.
+- **Only cycle a link that predates us; otherwise never page.** A link carjack just made by pairing,
+  or one the unit brought up while we were already listening, carries the switch on its first
+  channel - `prepare_device` samples `is_connected()` *before* pairing and reports it as
+  `stale_link`, and `wireless_carplay` relinks only when it is true. A link that predates us is
+  different: the unit offered its iAP channel while nobody was listening and will not offer again
+  until it is cycled. Measured (trusted, fresh bond vs bonded reconnect): **no relink at all - 3/3
+  clean fresh, 0/3 bonded; stale-link rule - 3/3 and 3/3**, with **zero `connect()`/`disconnect()`
+  calls on a fresh bond**. That matters for the bike, which refuses inbound ACL connections and only
+  reconnects from its dash: start carjack before the bike attaches and it is never paged.
+  Half-measures do not work - dropping a stale link *without* paging leaves the unit silent (2/3
+  runs got no offer at all), so when a cycle is needed it needs both halves. One relink at a time -
+  a second disconnect landing on an in-flight connect cancels it.
 - **Relink with `connect`, never `connect_profile`, and never await it inline.** `connect_profile`
   leaves a connection in progress so a following `connect()` fails busy and HFP never comes up,
   which leaves the unit silent; the whole profile set has to be up before it engages. And BlueZ does

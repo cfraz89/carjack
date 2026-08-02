@@ -307,7 +307,7 @@ pub async fn wireless_carplay(
     let adapter = &host.adapter;
     let identity = host.identity.clone();
 
-    let device = find_target_device(adapter, &target).await?;
+    let (device, stale_link) = find_target_device(adapter, &target).await?;
     // Surface the car's MAC (known now, early) so the caller can look up its cached display and
     // size the compositor / launch the app before AirPlay reports the display.
     let _ = car_addr_tx.send(device.address().to_string());
@@ -315,8 +315,16 @@ pub async fn wireless_carplay(
     // Gate on relinks: one at a time.
     let connect_attempt = Arc::new(tokio::sync::Semaphore::new(1));
 
-    tracing::info!("Establishing fresh connection with head unit");
-    relink(&device, &connect_attempt).await;
+    // Only cycle a link that predates us. One we just made by pairing - or that the unit brought up
+    // while we were already listening - carries the switch on its first channel, so paging is pure
+    // cost, and the bike refuses inbound connections anyway. A stale link needs the full cycle:
+    // dropping it without paging leaves the unit silent.
+    if stale_link {
+        tracing::info!("Cycling the pre-existing link with the head unit");
+        relink(&device, &connect_attempt).await;
+    } else {
+        tracing::info!("No pre-existing link; listening rather than paging");
+    }
 
     let task_device = device.clone();
 
@@ -354,7 +362,7 @@ pub async fn wireless_carplay(
 
 
 /// Resolve the we paired it this sessionconfigured accesory and get it ready to connect.
-async fn find_target_device(adapter: &Adapter, target: &str) -> Result<Device> {
+async fn find_target_device(adapter: &Adapter, target: &str) -> Result<(Device, bool)> {
     let wanted: Option<Address> = target.parse().ok();
 
     // Whatever BlueZ already knows about (bonded from a previous run, or currently connected).
@@ -407,18 +415,22 @@ async fn device_matches(device: &Device, target: &str, wanted: Option<Address>) 
     }
 }
 
-/// Pair (if needed) and trust the target.
-async fn prepare_device(device: Device) -> Result<Device> {
+/// Pair (if needed) and trust the target. Reports whether a link *predated* us - see `relink`.
+async fn prepare_device(device: Device) -> Result<(Device, bool)> {
     let alias = device.alias().await.unwrap_or_default();
     let rssi = device.rssi().await.ok().flatten();
     let class = device.class().await.ok().flatten();
     let was_paired = device.is_paired().await.unwrap_or(false);
+    // Sampled before we pair: a link that is already up predates carjack listening, so the unit
+    // offered its iAP channel to nobody and will not offer again until the link is cycled.
+    let stale_link = device.is_connected().await.unwrap_or(false);
     tracing::info!(
         name = alias,
         address = ?device.address(),
         rssi,
         class = class.map(|c| format!("{c:#08x}")),
         was_paired,
+        stale_link,
         "Preparing configured head unit"
     );
 
@@ -431,7 +443,7 @@ async fn prepare_device(device: Device) -> Result<Device> {
     // Trust the unit, or BlueZ refuses its inbound profile connections - HFP gets `DM`, AVDTP and
     // HID get "security block" - and it will not drive iAP until its profile set is up.
     let _ = device.set_trusted(true).await;
-    Ok(device)
+    Ok((device, stale_link))
 }
 
 #[cfg(test)]
