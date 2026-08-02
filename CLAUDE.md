@@ -113,23 +113,40 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   under the stream we just accepted, and `perform_switch` fails `ECONNABORTED` seconds in - looking
   exactly like the unit hanging up on us. `relink` therefore awaits the teardown and spawns only
   the page.
-- **The first channel after a fresh bond is usually dead - cause unknown, and it is not us.** On
-  first pairing the unit opens a channel ~1s later, sends nothing for the full 3s switch timeout,
-  and only speaks iAP on a channel opened after a relink; ~11s once, then the retry loop recovers
-  and every later (bonded) run takes the first channel in about a second. **Intermittent: 1 clean
-  first bond in 17 across a day of runs** - so never conclude anything about it from a single run,
-  in either direction. Everything on our side has been eliminated, each against a dead channel:
-  SDP-registration ordering (registering before pairing changed nothing - the profile still goes up
-  in `IapHost::start`, a correct ordering worth keeping but not a fix); **which profile carries it**
-  (device or accessory); **who opened it** (its page, or a deliberate `connect_profile` to its own
-  iAP service after pairing settles); **who speaks first** (sending the switch instead of waiting
-  gets no echo either - the channel is mute both ways); and **adapter identity** (CarPlay UUID in
-  the EIR and an iPhone Class of Device, below). On a channel that works the unit volunteers the
-  switch ~1s in. Reads like its iAP service not being bound to that first channel; cycling the link
-  is the only thing that has ever produced a live one, which the retry loop already does.
+- **The first channel after a fresh bond is dead, and the relink is what fixes it - not optional.**
+  On first pairing the unit opens a channel ~1s later and sends nothing; the switch timeout expires,
+  `relink` cycles the ACL, and the channel the unit opens next carries the session. ~11s once, then
+  every later (bonded) run takes the first channel in about a second.
+  **Accepting is what strands us.** With the relink suppressed the unit *never offers another
+  channel* - verified over 73s of a live run, exactly one offer in the whole session. Once we accept,
+  the unit believes its iAP channel is open and has no reason to retry; it simply never drives it.
+  So the ACL cycle is not redundant work, it is the only thing that makes the unit start over.
+  `iphone-first-pair.pklg` shows the same unit doing this to a real iPhone, which handles it
+  differently: the unit offers the iAP channel **8 times over 20s** and the iPhone refuses every one
+  with RFCOMM `DM` - keeping the unit in its 2-3s retry loop - then tears down the RFCOMM session
+  itself (L2CAP disconnect, PSM 0x0003), after which the unit rebuilds the mux and the next channel
+  carries `ff 55 02 00 EE 10` within 0.8s. Bonding to iAP2 takes the iPhone 23.5s against carjack's
+  7-19s, but that is not a like-for-like win: the phone is most likely gated on the user granting
+  CarPlay permission during those refusals, so its 20s is human latency that costs it nothing,
+  where our accept actively strands the unit.
+  **Rejecting instead of accepting was measured and is worse than the relink.** Refusing offers
+  unread keeps the unit alive - it does re-offer, unlike after an accept - but only once, ~19s
+  later, and then it gives up (56s of silence). Recovery ranking, all measured on a fresh bond:
+  accept+relink ~11s and reliable; accept without relink hangs forever; reject-unread gets two
+  offers then nothing. We cannot reproduce the iPhone's `DM` directly - BlueZ answers the SABM
+  before bluer hands us the request, so `reject()` closes an already-open DLC and the unit sees
+  connect-then-disconnect, which plausibly explains the backoff. Deregistering the profile to make
+  BlueZ answer `DM` is the one untried variant. The RFCOMM-only teardown is not available either:
+  BlueZ owns the mux and refuses `disconnect_profile` for our own server UUID.
+  Everything else on our side was eliminated first, each against a dead channel: SDP-registration
+  ordering (registering before pairing changed nothing - the profile still goes up in
+  `IapHost::start`, a correct ordering worth keeping but not a fix); **which profile carries it**;
+  **who opened it** (its page, or a deliberate `connect_profile` to its own iAP service after
+  pairing settles); **who speaks first** (sending the switch gets no echo - the channel is mute both
+  ways); and **adapter identity** (CarPlay UUID in the EIR and an iPhone Class of Device, below).
   Also ruled out: the documented first-connection direction (**iPhone connects to the accessory's
   channel, the accessory only initiates on later connections** -
-  <https://wiomoc.de/misc/posts/mfi_iap.html>) does not apply here - this unit pages *us* on a fresh
+  <https://wiomoc.de/misc/posts/mfi_iap.html>) does not apply - this unit pages *us* on a fresh
   bond, and paging it instead changes nothing.
 - **Skipping the startup relink does not avoid a relink**, it defers it to the failure path and
   costs ~4s (unbonded, discovery to link: 10.8s with, 14.6s without). A device channel that carries
