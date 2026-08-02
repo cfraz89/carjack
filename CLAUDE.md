@@ -135,9 +135,15 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   accept+relink ~11s and reliable; accept without relink hangs forever; reject-unread gets two
   offers then nothing. We cannot reproduce the iPhone's `DM` directly - BlueZ answers the SABM
   before bluer hands us the request, so `reject()` closes an already-open DLC and the unit sees
-  connect-then-disconnect, which plausibly explains the backoff. Deregistering the profile to make
-  BlueZ answer `DM` is the one untried variant. The RFCOMM-only teardown is not available either:
+  connect-then-disconnect, which plausibly explains the backoff. **Deregistering the profile so
+  BlueZ answers a real `DM` was also measured, and it fails differently: the unit does come back,
+  but after ~57s, and the channel it then offers is still dead.** That is the finding that settles
+  it - the ACL cycle is not merely a way to make the unit retry, it resets something in the *unit's*
+  state that no profile-level trick reaches. The RFCOMM-only teardown is not available either:
   BlueZ owns the mux and refuses `disconnect_profile` for our own server UUID.
+  Reset options, all measured on a fresh bond - **relink**: unit re-offers, channel live, ~11s;
+  **nothing**: no re-offer, hangs; **reject unread**: re-offers twice ~19s apart then quits;
+  **deregister/re-register**: re-offers after ~57s, still dead. Do not re-try these.
   Everything else on our side was eliminated first, each against a dead channel: SDP-registration
   ordering (registering before pairing changed nothing - the profile still goes up in
   `IapHost::start`, a correct ordering worth keeping but not a fix); **which profile carries it**;
