@@ -251,6 +251,24 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
     twice), EAK, and `rst` -> `Iap2Error::LinkReset`. The session loop only ever sees session
     data. The keepalive/retransmit/ack timers are driven by `wait_for_link_work()` (pure, safe to
     cancel in a `select!`) followed by `maintain()` (transmits - must **not** be inside one).
+- **iAP2 does not end at the WiFi handoff - it moves onto WiFi, and losing the Bluetooth link is
+  correct.** After AirPlay is up, iAP2 packets are tunnelled inside AirPlay `iAPSendMessage`
+  commands on the control channel: catplay's receiver runs a whole iAP2 client whose remote is
+  AirPlay (`AsyncClient::new(false, CsmRemote::airplay(), _sink)`), pushes outgoing packets with
+  `Command::IApSendMessage`, and feeds incoming ones straight in with `iap2.read_frame_buf(&cmd.data)`
+  (`carplay/catplay_carplay/src/carplay_rx/sink/receiver.rs`). `disableBluetooth` is
+  `CommandDirection::FromDevice` - the *phone* asks the accessory to drop the BT link, and catplay's
+  car side obeys by calling `BluezManager::disconnect_peer()`. So the `Connection reset by peer` on
+  the iAP2 RFCOMM channel ~4-5s after the WiFi credentials is the handoff working, not a fault; the
+  unit does it to a real iPhone too.
+  **carjack never implements the tunnel**, so its control channel simply ends there - app launch,
+  Siri, calls and now-playing are all unreachable after handoff. Video and touch are unaffected
+  (touch goes over AirPlay by design). To regain control, handle `Command::IApSendMessage` where
+  `libcarjack/src/airplay.rs` already dispatches `ChangeModes`/`ForceKeyFrame`/`HidSendReport`, and
+  feed it into the existing `iap2-proto` session in place of the RFCOMM stream.
+  Chased at length on the Bluetooth side before this was found; **none** of it was the cause -
+  see the eliminated list above. When Bluetooth behaviour looks wrong after the handoff, read
+  catplay first.
 - **A head unit walks away a couple of seconds after carjack stops making progress**, taking the
   *entire* session with it - Bluetooth included, and its AP too. It is not specifically a post-RECORD
   video watchdog. The failure looks like the car rebooting, because both radios go at once.
