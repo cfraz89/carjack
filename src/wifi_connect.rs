@@ -4,7 +4,7 @@ use std::str::FromStr;
 use eyre::{Result, eyre};
 use futures::{StreamExt, TryStreamExt};
 use nm_automata::{
-    ActivationBinding, ActivationOptions, ActivationPersist, ActivationStateFlags,
+    ActivationOptions, ActivationPersist, ActivationStateFlags,
     ActiveConnectionState, ActiveProxy, AssignedMacAddress, ConnectionProfile, ConnectionSetting,
     DeviceProxy,
     MacAddress,
@@ -77,21 +77,37 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
     let profile = car_profile(ssid, passphrase, announced_mac);
     (|| async {
         let nm = get_network_manager().await;
-        remove_stale_profiles(nm, ssid).await;
         let device = wifi_device().await?;
-        let (conn, active, _) = nm
-            .add_and_activate_connection2(
-                &profile,
-                &device.object_path(),
-                &Default::default(),
-                // Per-session credentials: the profile should not outlive the process, and the SSID and
-                // passphrase change every session, so a profile per run would accumulate on disk.
-                &ActivationOptions::default()
-                    .persist(ActivationPersist::Memory)
-                    .bind_activation(ActivationBinding::DbusClient),
-            )
-            .await?;
-        tracing::info!(path = ?conn.object_path(), "Connection created");
+        let (conn, active) = match reusable_profile(nm, ssid, &profile).await {
+            Some(existing) => {
+                tracing::info!(path = ?existing.object_path(), "Reusing the car's profile");
+                let active = nm
+                    .activate_connection(
+                        &existing.object_path(),
+                        &device.object_path(),
+                        // No specific access point: let NetworkManager pick the BSS for the SSID.
+                        &zbus::zvariant::ObjectPath::from_static_str_unchecked("/"),
+                    )
+                    .await?;
+                (existing, active)
+            }
+            None => {
+                let (conn, active, _) = nm
+                    .add_and_activate_connection2(
+                        &profile,
+                        &device.object_path(),
+                        &Default::default(),
+                        // Kept on disk, one per accessory: the SSID, passphrase and pinned address
+                        // are stable for a car, so rebuilding it every session only costs time -
+                        // and a known profile is what a later "already on the car's WiFi, skip the
+                        // Bluetooth handshake" path would key off. Duplicates are swept above.
+                        &ActivationOptions::default().persist(ActivationPersist::Disk),
+                    )
+                    .await?;
+                tracing::info!(path = ?conn.object_path(), "Connection created");
+                (conn, active)
+            }
+        };
 
         // Tidy up after ourselves on failure. Each attempt otherwise leaves a live profile behind,
         // and several profiles for one SSID is how an association ends up happening outside the
@@ -131,38 +147,71 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
     .await
 }
 
-/// Delete any profile we left behind for this SSID.
+/// Find a profile we can reuse for this AP, deleting every other one for the same SSID.
 ///
-/// `persist = "memory"` keeps a profile out of `/etc`, and `bind-activation = "dbus-client"`
-/// deactivates it when carjack's bus connection goes - but neither *removes* it, so one
-/// accumulates per run and they outlive the process (74 of them after a day of testing). That
-/// matters beyond tidiness: any of them can bring the link up outside the announce-then-activate
-/// sequence, associating with a stale pinned address the accessory was never told about.
-async fn remove_stale_profiles(nm: &NetworkManagerProxy<'_>, ssid: &str) {
-    let settings = match nm_automata::SettingsProxy::new(nm.inner().connection()).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(?e, "No settings interface; leaving old profiles alone");
-            return;
-        }
-    };
-    let Ok(connections) = settings.connections().await else {
-        return;
-    };
+/// One profile per accessory, kept on disk: the SSID, passphrase and our pinned address are all
+/// stable for a given car, so recreating it every session only costs time. Duplicates are the
+/// thing to avoid, not persistence - one accrued per run when this was in-memory, 74 of them after
+/// a day of testing, and any of them can bring the link up outside the announce-then-activate
+/// sequence with a stale pinned address the accessory was never told about.
+///
+/// A profile only qualifies if its SSID, passphrase *and* pinned address all still match: a car
+/// that rotates its passphrase, or a machine whose derived address changed, must not reuse a
+/// profile that would associate wrongly.
+async fn reusable_profile(
+    nm: &NetworkManagerProxy<'_>,
+    ssid: &str,
+    profile: &ConnectionProfile,
+) -> Option<nm_automata::proxies::settings_connection::ConnectionProxy<'static>> {
+    let settings = nm_automata::SettingsProxy::new(nm.inner().connection())
+        .await
+        .ok()?;
+    let connections = settings.connections().await.ok()?;
+    let mut keep: Option<nm_automata::proxies::settings_connection::ConnectionProxy<'static>> =
+        None;
     let mut removed = 0usize;
     for conn in connections {
-        let Ok(profile) = conn.get_settings().await else {
+        let Ok(existing) = conn.get_settings().await else {
             continue;
         };
-        if profile.connection.as_ref().and_then(|c| c.id.as_deref()) == Some(ssid)
-            && conn.delete().await.is_ok()
-        {
+        // Match on the SSID the profile actually joins, not its name: NetworkManager renames a
+        // colliding profile to "<ssid> 1", "<ssid> 2" and so on, and those escape a name check
+        // while still being able to associate.
+        let joins_this_ap = existing
+            .wireless
+            .as_ref()
+            .and_then(|w| w.ssid.as_ref())
+            .is_some_and(|s| s.as_bytes() == ssid.as_bytes());
+        if !joins_this_ap {
+            continue;
+        }
+        let matches = keep.is_none() && same_ap(&existing, profile);
+        if matches {
+            keep = Some(conn);
+        } else if conn.delete().await.is_ok() {
             removed += 1;
         }
     }
     if removed > 0 {
-        tracing::info!(removed, %ssid, "Removed leftover profiles for the car's AP");
+        tracing::info!(removed, %ssid, "Removed duplicate profiles for the car's AP");
     }
+    keep
+}
+
+/// Whether an existing profile would associate exactly as the one we just built.
+///
+/// Compares the pinned address, not the passphrase: NetworkManager omits secrets from
+/// `GetSettings`, so a stored profile's PSK always reads as absent and comparing it would reject
+/// every profile - which is how the first version of this silently recreated the profile each run.
+/// A car that rotates its passphrase is handled by activation failing, which deletes the profile
+/// and lets the retry build a fresh one.
+fn same_ap(existing: &ConnectionProfile, wanted: &ConnectionProfile) -> bool {
+    let mac = |p: &ConnectionProfile| {
+        p.wireless
+            .as_ref()
+            .and_then(|w| w.assigned_mac_address.clone())
+    };
+    mac(existing) == mac(wanted)
 }
 
 /// The connection profile for the car's access point.
