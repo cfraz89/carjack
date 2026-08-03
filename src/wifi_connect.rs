@@ -4,12 +4,10 @@ use std::str::FromStr;
 use eyre::{Result, eyre};
 use futures::{StreamExt, TryStreamExt};
 use nm_automata::{
-    ActivationOptions, ActivationPersist, ActivationStateFlags,
-    ActiveConnectionState, ActiveProxy, AssignedMacAddress, ConnectionProfile, ConnectionSetting,
-    DeviceProxy,
-    MacAddress,
-    DeviceState, DeviceType, Ipv4Method, Ipv4Setting, Ipv6Method, Ipv6Setting, NetworkManagerProxy,
-    NonEmpty, ProxyExt, Ssid, WirelessBand, WirelessMode, WirelessProxy, WirelessSecurityKeyMgmt,
+    ActivationOptions, ActivationPersist, ActivationStateFlags, ActiveConnectionState, ActiveProxy,
+    AssignedMacAddress, ConnectionProfile, ConnectionSetting, DeviceProxy, DeviceState, DeviceType,
+    Ipv4Method, Ipv4Setting, Ipv6Method, Ipv6Setting, MacAddress, NetworkManagerProxy, NonEmpty,
+    ProxyExt, Ssid, WirelessBand, WirelessMode, WirelessProxy, WirelessSecurityKeyMgmt,
     WirelessSecuritySetting, WirelessSetting,
 };
 use rtnetlink::Handle;
@@ -80,7 +78,7 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
         let device = wifi_device().await?;
         let (conn, active) = match reusable_profile(nm, ssid, &profile).await {
             Some(existing) => {
-                tracing::info!(path = ?existing.object_path(), "Reusing the car's profile");
+                tracing::info!(path = ?existing.object_path(), "Using existing wifi profile for accessory");
                 let active = nm
                     .activate_connection(
                         &existing.object_path(),
@@ -92,16 +90,11 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
                 (existing, active)
             }
             None => {
-                let (conn, active, _) = nm
-                    .add_and_activate_connection2(
+                let (conn, active) = nm
+                    .add_and_activate_connection(
                         &profile,
                         &device.object_path(),
                         &Default::default(),
-                        // Kept on disk, one per accessory: the SSID, passphrase and pinned address
-                        // are stable for a car, so rebuilding it every session only costs time -
-                        // and a known profile is what a later "already on the car's WiFi, skip the
-                        // Bluetooth handshake" path would key off. Duplicates are swept above.
-                        &ActivationOptions::default().persist(ActivationPersist::Disk),
                     )
                     .await?;
                 tracing::info!(path = ?conn.object_path(), "Connection created");
@@ -215,7 +208,11 @@ fn same_ap(existing: &ConnectionProfile, wanted: &ConnectionProfile) -> bool {
 }
 
 /// The connection profile for the car's access point.
-fn car_profile(ssid: &str, passphrase: &str, announced_mac: AssignedMacAddress) -> ConnectionProfile {
+fn car_profile(
+    ssid: &str,
+    passphrase: &str,
+    announced_mac: AssignedMacAddress,
+) -> ConnectionProfile {
     ConnectionProfile::new(ssid)
         // Never let NetworkManager bring this up on its own. carjack activates it deliberately,
         // once, with an address it has just announced over iAP2; an autoconnecting profile
@@ -504,7 +501,6 @@ fn announced_wifi_mac(permanent: &str) -> String {
 }
 
 pub(crate) async fn get_wifi_mac() -> Result<String> {
-
     let device = wifi_device().await?;
     let wifi: WirelessProxy = device.cast().await?;
     // Derived from the permanent address rather than being it - see `announced_wifi_mac`. The

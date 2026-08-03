@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 use tap::TapFallible;
 use thiserror::Error;
 
-use backon::{ConstantBuilder, RetryableWithContext};
+use backon::{ConstantBuilder, Retryable, RetryableWithContext};
 use bluer::{
     Adapter,
     AdapterEvent::DeviceAdded,
@@ -34,12 +34,12 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// How many times `relink` pages before giving up, and how long it waits between attempts. A Page
 /// Timeout is the unit's controller not answering; it frequently answers on a later try.
-const PAGE_ATTEMPTS: u32 = 3;
+const PAGE_ATTEMPTS: usize = 3;
 const PAGE_RETRY_DELAY: Duration = Duration::from_secs(2);
 
-/// How long to wait for a unit to offer its iAP channel before concluding the link is one it will
-/// not offer on. Comfortably longer than the ~15s a bike takes to connect of its own accord.
-const OFFER_WAIT: Duration = Duration::from_secs(25);
+/// How long to wait for a unit to offer its iAP channel before resetting bluetooth. When it works,
+/// it should usually happen almost immediately, in my experience
+const OFFER_WAIT: Duration = Duration::from_secs(5);
 
 // fn generate_iap2_sdp() -> String {
 //     format!(
@@ -281,26 +281,14 @@ async fn relink(device: &Device, gate: &Arc<Semaphore>) {
     }
     let device = device.clone();
     tokio::spawn(async move {
-        let _permit = permit;
-        // Pages fail often and for reasons that clear on their own - Page Timeout is the unit's
-        // controller not answering, which says nothing about whether it will answer a second
-        // later. Retrying matters because a failed page is a session that never starts: the unit
-        // will not offer its iAP channel on a link that was never made.
-        for attempt in 1..=PAGE_ATTEMPTS {
-            match device.connect().await {
-                Ok(()) => {
-                    tracing::debug!(attempt, "Connected");
-                    return;
-                }
-                Err(e) if attempt == PAGE_ATTEMPTS => {
-                    tracing::warn!(?e, attempt, "Page failed; giving up until the next relink");
-                }
-                Err(e) => {
-                    tracing::debug!(?e, attempt, "Page failed; retrying");
-                    tokio::time::sleep(PAGE_RETRY_DELAY).await;
-                }
-            }
-        }
+        let res = (|| async { device.connect().await })
+            .retry(
+                ConstantBuilder::new()
+                    .with_delay(PAGE_RETRY_DELAY)
+                    .with_max_times(PAGE_ATTEMPTS),
+            )
+            .await;
+        tracing::debug!(?res, "Connection result")
     });
 }
 
@@ -324,9 +312,7 @@ async fn attempt_iap2_link(
                 Ok(rq) => break rq.ok_or(LinkAttemptError::ProfilesClosed)?,
                 Err(_) => {
                     if ctx.device.is_connected().await.unwrap_or(false) {
-                        tracing::info!(
-                            "Linked but no iAP channel offered; cycling the link"
-                        );
+                        tracing::info!("Linked but no iAP channel offered; cycling the link");
                         relink(&ctx.device, &ctx.connect_attempt).await;
                     }
                 }
