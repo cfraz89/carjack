@@ -10,6 +10,90 @@ one it says so; nothing is edited in place. For where things stand *now*, read
 
 Captures referenced by name are inventoried in [captures.md](captures.md).
 
+## 2026-08
+
+- **2026-08-03 21:02 (`cfmoto.log` + `/tmp/carjack.btsnoop` + the journal): the deauth is
+  *locally* generated, and the car is fine throughout. This supersedes the 2026-07-31 entry
+  below, which read the same event as coming from the AP.**
+  - No WiFi pcap for this run; the evidence is the kernel/NM/wpa_supplicant journal plus the
+    btsnoop.
+  - The run got further than any before it on the identity front, with **no env overrides**:
+
+    ```
+    11:01:58.680  iAP2 link established
+    11:02:01.802  Accessory WiFi: ssid=CFMOTO-999700          <- 0x4301, default identity
+    11:02:05.659  Associated as the announced address actual=FE:E8:AC:31:AD:C9
+    11:02:05.692  AirPlay endpoint given by the car: [fe80::9083:8eff:feef:a7d3%2]:7000
+    11:02:15.957  /info failed: Request/channel timeout
+    11:02:18.461  TCP connect timed out … (and every attempt after)
+    11:02:31.579  No route to host
+    ```
+
+  - The journal (local time, UTC+10) says who dropped the link:
+
+    ```
+    21:02:03  associated (RX AssocResp … status=0 aid=1); dhcp4 lease 192.168.149.57; activated
+    21:02:16  deauthenticating from 92:83:8e:ef:a7:d3 by local choice (Reason: 2=PREV_AUTH_NOT_VALID)
+    21:02:17  associated again  -> 21:02:28 deauth (3) -> 21:02:39 deauth (3) -> 21:02:49 deauth (3)
+    ```
+
+    wpa_supplicant: `CTRL-EVENT-DISCONNECTED bssid=92:83:8e:ef:a7:d3 reason=2
+    **locally_generated=1**`. NetworkManager logs `ip:dhcp4: restarting` ~60 ms *before* the
+    supplicant reports `completed -> disconnected`, i.e. both are reacting to the kernel's deauth,
+    not causing it.
+  - **The AP was never the problem.** It answers every re-association with `status=0 aid=1`, and
+    the btsnoop shows the bike doing SDP + PBAP (`Get final "telecom/pb.vcf"`, answered `Not
+    Found`) at **21:02:43** - half a minute after the WiFi began cycling. The car stayed up and
+    stayed connected over Bluetooth; only the WiFi association failed. So the "a head unit walks
+    away a couple of seconds after carjack stops making progress, taking Bluetooth with it"
+    pattern does not describe this failure.
+  - **It is not `assert_modes`.** The session never reached it - `/info` went unanswered. Every
+    earlier capture's 20-45 ms `assert_modes` → deauth correlation was coincidence: the modes
+    assertion is just what a session that has survived ~12 s happens to be doing when the link
+    goes.
+  - **The announce/associate mismatch is not the cause.** This run announced and associated as the
+    same `FE:E8:AC:31:AD:C9` (`617f28d`), on the bike, and died anyway. The fix stays - it is
+    correct - but the theory it was built on is closed.
+  - Timeline shape to explain: associate → DHCP fine → traffic flows ~2 s (TCP to the car's
+    link-local connects) → silence → ~10 s later the local stack declares the auth invalid.
+    A group-key rekey the AP never completes fits; nothing in the journal confirms it. **The
+    missing evidence is `wpa_supplicant -dd` or a monitor capture on 5785 MHz across the
+    association** - neither has ever been collected.
+  - Also settled, incidentally: Waydroid is not implicated. Its Android init spams the kernel log
+    with `wifi.rc` actions two seconds before the first deauth, but the container is on a `veth`
+    to `waydroid0` in its own netns and cannot see `wlp0s20f3`.
+  - **Byte-diff of the whole iAP2 exchange against `iphone-cfmoto.pklg` (the same bike).** The
+    message *sequence* is identical - `StartIdentification` → `IdentificationInformation` →
+    `IdentificationAccepted` → `RequestAuthenticationCertificate` → `AccessoryAuthenticationSerialNumber`
+    → `RequestAuthenticationCertificate` → `AuthenticationCertificate` →
+    `RequestAuthenticationChallengeResponse` → `AuthenticationResponse` → `AuthenticationSucceeded`
+    → `DeviceInformationUpdate` → `0x4300` → `0x4301` (twice, ~3 s apart) - but two things differ:
+    1. **`0x4300`'s contents.** Same shape (two groups, each `{0: 0x01, 1: string}`), different
+       strings:
+
+       | group | iPhone | carjack |
+       |---|---|---|
+       | 0 | `"00008130001C29C40206001C"` (24 chars, no colons) | `"4C:79:6E:DA:29:4B"` (BT MAC) |
+       | 1 | `"ac:df:a1:b3:87:9d"` (its **Bluetooth** MAC, lowercase) | `"FE:E8:AC:31:AD:C9"` (the **WiFi** MAC) |
+
+       So group 1 is the *Bluetooth* address for the iPhone and the *WiFi* address for us, and
+       group 0's format is not even the same kind of string. **The iPhone never tells this car a
+       WiFi MAC at all** - which independently explains why making announce == associate changed
+       nothing.
+    2. **Three messages we send that the iPhone does not send to this car**: `DeviceTimeUpdate`,
+       `DeviceLanguageUpdate` and `WirelessCarPlayUpdate`, at +2/+43/+80 ms after `0x4301`. The
+       iPhone sends nothing at all on the iAP2 channel for the remaining **45.8 s** of the
+       capture, so this is real silence, not a truncated capture. (It *does* send those three to
+       the bench unit in `iphone-first-pair.pklg`, right after that unit's flat `0x5703` - so the
+       messages are legitimate iPhone behaviour, just not what this bike is shown.)
+
+    Not differences: `DeviceInformationUpdate` differs only by name ("Tamagotchi" vs "carjack"),
+    and the ordering is otherwise identical. Timing does differ - the iPhone leaves 3.6 s between
+    `DeviceInformationUpdate` and `0x4300`, carjack 37 ms.
+  - Removed as a result of this run's log: the rtnetlink DAD watcher. Across every session that
+    ever logged it, `wait_for_link_local` returned 660-810 µs after `IP6_READY` - it never waited
+    for anything, so `IP6_READY` alone is the gate and the `rtnetlink` dependency is gone.
+
 ## 2026-07
 
 - **2026-07-31 (later): the head unit sends the deauth, and it lands ~80 ms after the AirPlay

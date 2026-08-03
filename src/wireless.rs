@@ -170,6 +170,11 @@ fn transport_identifier(addr: bluer::Address) -> String {
         let hex: String = addr.iter().map(|b| format!("{b:02X}")).collect();
         return format!("{hex:0>24}");
     }
+    colon_address(addr)
+}
+
+/// A Bluetooth address as a head unit expects to see it: colon-separated and uppercase.
+fn colon_address(addr: bluer::Address) -> String {
     addr.iter()
         .map(|b| format!("{b:02X}"))
         .collect::<Vec<_>>()
@@ -177,6 +182,13 @@ fn transport_identifier(addr: bluer::Address) -> String {
 }
 
 impl IapHost {
+    /// The adapter's Bluetooth address. A head unit keys the phone on it in both directions -
+    /// `_carplay-ctrl._tcp`'s `id` is what ties the station on its AP back to the device it
+    /// authenticated over Bluetooth.
+    pub async fn bluetooth_address(&self) -> Result<String> {
+        Ok(colon_address(self.adapter.address().await?))
+    }
+
     /// Register everything once.
     pub async fn start() -> Result<Self> {
         let session = Session::new().await?;

@@ -10,12 +10,37 @@ A wireless CarPlay bridge that impersonates an iPhone to a car head unit: Blueto
 authenticate and get handed the car's WiFi credentials, then CarPlay video over that WiFi via
 AirPlay.
 
-## The blocker on the bike (2026-07-31)
+## The blocker on the bike (rewritten 2026-08-03, evening run)
 
-**The head unit deauthenticates us off its own AP 20-45 ms after it answers `assert_modes`, in
-every capture ever taken, and takes the whole session with it.** Established with `iw event -t`
-alongside `cfmoto_16`: `deauth <AP> -> <us> reason 2`, **`disconnected (by AP)`**. Not a local
-fault - that run had `disable_11ac=1` and `power_scheme=1` active and behaved identically.
+**Not the car. The WiFi association dies on its own about 12 s in, while the car carries on
+talking to us over Bluetooth the whole time.** The 21:02 run settles this:
+
+- **The deauth is ours.** `wlp0s20f3: deauthenticating from 92:83:8e:ef:a7:d3 **by local choice**
+  (Reason: 2=PREV_AUTH_NOT_VALID)`, and wpa_supplicant agrees: `CTRL-EVENT-DISCONNECTED …
+  reason=2 **locally_generated=1**`. The earlier `iw event` reading of "disconnected (by AP)" for
+  `cfmoto_16` was the same event read the wrong way round.
+- **The AP is healthy and keeps taking us back.** Every retry gets `RX AssocResp … status=0
+  aid=1`. An AP that had walked away or rebooted could not do that.
+- **The car is healthy.** In the btsnoop, the bike is running SDP and PBAP (`Get final
+  "telecom/pb.vcf"`) at 21:02:43 - half a minute *after* the WiFi started cycling, and long after
+  carjack had given up. So "the car walks away and takes Bluetooth with it" does **not** apply
+  here; only the WiFi path failed.
+- **It is not an `assert_modes` reaction.** This run never got that far: `/info` was sent and
+  never answered, so the deauth cannot be a response to anything we asserted. The
+  ~20-45 ms-after-`assert_modes` correlation in the older captures was coincidence - the modes
+  assertion is simply what a session that survives ~12 s is doing at the moment the link drops.
+
+The shape to explain is now: associate → DHCP completes (`192.168.149.57`, car is `.201`) →
+traffic flows for ~2 s → goes quiet → ~10 s later the local stack gives up and deauths → repeat
+every ~11 s. What is missing is a WiFi capture spanning the association (with EAPOL and beacons)
+or `wpa_supplicant -dd`; nothing in the journal says *why* the supplicant concluded the auth was
+no longer valid. A group-key rekey the bike's AP never completes is the obvious thing to look for.
+
+Two things did work for the first time and should not be re-litigated: the bike answered `0x4301`
+with the **default** identity (no `CARJACK_WIFI_ID`/`CARJACK_WIFI_MAC` overrides), and
+`Associated as the announced address actual=FE:E8:AC:31:AD:C9` confirmed announce == associate on
+the bike. The announce/associate mismatch theory below is therefore **closed - it was not the
+cause**, though the fix is still correct and worth keeping.
 
 Everything downstream of the modes assertion is a red herring. SETUP, the screen socket, RECORD and
 keyframe latency are simply what the runs that got further happened to be doing; `cfmoto_13` and
@@ -26,18 +51,13 @@ in the log entry.
 run on the in-memory profile, so **that path works**), full AirPlay bootstrap, SETUP answered, both
 sockets up - it just got 45 ms instead of 30.
 
-**Current lead, and it is a strong one: the station we announce is not the station that
-associates.** `0x4300` names the station that will join the AP, and `assert_modes` is the first
-point the unit has any reason to check it - which is exactly where the deauth lands, with reason 2,
-"previous authentication no longer valid". In `cfmoto_btmac_ea99` (2026-08-03) carjack announced
-`FE:B2:9F:ED:EA:99` over iAP2 and then associated as `4c:79:6e:da:29:47`: the profile was still
-pinned to `AssignedMacAddress::Permanent` while `get_wifi_mac` returned something else. The unit
-was told to expect one station and saw another.
-
-`617f28d` makes the two the same address - `announced_wifi_mac` derives a stable, locally
-administered address, the car's profile pins to exactly it, and activation reads the device back
-and warns if they ever differ. Verified on the bench (`Associated as the announced address`);
-**not yet tested against the bike**, and that is the next run to do.
+**Closed lead (was: the station we announce is not the station that associates).** `0x4300` names
+the station that will join the AP, and in `cfmoto_btmac_ea99` carjack announced
+`FE:B2:9F:ED:EA:99` and then associated as `4c:79:6e:da:29:47` - the profile was pinned to
+`AssignedMacAddress::Permanent` while `get_wifi_mac` returned something else. `617f28d` makes the
+two agree (`announced_wifi_mac` derives a stable, locally administered address, the profile pins to
+exactly it, and activation reads the device back and warns on a mismatch). The 21:02 run confirmed
+on the bike that they now agree - and the link still died. Keep the fix; it is not the cause.
 
 The identity fields in `0x4300` *have* now met the bike, and one of them mattered enormously - see
 below. The bike answers `0x4300` for `FE:B2:9F:ED:EA:72` and for an invented `FE:B2:9F:ED:EA:99`,
@@ -47,8 +67,50 @@ answered fine, so the administered bit is not the discriminator - it reads like 
 our own Bluetooth identity in the unit's device table. `afd6605` introduced that address and broke
 `0x4300` outright: the unit acks the request and never sends `0x4301`.
 
-If the announce/associate fix is not it, the next thing to vary is `assert_modes` itself - the
-payload, or whether the main-screen resource is taken at all.
+**Current lead: carjack was connecting to AirPlay uninvited.** A head unit invites the phone -
+it watches for a `_carplay-ctrl._tcp` Bonjour record and only then sends `GET /ctrl-int/1/connect`
+(catplay's `cp_inviter.rs` loops doing nothing while no phone is advertising). carjack advertised
+that record *only* when `0x4301` omitted an AirPlay address, and the bike always supplies one - so
+on the bike it never advertised, was never discovered, was never invited, and connected on its own
+to the address from `0x4301`. The bike accepts that TCP connection and never answers `/info`,
+which is exactly where the 21:02 run died. The old code comment ("it doesn't seem to invite us on
+mdns anyway") was circular - we never gave it anything to discover.
+
+Two identity mismatches point the same way, and both are now understood to be Bluetooth-keyed:
+the Bonjour record's `id` is documented by catplay as the phone's **Bluetooth** MAC (carjack sent
+the WiFi interface MAC), and the iPhone's `0x4300` group 1 carries its **Bluetooth** MAC where
+carjack sends a WiFi MAC. The car appears to correlate the station on its AP with the device it
+authenticated over Bluetooth, by Bluetooth address.
+
+Changed: carjack now always advertises `_carplay-ctrl._tcp` with the adapter's Bluetooth address
+as `id`, waits for the invite, and connects only where the invite points. The direct-connect and
+gateway-fallback paths are gone (`connect_airplay_endpoint` takes one address), along with
+`CarWifi::gateway`/`iface_mac`.
+
+**Confirmed on the bench AUTO BOX (2026-08-03 22:34, `/tmp/bench-invite.log`) - the `id` was the
+whole problem.** The invite arrived **69 ms** after the advertisement:
+
+```
+12:34:23.708  Car WiFi connected, waiting for the car's CarPlay invite...
+12:34:23.710  _carplay-ctrl._tcp advertised on wlp0s20f3:8082 (id=4C:79:6E:DA:29:4B)
+12:34:23.779  Got CarPlay ctrl invite; AirPlay peer at 192.168.43.1:7000, pi=Some(90665097-…)
+12:34:24.006  AirPlay bootstrap complete!  Car display: 1080x600 @ 30 fps
+12:34:24.070  RECORD sent, streaming video     (first keyframe 4.05 ms)
+              … 30.0 fps steady for 70 s, 0 dropped to backpressure, touch arriving …
+```
+
+The same unit on 2026-07-17 advertised the **WiFi** MAC and timed out after 15 s, reaching RECORD
+only through the fallback that is now deleted. Same unit, same advertisement, different `id`:
+69 ms versus never. That is direct evidence for the Bluetooth-MAC correlation, independent of the
+bike. It is also strictly better than the old path - the invite carries the car's HomeKit pairing
+id (`pi`), which the gateway fallback never had, so pair-verify now has its fast path.
+
+**Still untested on the bike**, which is the run that matters.
+
+Still uncollected if the invite theory does not hold: `wpa_supplicant -dd` or a monitor-mode
+capture on the bike's channel (5785 MHz / ch 157) held across the whole association, which should
+name the disconnect reason directly. `assert_modes` is not worth varying until the link survives
+long enough to reach it.
 
 ## Settled on 2026-08-03
 
@@ -266,10 +328,10 @@ Not aimed at the deauth; all three are things that were making iteration harder.
   retry says why.
 - **`ipv6.method` is now `link-local`, and the IPv6 gate is `IP6_READY`.** It was defaulting to
   `auto`, i.e. waiting on SLAAC - and the car answers no router solicitation, in `cfmoto_12` or
-  `cfmoto_16` (only our own RSes appear, retried into silence). The rtnetlink DAD watcher is
-  still called and now logs how long it waited *after* `IP6_READY`; if that stays at zero over a
-  few sessions, the flag is sufficient and `wait_for_link_local` and the `rtnetlink` dependency
-  can both go.
+  `cfmoto_16` (only our own RSes appear, retried into silence). **The flag is sufficient and the
+  DAD watcher is now deleted**: over every session that logged it, `wait_for_link_local` returned
+  on its first pass 660-810 µs after `IP6_READY` - i.e. it never waited for anything.
+  `wait_for_link_local`, its tests and the `rtnetlink` dependency are gone.
 - **The HCI sidecar is no longer invoked**, and `just build` no longer setcaps it (`just setcap`
   does it by hand). Neither the CarPlay EIR UUID nor the iPhone-like class of device was ever
   shown to be required, and granting `cap_net_admin` on every build prompted through polkit,
@@ -301,8 +363,6 @@ Not aimed at the deauth; all three are things that were making iteration harder.
    - the car does *not* send RFCOMM DISC ~2 s later.
 2. **Then** the video path proper: whether the car requests keyframes, whether backpressure
    fires, and whether the picture holds up. Frame orientation is the first thing to eyeball.
-   While you are in the log, read the `link-local ... is usable as a source address, N after
-   IP6_READY` line - that is the whole test of whether the DAD watcher can be deleted.
 3. **Also retest the bench unit** - the RECORD gate is on the shared `run_video_stream` path, so
    it affects the AUTO BOX too.
 

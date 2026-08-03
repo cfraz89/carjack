@@ -73,10 +73,9 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   `IP6_READY` state flag mean "the link-local address has finished duplicate-address
   detection" - a link-local destination is unreachable from a *tentative* source
   (`connect()` fails `EADDRNOTAVAIL` before anything hits the wire), so
-  `wait_for_activation` gates on that flag. The older rtnetlink DAD watcher
-  (`wait_for_link_local`) is still called from `main.rs` to check the flag against
-  reality; it logs how long it had to wait, and once that stays at zero over a few
-  car sessions it can go.
+  `wait_for_activation` gates on that flag - and that gate is the whole of it. An
+  rtnetlink DAD watcher used to re-check the flag by hand; it never once found
+  anything left to wait for, so it and the `rtnetlink` dependency are gone.
 - The target head unit is **configured, never auto-detected** (`[bluetooth]
   device`, MAC or advertised name). `wireless::find_target_device` looks it up in
   BlueZ's known devices, else waits for it in a discovery aimed at that one
@@ -218,6 +217,20 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 - iAP2 magic bytes are `0xFF 0x5A`; the iAP1 switch-to-iAP2 command starts with
   `FF 55 02 00 EE 10`.
 - AirPlay/CarPlay video runs over TCP port 7000 on the car.
+- **The car invites the phone; carjack never connects to AirPlay uninvited.** Once on the car's
+  WiFi, `wait_for_carplay_ctrl_probe` advertises `_carplay-ctrl._tcp` and waits for the car's
+  `GET /ctrl-int/1/connect`, then connects where that invite's Bonjour record points. A head unit
+  only invites a phone it has *discovered* (catplay's `cp_inviter.rs` loops doing nothing until
+  one appears), so not advertising means never being invited - which is why the old "the bike
+  doesn't invite us on mDNS anyway" note was circular: carjack only advertised when `0x4301`
+  omitted an address, and the bike always supplies one. **The record's `id` is the adapter's
+  *Bluetooth* address** (`IapHost::bluetooth_address`), not the WiFi MAC - catplay documents the
+  field as the phone's BT MAC, and it is how the car ties the station on its AP back to the
+  device it authenticated over Bluetooth. **Measured on the bench AUTO BOX: advertising the
+  Bluetooth address gets an invite in 69 ms; the same unit advertising the WiFi MAC timed out at
+  15 s** - so the `id` is the whole of it. Connecting straight to the `0x4301` address (and to the
+  gateway as a fallback) was removed: the bike accepts that TCP connection and then never answers
+  `/info`. The invite also carries the car's HomeKit pairing id, which the old fallback lacked.
 - On the primary dev machine's WiFi card, `iwlwifi` needed `disable_11ax=1` (via
   `/etc/modprobe.d/`) to avoid a HE/VHT rate mismatch when connecting to the
   car's AP - if WiFi association looks flaky on a new dev machine, check that
