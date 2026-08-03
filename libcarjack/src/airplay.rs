@@ -122,8 +122,9 @@ pub async fn run_video_stream(
     // iAP2 moves onto this channel when the accessory drops Bluetooth; without someone reading it
     // the control channel simply ends at the handover.
     let (tunnel_stream, tunnel) = crate::iap2_tunnel::open(tx.clone());
+    let tunnel_used = tunnel.when_used();
     let _tunnel_guard = abort_on_drop(tokio::spawn(async move {
-        match crate::iap2_tunnel::start_session(tunnel_stream).await {
+        match crate::iap2_tunnel::start_session(tunnel_stream, tunnel_used).await {
             Ok(iap2) => crate::iap2_tunnel::run(iap2).await,
             Err(e) => tracing::warn!(?e, "iAP2 tunnel session did not come up"),
         }

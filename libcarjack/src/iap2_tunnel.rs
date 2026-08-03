@@ -17,7 +17,8 @@ use deku::prelude::*;
 use iap2_proto::ops::control::ControlMessage;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{Notify, mpsc};
 
 /// How long catplay may take to hand an outgoing command to the car before we give up on it.
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -36,20 +37,38 @@ pub type TunnelStream = DuplexStream;
 pub fn open(tx: AirPlayTransmitterProxyRef) -> (TunnelStream, Tunnel) {
     let (ours, theirs) = tokio::io::duplex(PIPE_CAPACITY);
     let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<u8>>(64);
+    let used = Arc::new(Notify::new());
     tokio::spawn(pump(theirs, inbound_rx, tx));
-    (ours, Tunnel { inbound: inbound_tx })
+    (
+        ours,
+        Tunnel {
+            inbound: inbound_tx,
+            used,
+        },
+    )
 }
 
 /// Handle for feeding the tunnel the payloads the car sends us.
 #[derive(Clone)]
 pub struct Tunnel {
     inbound: mpsc::Sender<Vec<u8>>,
+    /// Fires the first time the accessory actually uses the channel - see `start_session`.
+    used: Arc<Notify>,
 }
 
 impl Tunnel {
+    /// Resolves once the accessory has sent something here. Nothing should attempt a link before
+    /// that: no unit seen so far advertises the iAP channel (both report only `VocoderInfo`), and
+    /// starting a session against one that does not just times out waiting for a SYN, twice, in
+    /// the middle of the AirPlay bring-up.
+    pub fn when_used(&self) -> Arc<Notify> {
+        self.used.clone()
+    }
+
     /// Push one `iAPSendMessage` payload in. Dropping on a full channel is deliberate: the link
     /// layer retransmits, and blocking here would stall the whole AirPlay command handler.
     pub fn deliver(&self, data: Vec<u8>) {
+        self.used.notify_one();
         if self.inbound.try_send(data).is_err() {
             tracing::warn!("iAP2 tunnel inbound full; dropping a frame");
         }
@@ -101,8 +120,12 @@ async fn pump(
 /// No iAP1 switch: that is an RFCOMM artefact, and the tunnel carries frames directly. Which side
 /// sends the SYN over AirPlay is not established from a capture yet, so this waits for the
 /// accessory's exactly as the Bluetooth path does.
-pub async fn start_session(stream: TunnelStream) -> eyre::Result<Iap2<TunnelStream>> {
-    tracing::info!("Bringing iAP2 up over the AirPlay tunnel");
+pub async fn start_session(
+    stream: TunnelStream,
+    used: Arc<Notify>,
+) -> eyre::Result<Iap2<TunnelStream>> {
+    used.notified().await;
+    tracing::info!("Accessory used the iAP tunnel; bringing iAP2 up over it");
     let iap2 = Iap2::start_established(stream).await?;
     tracing::info!("iAP2 tunnel link established");
     Ok(iap2)
