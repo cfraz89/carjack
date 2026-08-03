@@ -5,7 +5,8 @@ use eyre::{Result, eyre};
 use futures::{StreamExt, TryStreamExt};
 use nm_automata::{
     ActivationBinding, ActivationOptions, ActivationPersist, ActivationStateFlags,
-    ActiveConnectionState, ActiveProxy, AssignedMacAddress, ConnectionProfile, DeviceProxy,
+    ActiveConnectionState, ActiveProxy, AssignedMacAddress, ConnectionProfile, ConnectionSetting,
+    DeviceProxy,
     MacAddress,
     DeviceState, DeviceType, Ipv4Method, Ipv4Setting, Ipv6Method, Ipv6Setting, NetworkManagerProxy,
     NonEmpty, ProxyExt, Ssid, WirelessBand, WirelessMode, WirelessProxy, WirelessSecurityKeyMgmt,
@@ -76,6 +77,7 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
     let profile = car_profile(ssid, passphrase, announced_mac);
     (|| async {
         let nm = get_network_manager().await;
+        remove_stale_profiles(nm, ssid).await;
         let device = wifi_device().await?;
         let (conn, active, _) = nm
             .add_and_activate_connection2(
@@ -91,9 +93,19 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
             .await?;
         tracing::info!(path = ?conn.object_path(), "Connection created");
 
-        tokio::time::timeout(ACTIVATION_TIMEOUT, wait_for_activation(&active))
+        // Tidy up after ourselves on failure. Each attempt otherwise leaves a live profile behind,
+        // and several profiles for one SSID is how an association ends up happening outside the
+        // announce-then-activate sequence.
+        if let Err(e) = tokio::time::timeout(ACTIVATION_TIMEOUT, wait_for_activation(&active))
             .await
-            .map_err(|_| eyre!("Timed out bringing up the car's WiFi connection"))??;
+            .map_err(|_| eyre!("Timed out bringing up the car's WiFi connection"))
+            .and_then(|r| r)
+        {
+            if let Err(e) = conn.delete().await {
+                tracing::debug!(?e, "Could not delete the profile of a failed attempt");
+            }
+            return Err(e);
+        }
         // The whole point of pinning the profile's address is that the accessory sees the station
         // it was promised. If NetworkManager did not apply it, the association is live but the
         // accessory is waiting for a station that will never appear - a failure that otherwise
@@ -119,9 +131,49 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
     .await
 }
 
+/// Delete any profile we left behind for this SSID.
+///
+/// `persist = "memory"` keeps a profile out of `/etc`, and `bind-activation = "dbus-client"`
+/// deactivates it when carjack's bus connection goes - but neither *removes* it, so one
+/// accumulates per run and they outlive the process (74 of them after a day of testing). That
+/// matters beyond tidiness: any of them can bring the link up outside the announce-then-activate
+/// sequence, associating with a stale pinned address the accessory was never told about.
+async fn remove_stale_profiles(nm: &NetworkManagerProxy<'_>, ssid: &str) {
+    let settings = match nm_automata::SettingsProxy::new(nm.inner().connection()).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(?e, "No settings interface; leaving old profiles alone");
+            return;
+        }
+    };
+    let Ok(connections) = settings.connections().await else {
+        return;
+    };
+    let mut removed = 0usize;
+    for conn in connections {
+        let Ok(profile) = conn.get_settings().await else {
+            continue;
+        };
+        if profile.connection.as_ref().and_then(|c| c.id.as_deref()) == Some(ssid)
+            && conn.delete().await.is_ok()
+        {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, %ssid, "Removed leftover profiles for the car's AP");
+    }
+}
+
 /// The connection profile for the car's access point.
 fn car_profile(ssid: &str, passphrase: &str, announced_mac: AssignedMacAddress) -> ConnectionProfile {
     ConnectionProfile::new(ssid)
+        // Never let NetworkManager bring this up on its own. carjack activates it deliberately,
+        // once, with an address it has just announced over iAP2; an autoconnecting profile
+        // associates outside that sequence - possibly a stale one from an earlier session, with a
+        // different pinned address - and the accessory then sees a station it was never promised.
+        // A leftover autoconnecting profile has caused this before (see docs/status.md).
+        .connection(ConnectionSetting::default().autoconnect(false))
         .wireless(
             WirelessSetting::default()
                 .ssid(ssid)
