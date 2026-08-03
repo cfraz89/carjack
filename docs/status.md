@@ -1,6 +1,6 @@
 # Where things stand
 
-**Last updated: 2026-07-31.** This is the living document - if it disagrees with
+**Last updated: 2026-08-03.** This is the living document - if it disagrees with
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
 
@@ -26,16 +26,51 @@ in the log entry.
 run on the in-memory profile, so **that path works**), full AirPlay bootstrap, SETUP answered, both
 sockets up - it just got 45 ms instead of 30.
 
-**Current lead: what carjack tells the bike about itself in `0x4300`.** That message is where the
-device names the station that will join the AP, and `assert_modes` is the first point the unit has
-any reason to check it. Against `iphone-cfmoto.pklg`, three things were wrong - a Bluetooth MAC
-where the iPhone sends a 24-character UDID, an uppercase MAC where the iPhone sends lowercase, and
-a NetworkManager-randomised address that is not even guaranteed to be the one that associates
-(carjack builds a new profile every session). All four fixed and unit-tested, **none tested against
-the bike**.
+**Current lead, and it is a strong one: the station we announce is not the station that
+associates.** `0x4300` names the station that will join the AP, and `assert_modes` is the first
+point the unit has any reason to check it - which is exactly where the deauth lands, with reason 2,
+"previous authentication no longer valid". In `cfmoto_btmac_ea99` (2026-08-03) carjack announced
+`FE:B2:9F:ED:EA:99` over iAP2 and then associated as `4c:79:6e:da:29:47`: the profile was still
+pinned to `AssignedMacAddress::Permanent` while `get_wifi_mac` returned something else. The unit
+was told to expect one station and saw another.
 
-If that is not it, the next thing to vary is `assert_modes` itself - the payload, or whether the
-main-screen resource is taken at all.
+`617f28d` makes the two the same address - `announced_wifi_mac` derives a stable, locally
+administered address, the car's profile pins to exactly it, and activation reads the device back
+and warns if they ever differ. Verified on the bench (`Associated as the announced address`);
+**not yet tested against the bike**, and that is the next run to do.
+
+The identity fields in `0x4300` *have* now met the bike, and one of them mattered enormously - see
+below. The bike answers `0x4300` for `FE:B2:9F:ED:EA:72` and for an invented `FE:B2:9F:ED:EA:99`,
+and refuses to answer at all for the permanent `4c:79:6e:da:29:47`, which differs from the
+adapter's Bluetooth address only in the last byte. An iPhone's globally administered address is
+answered fine, so the administered bit is not the discriminator - it reads like a collision with
+our own Bluetooth identity in the unit's device table. `afd6605` introduced that address and broke
+`0x4300` outright: the unit acks the request and never sends `0x4301`.
+
+If the announce/associate fix is not it, the next thing to vary is `assert_modes` itself - the
+payload, or whether the main-screen resource is taken at all.
+
+## Settled on 2026-08-03
+
+- **The Bluetooth side is no longer a suspect.** A day of experiments eliminated every theory about
+  the handshake, all against real units: SDP-registration ordering, which profile carries the
+  channel, who opens it, who speaks first, adapter identity (CarPlay EIR UUID, iPhone Class of
+  Device), mux ownership, and four different ways of resetting a link. The findings and the
+  measurements are in `CLAUDE.md`; do not re-run them.
+- **The dead first channel after a fresh bond was ours, and is fixed.** `set_trusted(false)` made
+  BlueZ refuse the unit's inbound profile connections - HFP answered `DM`, AVDTP and HID refused
+  with "security block" - and the unit will not drive iAP until its profile set is up. Trusted:
+  **6/6 clean first bonds, against 1/17 untrusted**.
+- **The `Connection reset by peer` on iAP2 after the WiFi handover is correct behaviour**, not a
+  fault. CarPlay moves the session onto WiFi - frames tunnel inside AirPlay `iAPSendMessage`
+  commands - and the phone asks the accessory to drop Bluetooth with `disableBluetooth`. The unit
+  does the same to a real iPhone.
+- **Neither unit implements that tunnel.** The bench AUTO BOX and the bike both report
+  `extended_features = [VocoderInfo]`. carjack has the transport (`libcarjack/src/iap2_tunnel.rs`)
+  but only engages it once an accessory actually sends on the channel, and does not claim
+  `ControllerFeature::IApChannel`. Until a unit turns up that does, our control channel genuinely
+  ends at the handover - which costs app launch, Siri, calls and now-playing, and costs video and
+  touch nothing.
 
 Dead ends, recorded so they are not retried:
 
