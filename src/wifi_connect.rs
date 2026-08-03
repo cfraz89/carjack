@@ -1,9 +1,12 @@
 use backon::{ConstantBuilder, Retryable, RetryableWithContext};
+use std::str::FromStr;
+
 use eyre::{Result, eyre};
 use futures::{StreamExt, TryStreamExt};
 use nm_automata::{
     ActivationBinding, ActivationOptions, ActivationPersist, ActivationStateFlags,
     ActiveConnectionState, ActiveProxy, AssignedMacAddress, ConnectionProfile, DeviceProxy,
+    MacAddress,
     DeviceState, DeviceType, Ipv4Method, Ipv4Setting, Ipv6Method, Ipv6Setting, NetworkManagerProxy,
     NonEmpty, ProxyExt, Ssid, WirelessBand, WirelessMode, WirelessProxy, WirelessSecurityKeyMgmt,
     WirelessSecuritySetting, WirelessSetting,
@@ -61,7 +64,16 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
         }
     }
 
-    let profile = car_profile(ssid, passphrase);
+    // The same address we announced over iAP2 - the accessory waits for exactly that station.
+    let announced = get_wifi_mac().await?;
+    let announced_mac = match MacAddress::from_str(&announced) {
+        Ok(mac) => AssignedMacAddress::Address(mac),
+        Err(e) => {
+            tracing::warn!(%announced, ?e, "Announced MAC unparseable; letting NetworkManager pick");
+            AssignedMacAddress::Preserve
+        }
+    };
+    let profile = car_profile(ssid, passphrase, announced_mac);
     (|| async {
         let nm = get_network_manager().await;
         let device = wifi_device().await?;
@@ -82,6 +94,22 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
         tokio::time::timeout(ACTIVATION_TIMEOUT, wait_for_activation(&active))
             .await
             .map_err(|_| eyre!("Timed out bringing up the car's WiFi connection"))??;
+        // The whole point of pinning the profile's address is that the accessory sees the station
+        // it was promised. If NetworkManager did not apply it, the association is live but the
+        // accessory is waiting for a station that will never appear - a failure that otherwise
+        // shows up much later, as an AirPlay session that never starts.
+        match device.hw_address().await {
+            Ok(actual) if actual.eq_ignore_ascii_case(&announced) => {
+                tracing::debug!(%actual, "Associated as the announced address")
+            }
+            Ok(actual) => tracing::warn!(
+                %actual,
+                %announced,
+                "Associated address is not the one announced over iAP2; the accessory is \
+                 watching for a station that will not appear"
+            ),
+            Err(e) => tracing::debug!(?e, "Could not read back the associated address"),
+        }
         car_wifi(&device, &active).await
     })
     .retry(ConstantBuilder::new().with_delay(Duration::from_secs(2)))
@@ -92,7 +120,7 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
 }
 
 /// The connection profile for the car's access point.
-fn car_profile(ssid: &str, passphrase: &str) -> ConnectionProfile {
+fn car_profile(ssid: &str, passphrase: &str, announced_mac: AssignedMacAddress) -> ConnectionProfile {
     ConnectionProfile::new(ssid)
         .wireless(
             WirelessSetting::default()
@@ -102,8 +130,9 @@ fn car_profile(ssid: &str, passphrase: &str) -> ConnectionProfile {
                 .hidden(true)
                 // The accessory is told our station address over iAP2 before we associate, so the address
                 // it is told has to be the one it then sees. NetworkManager randomises per profile by
-                // default, and this profile is new every session - pin it to the permanent address.
-                .assigned_mac_address(AssignedMacAddress::Permanent),
+                // default, and this profile is new every session - pin it to the address we
+                // announced in 0x4300, or the accessory waits for a station that never appears.
+                .assigned_mac_address(announced_mac),
         )
         .wireless_security(
             WirelessSecuritySetting::default()
@@ -342,25 +371,48 @@ fn dad_finished(msg: &AddressMessage) -> bool {
     }
 }
 
-pub(crate) async fn get_wifi_mac() -> Result<String> {
-    // EXPERIMENT (uncommitted): `CARJACK_WIFI_MAC=fe:b2:9f:ed:ea:72` announces an exact address.
-    // afd6605 switched this from the address NetworkManager happened to have to the permanent one,
-    // and the bike stopped answering 0x4300 - the two requests are byte-identical apart from this
-    // parameter. Sending the address the bike knew us by tests whether it keys its CarPlay
-    // association on it.
+/// The WiFi address carjack announces to the accessory, and associates with.
+///
+/// **Not the permanent hardware address.** The bike answers `0x4300` for `FE:B2:9F:ED:EA:72` and
+/// for an invented `FE:B2:9F:ED:EA:99`, and refuses to answer at all for this machine's permanent
+/// `4c:79:6e:da:29:47` - which differs from the adapter's *Bluetooth* address only in the last
+/// byte, so it most likely collides with us in the unit's device table. An iPhone's globally
+/// administered address is answered fine, so it is the collision that matters, not the bit.
+///
+/// Derived from the permanent address so it is stable for a machine - a unit that remembers us by
+/// this address keeps recognising us - and locally administered so it cannot collide with real
+/// hardware. `CARJACK_WIFI_MAC` overrides it for testing.
+fn announced_wifi_mac(permanent: &str) -> String {
     if let Ok(mac) = std::env::var("CARJACK_WIFI_MAC") {
-        tracing::warn!(%mac, "EXPERIMENT: announcing an overridden WiFi MAC");
-        return Ok(mac);
+        tracing::warn!(%mac, "Announcing an overridden WiFi MAC");
+        return mac;
     }
+    // FNV-1a over the permanent address: stable, no dependency, and good enough to scatter the
+    // low bytes away from the hardware address.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in permanent.to_ascii_lowercase().as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let d = h.to_be_bytes();
+    // `0xFE` is unicast and locally administered, and is the prefix both known-good addresses used.
+    format!(
+        "FE:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        d[0], d[1], d[2], d[3], d[4]
+    )
+}
+
+pub(crate) async fn get_wifi_mac() -> Result<String> {
+
     let device = wifi_device().await?;
     let wifi: WirelessProxy = device.cast().await?;
-    // The permanent address, not the current one: NetworkManager randomises per profile, and the
-    // car's connection pins itself to `permanent` so that what we announce is what associates.
-    let address = match wifi.perm_hw_address().await?.non_empty() {
+    // Derived from the permanent address rather than being it - see `announced_wifi_mac`. The
+    // car's profile pins itself to the same value, so what we announce is what associates.
+    let permanent = match wifi.perm_hw_address().await?.non_empty() {
         Some(permanent) => permanent,
         None => device.hw_address().await?,
     };
-    Ok(address.to_lowercase())
+    Ok(announced_wifi_mac(&permanent))
 }
 
 #[cfg(test)]
@@ -509,7 +561,11 @@ mod tests {
             let settings = nm_automata::SettingsProxy::new(nm.inner().connection())
                 .await
                 .expect("no settings interface");
-            let profile = super::car_profile("carjack-profile-check", "hunter2hunter2");
+            let profile = super::car_profile(
+                "carjack-profile-check",
+                "hunter2hunter2",
+                AssignedMacAddress::Permanent,
+            );
 
             let stored = settings
                 .add_connection_unsaved(&profile)
