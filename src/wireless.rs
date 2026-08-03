@@ -32,6 +32,11 @@ const DISCOVERY_WAIT: Duration = Duration::from_secs(60);
 /// `ConnectRequest::accept` can't turn the wait loop into a busy spin.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
+/// How many times `relink` pages before giving up, and how long it waits between attempts. A Page
+/// Timeout is the unit's controller not answering; it frequently answers on a later try.
+const PAGE_ATTEMPTS: u32 = 3;
+const PAGE_RETRY_DELAY: Duration = Duration::from_secs(2);
+
 /// How long to wait for a unit to offer its iAP channel before concluding the link is one it will
 /// not offer on. Comfortably longer than the ~15s a bike takes to connect of its own accord.
 const OFFER_WAIT: Duration = Duration::from_secs(25);
@@ -274,8 +279,25 @@ async fn relink(device: &Device, gate: &Arc<Semaphore>) {
     let device = device.clone();
     tokio::spawn(async move {
         let _permit = permit;
-        let res = device.connect().await;
-        tracing::debug!(?res, "Connected");
+        // Pages fail often and for reasons that clear on their own - Page Timeout is the unit's
+        // controller not answering, which says nothing about whether it will answer a second
+        // later. Retrying matters because a failed page is a session that never starts: the unit
+        // will not offer its iAP channel on a link that was never made.
+        for attempt in 1..=PAGE_ATTEMPTS {
+            match device.connect().await {
+                Ok(()) => {
+                    tracing::debug!(attempt, "Connected");
+                    return;
+                }
+                Err(e) if attempt == PAGE_ATTEMPTS => {
+                    tracing::warn!(?e, attempt, "Page failed; giving up until the next relink");
+                }
+                Err(e) => {
+                    tracing::debug!(?e, attempt, "Page failed; retrying");
+                    tokio::time::sleep(PAGE_RETRY_DELAY).await;
+                }
+            }
+        }
     });
 }
 
