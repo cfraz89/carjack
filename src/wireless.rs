@@ -155,22 +155,25 @@ async fn apply_device_class() {
     }
 }
 
-/// The 24-character device identifier the accessory expects in `RequestAccessoryWiFiConfiguration`
-/// (an iPhone sends its UDID there, not an address). Derived from the adapter address so it is
-/// stable for a given machine.
+/// What carjack calls itself in `RequestAccessoryWiFiConfiguration` - the adapter's Bluetooth
+/// address, colon-separated and uppercase.
+///
+/// afd6605 changed this to a 24-character zero-padded form, on the reasoning that an iPhone sends
+/// a UDID there rather than an address. The bike does not answer it: `0x4300` carrying
+/// `0000000000004C796EDA294B` is acked and never replied to, while the same request carrying
+/// `4C:79:6E:DA:29:4B` gets `0x4301` back. An iPhone's own 24-character identifier is answered
+/// fine, so the format is not inherently wrong - ours specifically is not accepted, and the bike
+/// is the target.
 fn transport_identifier(addr: bluer::Address) -> String {
-    // EXPERIMENT (uncommitted): `CARJACK_WIFI_ID=btmac` restores the colon-separated uppercase MAC
-    // that `cfmoto_11` sent and the bike answered, before afd6605 switched to the padded 24-char
-    // form. The bike acks the padded form and never replies with 0x4301.
-    if std::env::var("CARJACK_WIFI_ID").as_deref() == Ok("btmac") {
-        return addr
-            .iter()
-            .map(|b| format!("{b:02X}"))
-            .collect::<Vec<_>>()
-            .join(":");
+    // `CARJACK_WIFI_ID=padded` restores afd6605's form, for testing against a unit that wants it.
+    if std::env::var("CARJACK_WIFI_ID").as_deref() == Ok("padded") {
+        let hex: String = addr.iter().map(|b| format!("{b:02X}")).collect();
+        return format!("{hex:0>24}");
     }
-    let hex: String = addr.iter().map(|b| format!("{b:02X}")).collect();
-    format!("{hex:0>24}")
+    addr.iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 impl IapHost {
@@ -488,12 +491,11 @@ async fn prepare_device(device: Device) -> Result<Device> {
 mod tests {
     use super::transport_identifier;
 
-    /// The accessory expects the iPhone's 24-character identifier shape here, not an address -
-    /// a 17-character MAC string in this field is what the bike was being sent.
+    /// The bike answers `0x4300` carrying this form and ignores the 24-character padded one that
+    /// afd6605 introduced - see `transport_identifier`.
     #[test]
-    fn transport_identifier_is_24_hex_chars() {
+    fn transport_identifier_is_the_colon_bluetooth_address() {
         let id = transport_identifier(bluer::Address::new([0x4c, 0x79, 0x6e, 0xda, 0x29, 0x4b]));
-        assert_eq!(id, "0000000000004C796EDA294B");
-        assert_eq!(id.len(), 24);
+        assert_eq!(id, "4C:79:6E:DA:29:4B");
     }
 }
