@@ -119,19 +119,6 @@ fn carplay_profile() -> rfcomm::Profile {
     }
 }
 
-/// Whether any Bluetooth rfkill switch is soft-blocked. A soft-blocked adapter refuses to power
-/// up over D-Bus, and the error BlueZ returns for it says only "Failed".
-fn rfkill_soft_blocked() -> bool {
-    let Ok(entries) = std::fs::read_dir("/sys/class/rfkill") else {
-        return false;
-    };
-    entries.flatten().any(|e| {
-        let kind = std::fs::read_to_string(e.path().join("type")).unwrap_or_default();
-        let soft = std::fs::read_to_string(e.path().join("soft")).unwrap_or_default();
-        kind.trim() == "bluetooth" && soft.trim() == "1"
-    })
-}
-
 /// Run the privileged sidecar that gives the adapter an iPhone-like Class of Device.
 ///
 /// Best-effort, and deliberately not fatal: the capability is granted out of band (`just setcap`,
@@ -152,7 +139,10 @@ async fn apply_device_class() {
             stderr = %String::from_utf8_lossy(&out.stderr).trim(),
             "carjack-hci-helper failed; continuing without the Class of Device (try `just setcap`)"
         ),
-        Err(e) => tracing::warn!(?e, "Could not run carjack-hci-helper; continuing without it"),
+        Err(e) => tracing::warn!(
+            ?e,
+            "Could not run carjack-hci-helper; continuing without it"
+        ),
     }
 }
 
@@ -160,24 +150,21 @@ async fn apply_device_class() {
 /// (an iPhone sends its UDID there, not an address). Derived from the adapter address so it is
 /// stable for a given machine.
 fn transport_identifier(addr: bluer::Address) -> String {
+    // EXPERIMENT (uncommitted): `CARJACK_WIFI_ID=btmac` restores the colon-separated uppercase MAC
+    // that `cfmoto_11` sent and the bike answered, before afd6605 switched to the padded 24-char
+    // form. The bike acks the padded form and never replies with 0x4301.
+    if std::env::var("CARJACK_WIFI_ID").as_deref() == Ok("btmac") {
+        return addr
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(":");
+    }
     let hex: String = addr.iter().map(|b| format!("{b:02X}")).collect();
     format!("{hex:0>24}")
 }
 
 impl IapHost {
-    /// Power the adapter down on the way out, so it is never reachable without carjack behind it.
-    ///
-    /// Paired with powering up only after the profiles register: between runs the adapter stays
-    /// dark, so a unit cannot connect into a carjack that is not listening. Best-effort - a second
-    /// Ctrl-C or a SIGKILL exits before this runs, and then `[Policy] AutoEnable = false` is what
-    /// keeps the adapter down until the next start.
-    pub async fn power_down(&self) {
-        match self.adapter.set_powered(false).await {
-            Ok(()) => tracing::info!("Adapter powered down"),
-            Err(e) => tracing::warn!(?e, "Could not power the adapter down"),
-        }
-    }
-
     /// Register everything once.
     pub async fn start() -> Result<Self> {
         let session = Session::new().await?;
@@ -226,26 +213,7 @@ impl IapHost {
         // changes, so set ours once that has settled. Best-effort - see `apply_device_class`.
         apply_device_class().await;
 
-        // Powered only once the profiles are up, never before: a unit that connects while the
-        // adapter is live but our profiles are not offers its iAP channel to nobody, and that link
-        // then needs cycling, which the bike will not tolerate. On a box that boots with the unit
-        // (the bike powers the carjack box) set `[Policy] AutoEnable = false` in
-        // `/etc/bluetooth/main.conf` so the adapter stays down until this line runs - that closes
-        // the window entirely. Deliberately *not* forcing it down first: if a unit has already
-        // connected, dropping the link does not help, because it will not reconnect.
-        adapter.set_powered(true).await.map_err(|e| {
-            if rfkill_soft_blocked() {
-                eyre!(
-                    "cannot power the Bluetooth adapter up: it is rfkill soft-blocked, which no \
-                     D-Bus call can undo - run `rfkill unblock bluetooth` (note `bluetoothctl \
-                     power off` is what blocks it, and systemd-rfkill persists that across \
-                     reboots): {e}"
-                )
-            } else {
-                eyre!("cannot power the Bluetooth adapter up: {e}")
-            }
-        })?;
-        tracing::info!("Registered iAP and CarPlay profiles, adapter powered up");
+        tracing::info!("Registered iAP and CarPlay profiles");
 
         Ok(Self {
             adapter,
@@ -256,7 +224,6 @@ impl IapHost {
             // _iap_v2: iap_v2,
         })
     }
-
 }
 
 /// Carried across retry attempts by `backon`: the host holding the profile we accept on, and the
@@ -351,7 +318,7 @@ pub async fn wireless_carplay(
     let adapter = &host.adapter;
     let identity = host.identity.clone();
 
-    let (device, stale_link) = find_target_device(adapter, &target).await?;
+    let device = find_target_device(adapter, &target).await?;
     // Surface the car's MAC (known now, early) so the caller can look up its cached display and
     // size the compositor / launch the app before AirPlay reports the display.
     let _ = car_addr_tx.send(device.address().to_string());
@@ -359,16 +326,9 @@ pub async fn wireless_carplay(
     // Gate on relinks: one at a time.
     let connect_attempt = Arc::new(tokio::sync::Semaphore::new(1));
 
-    // Only cycle a link that predates us. One we just made by pairing - or that the unit brought up
-    // while we were already listening - carries the switch on its first channel, so paging is pure
-    // cost, and the bike refuses inbound connections anyway. A stale link needs the full cycle:
-    // dropping it without paging leaves the unit silent.
-    if stale_link {
-        tracing::info!("Cycling the pre-existing link with the head unit");
-        relink(&device, &connect_attempt).await;
-    } else {
-        tracing::info!("No pre-existing link; listening rather than paging");
-    }
+    //If the link is stale, we need to reconnect, as we've probably missed our window to accept the iap connection.
+    //If it isn't, we need to connect if we haven't alreaady.
+    relink(&device, &connect_attempt).await;
 
     let task_device = device.clone();
 
@@ -404,9 +364,8 @@ pub async fn wireless_carplay(
     Ok(())
 }
 
-
 /// Resolve the we paired it this sessionconfigured accesory and get it ready to connect.
-async fn find_target_device(adapter: &Adapter, target: &str) -> Result<(Device, bool)> {
+async fn find_target_device(adapter: &Adapter, target: &str) -> Result<Device> {
     let wanted: Option<Address> = target.parse().ok();
 
     // Whatever BlueZ already knows about (bonded from a previous run, or currently connected).
@@ -414,7 +373,8 @@ async fn find_target_device(adapter: &Adapter, target: &str) -> Result<(Device, 
         let device = adapter.device(addr)?;
         if device_matches(&device, target, wanted).await {
             tracing::info!(%target, ?addr, "Found configured head unit in BlueZ's device list");
-            return prepare_device(device).await;
+            let device = prepare_device(device).await?;
+            return Ok(device);
         }
     }
 
@@ -447,7 +407,8 @@ async fn find_target_device(adapter: &Adapter, target: &str) -> Result<(Device, 
     .map_err(|_| eyre!("Timed out waiting for Bluetooth device '{target}'"))??;
 
     tracing::info!(%target, address = ?found.address(), "Discovered configured head unit");
-    prepare_device(found).await
+    let device = prepare_device(found).await?;
+    Ok(device)
 }
 
 /// Whether this device is the configured target, by address if the selector parsed as a MAC,
@@ -460,21 +421,17 @@ async fn device_matches(device: &Device, target: &str, wanted: Option<Address>) 
 }
 
 /// Pair (if needed) and trust the target. Reports whether a link *predated* us - see `relink`.
-async fn prepare_device(device: Device) -> Result<(Device, bool)> {
+async fn prepare_device(device: Device) -> Result<Device> {
     let alias = device.alias().await.unwrap_or_default();
     let rssi = device.rssi().await.ok().flatten();
     let class = device.class().await.ok().flatten();
     let was_paired = device.is_paired().await.unwrap_or(false);
-    // Sampled before we pair: a link that is already up predates carjack listening, so the unit
-    // offered its iAP channel to nobody and will not offer again until the link is cycled.
-    let stale_link = device.is_connected().await.unwrap_or(false);
     tracing::info!(
         name = alias,
         address = ?device.address(),
         rssi,
         class = class.map(|c| format!("{c:#08x}")),
         was_paired,
-        stale_link,
         "Preparing configured head unit"
     );
 
@@ -484,10 +441,8 @@ async fn prepare_device(device: Device) -> Result<(Device, bool)> {
             tracing::warn!(?e, "Pairing failed, continuing to the connection attempt")
         });
     }
-    // Trust the unit, or BlueZ refuses its inbound profile connections - HFP gets `DM`, AVDTP and
-    // HID get "security block" - and it will not drive iAP until its profile set is up.
     let _ = device.set_trusted(true).await;
-    Ok((device, stale_link))
+    Ok(device)
 }
 
 #[cfg(test)]

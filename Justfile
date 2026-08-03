@@ -39,21 +39,11 @@ test-run timeout="60" +flags="": (build flags)
     cleanup() {
         # Anchored: unanchored, this matches *any* process whose command line merely contains the
         # path - a tail on the log, an editor, a wrapper script driving this recipe - and kills it.
-        pkill -f '^target/(debug|release)/carjack$' 2>/dev/null || true
-        # carjack powers the adapter down on a graceful exit, but the kill above skips that, so do
-        # it here. It also leaves the next run starting from a dark adapter, which is the state a
-        # deployment box boots in with `[Policy] AutoEnable = false` - so test-run exercises the
-        # real ordering: profiles registered first, adapter powered up after.
-        # Via D-Bus, *not* `bluetoothctl power off`: that rfkill soft-blocks the adapter, and a
-        # soft-blocked adapter cannot be powered back up over D-Bus at all - the next run then dies
-        # with "Bluetooth operation failed". Recover from that with `rfkill unblock bluetooth`.
-        busctl --system set-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 \
-            Powered b false >/dev/null 2>&1 || true
         if [ -n "$original" ]; then
             current=$(nmcli -t -f NAME,ACTIVE connection show --active 2>/dev/null | awk -F: '$2=="yes"{print $1; exit}')
             if [ "$current" != "$original" ]; then
                 echo "Restoring original connection: $original" >&2
-                nmcli connection up id "$original" >/dev/null 2>&1 || true
+                timeout --foreground --kill-after=5s 10s nmcli connection up id "$original" >/dev/null 2>&1 || true
             fi
         fi
     }

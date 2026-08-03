@@ -234,7 +234,6 @@ async fn run_app(config: Config) -> Result<()> {
     // Deterministic cleanup (Drop would also handle these, but do it before returning).
     app.kill();
     drop(compositor);
-    host.power_down().await;
     exit
 }
 
@@ -294,7 +293,6 @@ async fn run_desktop(config: Config) -> Result<()> {
         }
     };
 
-    host.power_down().await;
     exit
 }
 

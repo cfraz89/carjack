@@ -343,6 +343,15 @@ fn dad_finished(msg: &AddressMessage) -> bool {
 }
 
 pub(crate) async fn get_wifi_mac() -> Result<String> {
+    // EXPERIMENT (uncommitted): `CARJACK_WIFI_MAC=fe:b2:9f:ed:ea:72` announces an exact address.
+    // afd6605 switched this from the address NetworkManager happened to have to the permanent one,
+    // and the bike stopped answering 0x4300 - the two requests are byte-identical apart from this
+    // parameter. Sending the address the bike knew us by tests whether it keys its CarPlay
+    // association on it.
+    if let Ok(mac) = std::env::var("CARJACK_WIFI_MAC") {
+        tracing::warn!(%mac, "EXPERIMENT: announcing an overridden WiFi MAC");
+        return Ok(mac);
+    }
     let device = wifi_device().await?;
     let wifi: WirelessProxy = device.cast().await?;
     // The permanent address, not the current one: NetworkManager randomises per profile, and the
