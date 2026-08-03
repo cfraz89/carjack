@@ -749,6 +749,13 @@ mod tests {
                 .get_param::<String>(ParameterId::WIFI_CONFIG_MAC),
             Some(String::from("3D:20:3D:D3:EB:06"))
         );
+        // The accessory's HomeKit pairing id - the same value an invite carries as `pi`, and
+        // the only route to one on a unit that never invites.
+        assert_eq!(
+            msg.parameters
+                .get_param::<String>(ParameterId::WIFI_CONFIG_UUID),
+            Some(String::from("9a011f99-597e-424d-b490-806fd7c07800"))
+        );
     }
 
     #[test]

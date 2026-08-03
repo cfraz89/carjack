@@ -14,6 +14,7 @@ use iap2_proto::{
 use std::net::{IpAddr, SocketAddr};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
 
 /// Wall clock for `DeviceTimeUpdate`: seconds since the Unix epoch, minutes east of UTC, and the
 /// DST flag - the three parameters an iPhone sends. The offset is signed on the wire (16-bit two's
@@ -93,6 +94,10 @@ pub struct WifiCredentials {
     /// forever. A link-local address here still needs a scope id, which only the caller (who
     /// knows the interface) can attach.
     pub airplay: Option<SocketAddr>,
+    /// The accessory's HomeKit pairing id, when it names one beside the address - the same value
+    /// an invite carries as `pi`, and the only route to one on a unit that never invites. Only
+    /// selects `/pair-verify` once we have actually paired with it; see `airplay::connect_airplay`.
+    pub pairing_id: Option<Uuid>,
 }
 
 /// Port to reach AirPlay on when the accessory named an address but no port.
@@ -430,6 +435,10 @@ impl<S: Stream> CarplaySession<S> {
                     if let Some(ch) = group.get_param::<u8>(ParameterId::WIFI_CONFIG_CHANNEL) {
                         tracing::info!("Accessory WiFi: channel={}", ch);
                     }
+                    let pairing_id = msg
+                        .parameters
+                        .get_param::<String>(ParameterId::WIFI_CONFIG_UUID)
+                        .and_then(|u| Uuid::parse_str(&u).ok());
                     group
                         .get_param::<String>(ParameterId::WIFI_CONFIG_SSID)
                         .map(|ssid| WifiCredentials {
@@ -440,6 +449,7 @@ impl<S: Stream> CarplaySession<S> {
                                 .parameters
                                 .get_param::<String>(ParameterId::WIFI_CONFIG_MAC),
                             airplay,
+                            pairing_id,
                         })
                 } else {
                     // 0x5703: flat parameters. Parameters 3 and 4 are a single byte each and
@@ -454,6 +464,7 @@ impl<S: Stream> CarplaySession<S> {
                             // This dialect carries no address, so the AUTO BOX path keeps
                             // discovering the receiver over mDNS exactly as before.
                             airplay: None,
+                            pairing_id: None,
                         })
                 };
                 if let Some(creds) = creds {
@@ -515,6 +526,7 @@ impl<S: Stream> CarplaySession<S> {
                         passphrase: Some(passphrase),
                         bssid,
                         airplay: None,
+                        pairing_id: None,
                     };
                     let _ = self.wifi_tx.send(creds).await;
                 }

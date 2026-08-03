@@ -10,9 +10,13 @@ use uuid::Uuid;
 /// and correlate it against the car's own `_airplay._tcp` Bonjour record to learn its real
 /// AirPlay address and HomeKit pairing id (rather than guessing the WiFi gateway IP and
 /// skipping HomeKit pair-verify fast-path).
+///
+/// Units that name their receiver over iAP2 do no Bonjour at all, so the caller keeps `timeout`
+/// short when it has an address to fall back on.
 pub async fn wait_for_carplay_ctrl_probe(
     iface: &str,
     bonjour_id: &str,
+    timeout: Duration,
 ) -> Result<(SocketAddr, Option<Uuid>)> {
     const PORT: u16 = 8082;
 
@@ -20,7 +24,7 @@ pub async fn wait_for_carplay_ctrl_probe(
         .map_err(|e| eyre!("Failed to start CarPlay ctrl server: {e}"))?;
     tracing::info!("_carplay-ctrl._tcp advertised on {iface}:{PORT} (id={bonjour_id})");
 
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + timeout;
     let mut announce_interval = tokio::time::interval(Duration::from_millis(1000));
 
     loop {

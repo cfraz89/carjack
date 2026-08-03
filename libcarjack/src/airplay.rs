@@ -1,4 +1,6 @@
 use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -14,7 +16,7 @@ use catplay_carplay::msg::Command;
 use catplay_carplay::rtsp_frame::HttpStatus;
 use catplay_carplay::screen::tx::{ScreenTransmitError, ScreenTransmitSink};
 use catplay_carplay::video::{AvccConfig, AvccConfigExtended, EncodedVideoFrame, Pts};
-use catplay_hap::HomekitStorageFile;
+use catplay_hap::{HomekitStorageFile, HomekitStorageRef};
 use eyre::{eyre, Result};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -35,11 +37,50 @@ pub struct AirPlayConnection {
     pub max_fps: u32,
 }
 
+/// HomeKit pairings for the whole process, so a car that has met us before can take
+/// `/pair-verify` against stored keys instead of a full `/pair-setup`. Left unset (tests) each
+/// connection gets a throwaway identity.
+///
+/// Inert for now: catplay's transmitter bootstrap goes straight to SETUP - its `start_pair_task`
+/// and `start_auth_setup_task` calls are commented out - so nothing here is read or written until
+/// that flow is enabled. Units tested so far are happy with an unencrypted control channel.
+static HOMEKIT: OnceLock<HomekitStorageRef> = OnceLock::new();
+
+/// Point HomeKit storage at a file, loading any pairings already in it. Corrupt or unreadable
+/// storage is not fatal - catplay recovers it with a fresh identity, costing one re-pair.
+pub fn init_homekit_storage(path: &Path) -> Result<()> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| eyre!("HomeKit storage path {path:?} is not UTF-8"))?;
+    let storage = HomekitStorageFile::file(path).map_err(|e| eyre!("{e:?}"))?;
+    tracing::info!(
+        "HomeKit identity {} from {path} ({} accessory pairing(s) known)",
+        storage.device_id(),
+        storage.paired_ids().len()
+    );
+    let _ = HOMEKIT.set(storage);
+    Ok(())
+}
+
 pub async fn connect_airplay(
     peer_addr: SocketAddr,
     remote_homekit_id: Option<Uuid>,
 ) -> Result<AirPlayConnection> {
-    let homekit = HomekitStorageFile::memory();
+    let homekit = HOMEKIT
+        .get()
+        .cloned()
+        .unwrap_or_else(HomekitStorageFile::memory);
+
+    // Only pass an id we have actually paired with. Then it selects `/pair-verify` against the
+    // stored keys; unknown, all it can do is make `/pair-setup` assert that the accessory's real
+    // identity matches - failing the session over a guess, since not every unit's advertised id
+    // is its HomeKit one. Filtering here also makes a first contact free to succeed and be
+    // remembered, which is what makes the *next* connection the fast one.
+    let remote_homekit_id = remote_homekit_id.filter(|id| homekit.find_paired_by_id(id).is_some());
+    match remote_homekit_id {
+        Some(id) => tracing::info!("Known HomeKit accessory {id}; expecting pair-verify"),
+        None => tracing::info!("Unknown HomeKit accessory; expecting a full pair-setup"),
+    }
 
     let bootstrap = AirPlayTransmitterBootstrap {
         homekit,

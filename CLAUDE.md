@@ -217,20 +217,34 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 - iAP2 magic bytes are `0xFF 0x5A`; the iAP1 switch-to-iAP2 command starts with
   `FF 55 02 00 EE 10`.
 - AirPlay/CarPlay video runs over TCP port 7000 on the car.
-- **The car invites the phone; carjack never connects to AirPlay uninvited.** Once on the car's
-  WiFi, `wait_for_carplay_ctrl_probe` advertises `_carplay-ctrl._tcp` and waits for the car's
-  `GET /ctrl-int/1/connect`, then connects where that invite's Bonjour record points. A head unit
-  only invites a phone it has *discovered* (catplay's `cp_inviter.rs` loops doing nothing until
-  one appears), so not advertising means never being invited - which is why the old "the bike
-  doesn't invite us on mDNS anyway" note was circular: carjack only advertised when `0x4301`
-  omitted an address, and the bike always supplies one. **The record's `id` is the adapter's
-  *Bluetooth* address** (`IapHost::bluetooth_address`), not the WiFi MAC - catplay documents the
-  field as the phone's BT MAC, and it is how the car ties the station on its AP back to the
-  device it authenticated over Bluetooth. **Measured on the bench AUTO BOX: advertising the
-  Bluetooth address gets an invite in 69 ms; the same unit advertising the WiFi MAC timed out at
-  15 s** - so the `id` is the whole of it. Connecting straight to the `0x4301` address (and to the
-  gateway as a fallback) was removed: the bike accepts that TCP connection and then never answers
-  `/info`. The invite also carries the car's HomeKit pairing id, which the old fallback lacked.
+- **Which side opens AirPlay depends on the unit, so carjack does both.** Once on the car's WiFi,
+  `wait_for_carplay_ctrl_probe` advertises `_carplay-ctrl._tcp` and waits for the car's
+  `GET /ctrl-int/1/connect`; if that times out and `0x4301` named a receiver, carjack connects
+  there instead. A unit that browses Bonjour only invites a phone it has *discovered* (catplay's
+  `cp_inviter.rs` loops doing nothing until one appears), so advertising is unconditional - the
+  old "the bike doesn't invite us on mDNS anyway" note was circular, since carjack only advertised
+  when `0x4301` omitted an address. **The record's `id` is the adapter's *Bluetooth* address**
+  (`IapHost::bluetooth_address`), not the WiFi MAC - catplay documents the field as the phone's BT
+  MAC, and it is how the car ties the station on its AP back to the device it authenticated over
+  Bluetooth. **Measured on the bench AUTO BOX: advertising the Bluetooth address gets an invite in
+  69 ms; the same unit advertising the WiFi MAC timed out at 15 s** - so on a unit that does invite,
+  the `id` is the whole of it. **The bike does no Bonjour at all** - measured over 40 s of
+  correctly-`id`ed advertising it neither browsed, advertised, nor invited, and its only IP traffic
+  was DHCP and one ARP. A unit that names its receiver in `0x4301` is telling you to connect to it,
+  so the wait before falling back is 3 s rather than 15. `0x4301` also carries what looks like the
+  accessory's HomeKit pairing id (`WIFI_CONFIG_UUID`), which `WifiCredentials` parses and logs but
+  does **not** pass to catplay - see the HomeKit note below.
+- **Nothing on the AirPlay path actually runs HomeKit pairing.** catplay's transmitter bootstrap
+  handles `Connected` by calling `start_setup_task()` alone - `start_pair_task()` and
+  `start_auth_setup_task()` are commented out beside it - so `/pair-setup` and `/pair-verify` are
+  never issued, the control channel stays `AirPlayStreamEncryption::Unconfigured`, and every unit
+  tested so far accepts that. Consequences: the pairing id in an invite's `pi` or in `0x4301` picks
+  nothing, and `HomekitStorageRef` is carried but unread. carjack still keeps a persistent identity
+  and pairing table (`~/.local/share/carjack/homekit.bin`, `init_homekit_storage`, verified stable
+  across runs) so the day that flow is enabled a returning car is a `/pair-verify`; and
+  `connect_airplay` passes a pairing id **only** when storage already knows it, since an unknown one
+  can only make `/pair-setup` assert an identity match and fail the session. Do not read a HomeKit
+  symptom into a failed session without first checking that any of it is switched on.
 - On the primary dev machine's WiFi card, `iwlwifi` needed `disable_11ax=1` (via
   `/etc/modprobe.d/`) to avoid a HE/VHT rate mismatch when connecting to the
   car's AP - if WiFi association looks flaky on a new dev machine, check that

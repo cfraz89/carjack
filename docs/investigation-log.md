@@ -12,6 +12,67 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
 
 ## 2026-08
 
+- **2026-08-03 22:53 (`cfmoto.pcapng` + `/tmp/carjack.btsnoop` + the journal): the bike does no
+  Bonjour at all, and the WiFi association survived the whole run.** The first bike test of the
+  invite path, and it answers the question cleanly in the negative.
+
+  carjack advertised `_carplay-ctrl._tcp` correctly - `id=4C:79:6E:DA:29:4B`, the adapter's
+  Bluetooth address, announced once a second from t=17.0 to the end of capture at t=69.8, across
+  two complete iAP2 sessions - and no invite ever came. The bike's entire IP presence in 70 s is
+  three packets: DHCP offer, DHCP ack, and one ARP (`Who has 192.168.69.57? Tell 192.168.69.58`)
+  at t=22.07, which carjack answered in 17 µs and which was followed by nothing. Not one mDNS
+  query, not one announcement, no TCP in either direction. It does not browse for a phone and does
+  not publish `_airplay._tcp` either. The bench measurement stands (that unit invites in 69 ms once
+  the `id` is the Bluetooth address); it simply does not generalise to this one.
+
+  What the bike does instead is repeat `0x4301` every ~3 s for as long as the session lasts - six
+  times in session 1 (t=3.8…18.9) and six more in session 2 - always the same 158 bytes: SSID
+  `CFMOTO-999700`, passphrase, channel 157, `fe80::9083:8eff:feef:a7d3`, port 7000, MAC
+  `3D:20:3D:D3:EB:06`, pairing id `9a011f99-597e-424d-b490-806fd7c07800`. Decoded against
+  `iphone-cfmoto.pklg`, that message is **byte-identical** to the one the working iPhone receives -
+  and in that capture the phone's iAP2 traffic ends 3 s after the second copy (the whole iAP2 span
+  is 426.0…437.4 s), which is the handoff. So the repeats are the bike waiting to be connected to,
+  and the iPhone connects out. carjack, having had its direct-connect path removed the commit
+  before, sat waiting for an invite that this unit has no mechanism to send.
+
+  Two side findings, both worth more than the primary one:
+
+  - **The association did not die.** `associated` at 22:53:41, still up when the capture stopped
+    56 s later, `Connection to AP … lost` only at 22:54:45 after carjack had exited. No deauth
+    cycling whatsoever. The ~11 s locally-generated deauth loop of the 21:02 run did not
+    reproduce, and the difference in this run is that avahi is emitting mDNS every second - which
+    is exactly the traffic mac80211's connection-loss detection wants to see. Not proven, but it
+    is the first candidate.
+  - **The `/info` timeout was never evidence against connecting out.** It came from the 21:02 run,
+    whose WiFi was deauthing every ~11 s; a request that sat 10 s unanswered was sitting on a link
+    that was in the middle of dying. The conclusion drawn from it - "the bike accepts the TCP
+    connection and never answers `/info`" - is withdrawn.
+
+  Changed: the invite stays preferred and the advertisement stays unconditional, but when `0x4301`
+  names a receiver the wait is 3 s and carjack then connects there. `WifiCredentials` now also
+  carries the pairing id from `WIFI_CONFIG_UUID` (`0x0004`), which was being parsed by nothing -
+  though reading catplay showed it buys nothing yet: `HomekitStorageFile::memory()` gives carjack a
+  new identity and an empty pairing table per connection, so `PairingHelperTx`'s `/pair-verify`
+  fast path can never fire and a pairing id can only *fail* pair-setup on a mismatch. Untested on the bike.
+
+- **2026-08-03, following on: HomeKit pairing is not merely unpersisted, it is never run.** Chasing
+  the pairing ids further, catplay's transmitter bootstrap turns out to handle `Connected` with
+  `start_setup_task()` alone - `start_pair_task()` and `start_auth_setup_task()` are commented out
+  on the two lines below it (`carplay_tx/transmitter.rs`). So `/pair-setup` and `/pair-verify` are
+  never issued, the control channel stays `AirPlayStreamEncryption::Unconfigured`, and the
+  `HomekitStorageRef` carjack passes in is neither read nor written. Confirmed on the bench rather
+  than assumed: two full sessions to RECORD, and the storage file was unchanged on disk and still
+  reported `0 accessory pairing(s) known` at the start of the second. Both units accept an
+  unencrypted control channel.
+
+  Persistence was implemented regardless (`init_homekit_storage` →
+  `~/.local/share/carjack/homekit.bin`; identity verified stable across four runs including two car
+  sessions), and `connect_airplay` now passes a pairing id only when storage already knows it -
+  unknown, an id can only make `/pair-setup` assert an identity match, which risks a session on a
+  guess about what the field means and wins nothing. So this is groundwork, not a fix: nothing seen
+  so far needs HomeKit, and it should not be read as a lead until a unit refuses an unencrypted
+  control channel.
+
 - **2026-08-03 21:02 (`cfmoto.log` + `/tmp/carjack.btsnoop` + the journal): the deauth is
   *locally* generated, and the car is fine throughout. This supersedes the 2026-07-31 entry
   below, which read the same event as coming from the AP.**

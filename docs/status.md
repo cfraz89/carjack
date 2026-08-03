@@ -105,7 +105,57 @@ only through the fallback that is now deleted. Same unit, same advertisement, di
 bike. It is also strictly better than the old path - the invite carries the car's HomeKit pairing
 id (`pi`), which the gateway fallback never had, so pair-verify now has its fast path.
 
-**Still untested on the bike**, which is the run that matters.
+**Tested on the bike (2026-08-03 22:53, `cfmoto.pcapng` + `/tmp/carjack.btsnoop`) - it does not
+invite, and it does no Bonjour at all.** carjack advertised `_carplay-ctrl._tcp` with
+`id=4C:79:6E:DA:29:4B` (the Bluetooth address) once a second from t=17.0 to the end of the run,
+across two full iAP2 sessions, and was never invited. In ~70 s the bike sent exactly **three**
+IP packets: a DHCP offer, a DHCP ack, and one ARP for us at t=22.07 (answered immediately, and
+nothing followed it). No mDNS query, no mDNS announcement, no TCP in either direction. So the
+bike neither browses for a phone nor publishes `_airplay._tcp` - the `id` fix is real but has
+nothing to act on here.
+
+What it does instead is repeat `0x4301` every ~3 s indefinitely (six times per session, until
+carjack's invite wait expired and restarted the session), handing over the same 158 bytes each
+time: SSID, passphrase, channel 157, `fe80::9083:8eff:feef:a7d3`, port 7000, and its HomeKit
+pairing id `9a011f99-…`. That message is byte-identical to the one the iPhone gets in
+`iphone-cfmoto.pklg`, and there the phone's iAP2 traffic *ends* 3 s after the second copy - the
+handoff. The bike is saying "connect to me", and only carjack was waiting.
+
+**Two things this run also settles.** First, **the WiFi association is stable**: associated at
+22:53:41 and still up when the capture ended 56 s later, with no deauth cycling at all - the
+~11 s deauth loop needs re-explaining, and continuous mDNS chatter keeping mac80211's
+connection-loss detection quiet is the obvious candidate. Second, the `/info` timeout that made
+the direct connect look broken came from a run whose WiFi was dying every 11 s, so it was never
+evidence against connecting out.
+
+Changed: the invite is still preferred and still advertised unconditionally, but when `0x4301`
+named a receiver the wait is 3 s and carjack then connects there. **Untested on the bike.**
+
+## HomeKit: switched off entirely, on both sides of the question
+
+Chased on 2026-08-03 because the pairing ids in the invite and in `0x4301` looked like they
+mattered. They do not, yet - **catplay never runs the pairing flow at all**. Its transmitter
+bootstrap handles `Connected` with `start_setup_task()` and nothing else; `start_pair_task()` and
+`start_auth_setup_task()` sit commented out on the two lines below it
+(`carplay_tx/transmitter.rs`). So `/pair-setup` and `/pair-verify` are never issued, the control
+channel stays `AirPlayStreamEncryption::Unconfigured`, and the `HomekitStorageRef` carjack hands in
+is never read or written. Both bench units accept that happily.
+
+Measured, not just read: two full bench sessions to RECORD, and the storage file was byte-identical
+and still reported `0 accessory pairing(s) known` on the second - it is never written because
+nothing pairs.
+
+Implemented anyway, since it costs nothing and is what a phone does:
+`init_homekit_storage` puts a stable identity and pairing table in
+`~/.local/share/carjack/homekit.bin` (verified: same identity reloaded across runs, and across a
+car session), and `connect_airplay` passes a pairing id **only** when storage already knows it -
+unknown, all an id can do is make `/pair-setup` assert an identity match and fail a session over a
+guess about what the field means. First contact is therefore always free to succeed and be
+remembered.
+
+The open question is whether enabling the pairing flow is worth anything. Nothing observed so far
+needs it, and the bike's failures are all upstream of AirPlay - so this is not a lead, just a
+loaded gun for when a unit refuses an unencrypted control channel.
 
 Still uncollected if the invite theory does not hold: `wpa_supplicant -dd` or a monitor-mode
 capture on the bike's channel (5785 MHz / ch 157) held across the whole association, which should
