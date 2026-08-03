@@ -32,6 +32,10 @@ const DISCOVERY_WAIT: Duration = Duration::from_secs(60);
 /// `ConnectRequest::accept` can't turn the wait loop into a busy spin.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
+/// How long to wait for a unit to offer its iAP channel before concluding the link is one it will
+/// not offer on. Comfortably longer than the ~15s a bike takes to connect of its own accord.
+const OFFER_WAIT: Duration = Duration::from_secs(25);
+
 // fn generate_iap2_sdp() -> String {
 //     format!(
 //         r#"<?xml version="1.0" encoding="UTF-8" ?>
@@ -286,10 +290,23 @@ async fn attempt_iap2_link(
 
     loop {
         tracing::debug!("Waiting for iAP2 connection requests");
-        let rq = profile
-            .next()
-            .await
-            .ok_or(LinkAttemptError::ProfilesClosed)?;
+        // `stale_link` is sampled once, before pairing, so a link that appears *after* that -
+        // the unit connecting on its own, or BlueZ auto-connecting a trusted device - is one we
+        // never cycled and the unit will not offer a channel on. Re-check while waiting rather
+        // than trusting the startup sample.
+        let rq = loop {
+            match tokio::time::timeout(OFFER_WAIT, profile.next()).await {
+                Ok(rq) => break rq.ok_or(LinkAttemptError::ProfilesClosed)?,
+                Err(_) => {
+                    if ctx.device.is_connected().await.unwrap_or(false) {
+                        tracing::info!(
+                            "Linked but no iAP channel offered; cycling the link"
+                        );
+                        relink(&ctx.device, &ctx.connect_attempt).await;
+                    }
+                }
+            }
+        };
         let from = rq.device();
         // Our profiles are registered adapter-wide, so any bonded head unit lands here.
         if from != target {
