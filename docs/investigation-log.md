@@ -12,6 +12,33 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
 
 ## 2026-08
 
+- **2026-08-05 (code walk + `logs/cfmoto.log`): root cause is the AirPlay `/setup` identity - carjack
+  sends a fake identity that matches nothing. Fixed on a catplay fork branch, untested on the bike.**
+  The refused screen SETUP is not the problem - the bytes are fine and the bike once *answered* a
+  like SETUP (`cfmoto_16`). The thing our stack sends that a real iPhone never does is the `/setup`
+  bootstrap identity:
+
+  ```
+  "deviceID":   "ff:ee:dd:cc:bb:aa",
+  "macAddress": "aa:bb:cc:dd:ee:ff",
+  ```
+
+  These are hardcoded literals in catplay's `do_initial_setup` (the `AirPlayTransmitterBootstrap`
+  never carried them), and carjack never overrode them. catplay documents `deviceID` as the
+  device's **Bluetooth MAC address** - the exact field a head unit uses to tie the WiFi session
+  back to the device it authenticated over Bluetooth (same rule as `_carplay-ctrl`'s `id`, and the
+  reason `cfmoto_16` answered a SETUP then still refused: the unit is lenient until the stream
+  actually starts, then validates). So the bike sees us claim `ff:ee:dd:cc:bb:aa`/`aa:bb:cc:dd:ee:ff`
+  while the station on its AP is `FE:E8:AC:31:AD:C9` and the BT identity was `4C:79:6E:DA:29:4B` -
+  an identity matching nothing, dropped at the moment the screen stream begins.
+
+  Fix (both repos): catplay now plumbs `device_id` + `mac_address` through `AirPlayTransmitterBootstrap`
+  into the `/setup`; carjack supplies the adapter BT MAC (`device_id`, same as the `_carplay-ctrl`
+  id and the `0x4300` transport identifier) and the announced/associated WiFi MAC (`mac_address`,
+  same as `0x4300` group 1). The fork's `master` was synced to `catplay-labs/catplay` master, then
+  branched `fix/airplay-device-identity`; Cargo.toml + `libcarjack/Cargo.toml` point at it.
+  Builds, `just test-lib` green. **Untested against the bike** - that is the next step.
+
 - **2026-08-05 (`logs/cfmoto.log`, `catplay_carplay=info`): the car answers every AirPlay request
   through `assert_modes`, and is silent exactly at the screen SETUP.** This was the cheap test
   status.md planned - it settles whether the car replies to the screen SETUP before deauthing.

@@ -12,6 +12,24 @@ AirPlay.
 
 ## The blocker on the bike (2026-08-04): the car deauths us 16 ms after the screen SETUP
 
+**Primary suspect (2026-08-05): session ordering, not the `/setup` identity.** The iPhone capture
+(`logs/cfmoto-iphone.pcapng`) reframes the old deviceID theory. The iPhone opens AirPlay with
+`POST /pair-verify` **first** (stored pairing) and never sends an unauthenticated `/setup` - so it
+never draws a 401, and its `/setup` is encrypted (its deviceID/macAddress are unreadable). carjack
+led with an unencrypted `/setup`, drew a 401, then paired. The bike accepts the `/setup` either way
+(200), so identity isn't checked at `/setup`; the autthentication-ordering divergence is the
+plaintext-visible difference, and the bike appears to drop sessions that began with the 401. Also
+settled by the capture: the bike does **zero CarPlay mDNS** - the phone connects straight out to the
+receiver named over iAP2, so carjack skips the `_carplay-ctrl` advertisement entirely when iAP gives
+direct details.
+
+Implemented (fork `cfraz89/catplay@fix/airplay-device-identity`): `device_id` + `mac_address`
+plumbed into `/setup` (defensible hygiene), plus a `pair_verify_first` flag - when a pairing is
+stored, open with `/pair-verify` then `/setup` on the encrypted channel, matching the iPhone. carjack
+sets it from "known remote" and skips mDNS on the direct-details path (still advertises for units
+that name no receiver, e.g. the bench). Builds; `just test-lib` green. **Untested against the bike -
+that is the next validation.**
+
 **Experiment (2026-08-05, `logs/cfmoto.log` with `catplay_carplay=info`): the car answers every
 AirPlay request through `assert_modes`, and goes silent exactly at the screen SETUP.** Pair-verify,
 the encrypted `SETUP /setup`, `/info` (32 KB) and `modesChanged` all return 200 OK; the very next
