@@ -10,7 +10,51 @@ A wireless CarPlay bridge that impersonates an iPhone to a car head unit: Blueto
 authenticate and get handed the car's WiFi credentials, then CarPlay video over that WiFi via
 AirPlay.
 
-## The blocker on the bike (rewritten 2026-08-03, evening run)
+## The blocker on the bike (2026-08-04): the car deauths us 16 ms after the screen SETUP
+
+The sharpest evidence yet, from `cfmoto.log` + `cfmoto.pcapng` (17:05, the first run of the
+`0x4301` fallback). Everything works until one exact moment:
+
+```
+16.620  Timeout waiting for CarPlay ctrl invite; connecting to [fe80::9083:…]:7000
+16.909  AirPlay bootstrap complete!   Car display: 800x1280 @ 30 fps
+16.922  Asserted screen modes (controller owns screen)      (385 -> 182 on the wire)
+16.925  screen SETUP sent  (314 bytes)
+16.9417 kernel: wlp0s20f3: deauthenticated from 92:83:8e:ef:a7:d3 (Reason: 2)
+```
+
+- **The direct connect works.** `/setup`, pair-setup, pair-verify, `/info` answered with a 13.8 KB
+  plist, event socket up, modes exchange answered. 289 ms from TCP to display known. The `/info`
+  timeout that once justified deleting this path was the dying link, nothing more.
+- **The deauth is the car's.** `deauthenticated from …`, *not* `deauthenticating … by local
+  choice`: mac80211 prints the first for a frame it **received**. The 21:02 run's four were all
+  local-choice (rechecked), so these are two different failure modes and this is the one that
+  matters.
+- **16 ms is a decision, not a link failure.** Too fast for a rekey, an inactivity timer or a
+  retry exhaustion. The car chose to drop the station immediately after the screen SETUP.
+- **It also kills the mDNS-keepalive theory** from the 2026-08-03 entry: this run advertised and
+  connected, and the association died anyway - on a timescale no keepalive argument can explain.
+
+The car never answers the SETUP; carjack waits 11 s, gets `Request/channel timeout`, restarts, and
+the retry ends in a Bluetooth page timeout.
+
+This is the same shape as `cfmoto_16` (SETUP *answered* 314 -> 225, deauth 77 ms after the screen
+data socket's handshake, before RECORD, no data ever sent) and `cfmoto_12`. So across three
+captures the trigger sits in the same place: the screen stream. Whether the car answers the SETUP
+first varies; that it drops the station within tens of milliseconds does not.
+
+What the SETUP actually carries is small - `streamConnectionID` (a random u64), `type`,
+`latencyMs` (carjack asks 100 ms), and the display `uuid` from `/info`. Nothing obviously
+objectionable, and `cfmoto_16` shows the car accepting it. Two candidates worth separating:
+the plist contents, and the car reconfiguring its AP when a session moves to streaming (an AP that
+has torn down its association state answers exactly `PREV_AUTH_NOT_VALID`).
+
+**Next evidence, cheap:** catplay already logs `Sending screen SETUP: {setup:?}` and
+`Screen setup response received: {resp:?}` at info - `.env` was pinning `catplay_carplay=error`,
+which is why no run has ever shown them. Now set to `info`. The next bike run therefore says
+whether the car answered before deauthing, and with what.
+
+## Superseded: the blocker as it looked on 2026-08-03 (a different failure mode)
 
 **Not the car. The WiFi association dies on its own about 12 s in, while the car carries on
 talking to us over Bluetooth the whole time.** The 21:02 run settles this:
@@ -131,36 +175,20 @@ evidence against connecting out.
 Changed: the invite is still preferred and still advertised unconditionally, but when `0x4301`
 named a receiver the wait is 3 s and carjack then connects there. **Untested on the bike.**
 
-## HomeKit: switched off entirely, on both sides of the question
+## HomeKit (corrected 2026-08-04): it runs, and `0x4301`'s UUID is the accessory identity
 
-Chased on 2026-08-03 because the pairing ids in the invite and in `0x4301` looked like they
-mattered. They do not, yet - **catplay never runs the pairing flow at all**. Its transmitter
-bootstrap handles `Connected` with `start_setup_task()` and nothing else; `start_pair_task()` and
-`start_auth_setup_task()` sit commented out on the two lines below it
-(`carplay_tx/transmitter.rs`). So `/pair-setup` and `/pair-verify` are never issued, the control
-channel stays `AirPlayStreamEncryption::Unconfigured`, and the `HomekitStorageRef` carjack hands in
-is never read or written. Both bench units accept that happily.
+An earlier entry here claimed catplay never runs the pairing flow, on the strength of
+`start_pair_task()` being commented out in its bootstrap and of two bench sessions that stored
+nothing. **Both were misleading.** `do_initial_setup` runs the pairing itself, and the bike's
+session shows it plainly on the wire: `/setup`, `POST /pair-setup` x3 (`X-Apple-HKP: 2`),
+`POST /pair-verify` x2, and everything after that encrypted. The bench AUTO BOX simply does not do
+HAP - which is why nothing was stored there.
 
-Measured, not just read: two full bench sessions to RECORD, and the storage file was byte-identical
-and still reported `0 accessory pairing(s) known` on the second - it is never written because
-nothing pairs.
-
-Implemented anyway, since it costs nothing and is what a phone does:
-`init_homekit_storage` puts a stable identity and pairing table in
-`~/.local/share/carjack/homekit.bin` (verified: same identity reloaded across runs, and across a
-car session), and `connect_airplay` passes a pairing id **only** when storage already knows it -
-unknown, all an id can do is make `/pair-setup` assert an identity match and fail a session over a
-guess about what the field means. First contact is therefore always free to succeed and be
-remembered.
-
-The open question is whether enabling the pairing flow is worth anything. Nothing observed so far
-needs it, and the bike's failures are all upstream of AirPlay - so this is not a lead, just a
-loaded gun for when a unit refuses an unencrypted control channel.
-
-Still uncollected if the invite theory does not hold: `wpa_supplicant -dd` or a monitor-mode
-capture on the bike's channel (5785 MHz / ch 157) held across the whole association, which should
-name the disconnect reason directly. `assert_modes` is not worth varying until the link survives
-long enough to reach it.
+The persistence work therefore paid off on its first bike run, and settled the open question at the
+same time. `homekit.bin` grew from 102 to 151 bytes and now holds a pairing under
+`9a011f99-597e-424d-b490-806fd7c07800` - byte-for-byte the UUID the bike sent in `0x4301`. So that
+field **is** the accessory's HomeKit identity, and the next bike session will find it in storage,
+pass it, and take `/pair-verify`.
 
 ## Settled on 2026-08-03
 

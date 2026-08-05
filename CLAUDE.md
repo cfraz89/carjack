@@ -234,17 +234,18 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   so the wait before falling back is 3 s rather than 15. `0x4301` also carries what looks like the
   accessory's HomeKit pairing id (`WIFI_CONFIG_UUID`), which `WifiCredentials` parses and logs but
   does **not** pass to catplay - see the HomeKit note below.
-- **Nothing on the AirPlay path actually runs HomeKit pairing.** catplay's transmitter bootstrap
-  handles `Connected` by calling `start_setup_task()` alone - `start_pair_task()` and
-  `start_auth_setup_task()` are commented out beside it - so `/pair-setup` and `/pair-verify` are
-  never issued, the control channel stays `AirPlayStreamEncryption::Unconfigured`, and every unit
-  tested so far accepts that. Consequences: the pairing id in an invite's `pi` or in `0x4301` picks
-  nothing, and `HomekitStorageRef` is carried but unread. carjack still keeps a persistent identity
-  and pairing table (`~/.local/share/carjack/homekit.bin`, `init_homekit_storage`, verified stable
-  across runs) so the day that flow is enabled a returning car is a `/pair-verify`; and
-  `connect_airplay` passes a pairing id **only** when storage already knows it, since an unknown one
-  can only make `/pair-setup` assert an identity match and fail the session. Do not read a HomeKit
-  symptom into a failed session without first checking that any of it is switched on.
+- **AirPlay pairing is HAP, it does run, and the identity persists.** The bike's session on the
+  wire is `/setup` -> `POST /pair-setup` x3 (`X-Apple-HKP: 2`) -> `POST /pair-verify` x2, after
+  which the control channel is encrypted. (`start_pair_task()` sits commented out in catplay's
+  bootstrap, which is a **red herring** - `do_initial_setup` runs the pairing itself.) carjack keeps
+  a persistent identity and pairing table in `~/.local/share/carjack/homekit.bin`
+  (`init_homekit_storage`, called before either source path), so a car we have met takes
+  `/pair-verify` instead of a full `/pair-setup`. `connect_airplay` passes a pairing id **only**
+  when storage already knows it: unknown, all an id can do is make `/pair-setup` assert an identity
+  match and fail the session over a guess, and a first contact needs to be free to succeed and be
+  remembered. **`0x4301`'s `WIFI_CONFIG_UUID` is the accessory's HomeKit identity** - the bike's
+  first session stored a pairing under exactly the UUID it had sent there. Not every unit does HAP:
+  the bench AUTO BOX stored nothing across two full sessions to RECORD.
 - On the primary dev machine's WiFi card, `iwlwifi` needed `disable_11ax=1` (via
   `/etc/modprobe.d/`) to avoid a HE/VHT rate mismatch when connecting to the
   car's AP - if WiFi association looks flaky on a new dev machine, check that
