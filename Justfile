@@ -95,4 +95,5 @@ install-cuda-dmabuf-deps:
 
 # Install dependencies in toolbox
 install-deps:
-    {{toolbox_build}}sudo dnf install gcc gstreamer1-devel gstreamer1-plugins-base-devel pipewire-gstreamer dbus-devel openssl-devel mesa-libgbm-devel libdrm-devel libxkbcommon-devel mesa-libEGL-devel mesa-libGLES-devel
+    {{toolbox_build}}sudo dnf install gcc g++ gstreamer1-devel gstreamer1-plugins-base-devel pipewire-gstreamer dbus-devel \
+    openssl-devel mesa-libgbm-devel libdrm-devel libxkbcommon-devel mesa-libEGL-devel mesa-libGLES-devel
