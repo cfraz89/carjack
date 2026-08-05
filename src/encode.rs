@@ -1,4 +1,6 @@
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::AsFd;
+#[cfg(feature = "cuda")]
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
 use catplay_carplay::video::{AnnexBIter, AvccConfig, NalType};
