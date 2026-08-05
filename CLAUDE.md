@@ -250,12 +250,13 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   `/etc/modprobe.d/`) to avoid a HE/VHT rate mismatch when connecting to the
   car's AP - if WiFi association looks flaky on a new dev machine, check that
   first.
-- `catplay_hap`/`catplay_carplay`/`catplay_util` are pinned to a fork
-  (`github.com/cfraz89/catplay`, branch `fix/audio-output-formats-optional`)
-  carrying an unmerged fix making `/info` plist fields optional
-  (`audio_output_formats`, `limitedUI`, `oemIconVisible`, `rightHandDrive`) -
-  real head units omit them and upstream's strict deserialize crashed on that.
-  Revert to `catplay-labs/catplay` once that lands upstream.
+- `catplay_hap`/`catplay_carplay`/`catplay_util` come from upstream
+  `catplay-labs/catplay`, branch `master`. The fork
+  (`cfraz89/catplay`, `fix/audio-output-formats-optional`) used to carry an
+  unmerged fix making `/info` plist fields optional (`audio_output_formats`,
+  `limitedUI`, `oemIconVisible`, `rightHandDrive`) - real head units omit them
+  and upstream's strict deserialize crashed on that. That fix has since landed
+  upstream, so no fork is needed.
 - Hardware quirk: the test head unit (whichever `[bluetooth] device` names) degrades into an
   "aggressive reconnect" state (iAP2 handshake won't complete /
   `ProfileUnavailable` / already-connected errors) after several rapid reconnect
@@ -514,6 +515,10 @@ variant always matches the pipeline. Two families:
     NVIDIA's tiled surface. It's the only backend that can fail *after* its
     elements probe OK (its CUDA context is bound to the render node), in which
     case probing falls through to the next row.
+    **Opt-in cargo feature**: the whole row and `cuda-dmabuf` are behind the
+    `cuda` feature (off by default) so a non-NVIDIA build never links libcuda/
+    libgstcuda. Enable with `just cuda=true build` (or `CARJACK_CUDA=true`).
+    Without it a build has no NVIDIA row at all, so it can't select `cuda`.
   - **Intel/AMD** (`vaapi`): `appsrc(DMABuf) ! vapostproc ! vah264enc`.
   - **Qualcomm/embedded** (`v4l2`):
     `appsrc(DMABuf) ! v4l2convert ! v4l2h264enc`. Untested off-device. Rate control

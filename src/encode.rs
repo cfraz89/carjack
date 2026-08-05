@@ -81,6 +81,7 @@ enum FrameFeeder {
     /// NVIDIA zero-copy: each dmabuf imported into `GstCudaMemory` via CUDA/EGL interop, pushed
     /// as `video/x-raw(memory:CUDAMemory)` straight into `nvh264enc` (which does RGB->NV12). The
     /// importer (its CUDA context) is created once at startup and shared across encode sessions.
+    #[cfg(feature = "cuda")]
     Cuda(Arc<cuda_dmabuf::CudaImporter>),
 }
 
@@ -94,6 +95,9 @@ pub enum EncodeBackend {
     /// by every session.
     Hw {
         backend: &'static HwBackend,
+        /// Only on the `cuda` feature: the CUDA context shared across sessions. `Some` exactly for
+        /// backends whose [`Import`] is `Cuda`.
+        #[cfg(feature = "cuda")]
         importer: Option<Arc<cuda_dmabuf::CudaImporter>>,
     },
     /// CPU path: the compositor reads frames back to system memory and a software encoder (or, if
@@ -185,12 +189,14 @@ fn try_zero_copy(render_node: &str) -> Option<EncodeBackend> {
             Import::DmaBuf => {
                 return Some(EncodeBackend::Hw {
                     backend,
+                    #[cfg(feature = "cuda")]
                     importer: None,
                 });
             }
             // CUDA is the one backend that needs state (a CUDA context bound to `render_node`)
             // rather than just elements, so it can fail this late - e.g. the compositor renders on
             // a non-NVIDIA node. Fall through to the next backend if it does.
+            #[cfg(feature = "cuda")]
             Import::Cuda => match cuda_dmabuf::CudaImporter::new(render_node) {
                 Ok(imp) => {
                     return Some(EncodeBackend::Hw {
@@ -327,6 +333,7 @@ pub async fn encode_h264_to_channel(
                         }
                     }
                 }
+                #[cfg(feature = "cuda")]
                 (FrameFeeder::Cuda(importer), CapturedFrame::Dmabuf(dmabuf)) => {
                     if !caps_set {
                         appsrc.set_caps(Some(&cuda_caps(dmabuf)));
@@ -688,6 +695,7 @@ enum Import {
     /// Imported into `GstCudaMemory` by `cuda-dmabuf` (EGL + `cuGraphicsEGLRegisterImage`, which
     /// also de-tiles GPU->GPU). NVIDIA needs this because its block-linear surfaces can *not* be
     /// imported by `glupload`/`vapostproc`; the encoder then consumes CUDA memory with no postproc.
+    #[cfg(feature = "cuda")]
     Cuda,
 }
 
@@ -734,9 +742,12 @@ pub struct HwBackend {
 
 /// Probed in order; the first whose elements all exist wins.
 const HW_BACKENDS: &[HwBackend] = &[
-    // NVIDIA. Internal: `cuda-dmabuf` hands nvh264enc GstCudaMemory directly (it does RGB->NV12
-    // itself), so there's no postproc. Desktop: the portal's buffer goes through GL instead -
-    // convert/scale on the GPU - because the CUDA importer only takes the compositor's own dmabuf.
+    // NVIDIA (only when the `cuda` feature is on, so a non-NVIDIA build doesn't reference
+    // cuda-dmabuf). Internal: `cuda-dmabuf` hands nvh264enc GstCudaMemory directly (it does
+    // RGB->NV12 itself), so there's no postproc. Desktop: the portal's buffer goes through GL
+    // instead - convert/scale on the GPU - because the CUDA importer only takes the compositor's
+    // own dmabuf.
+    #[cfg(feature = "cuda")]
     HwBackend {
         name: "cuda",
         drivers: &["nvidia", "nvidia-drm"],
@@ -871,7 +882,12 @@ fn build_backend(
             build_software_chain(pipeline, tail, bitrate)?,
             FrameFeeder::Shm,
         )),
-        EncodeBackend::Hw { backend, importer } => {
+        EncodeBackend::Hw {
+            backend,
+            #[cfg(feature = "cuda")]
+            importer,
+        } => {
+            #[cfg(feature = "cuda")]
             if let Some(importer) = importer {
                 // Share our CUDA context with the encoder so the imported GstCudaMemory and the
                 // encoder live on the same context. Must be set before the encoder is added to the
@@ -879,10 +895,13 @@ fn build_backend(
                 pipeline.set_context(&importer.gst_context());
             }
             let encoder = build_hw_chain(pipeline, tail, backend, bitrate)?;
+            #[cfg(feature = "cuda")]
             let feeder = match importer {
                 Some(importer) => FrameFeeder::Cuda(importer.clone()),
                 None => FrameFeeder::DmaDrm(DmaBufAllocator::new()),
             };
+            #[cfg(not(feature = "cuda"))]
+            let feeder = FrameFeeder::DmaDrm(DmaBufAllocator::new());
             Ok((encoder, feeder))
         }
     }
@@ -1032,6 +1051,7 @@ fn dmabuf_caps(dmabuf: &Dmabuf) -> Result<gst::Caps> {
 
 /// `video/x-raw(memory:CUDAMemory)` caps matching what the CUDA importer produces (a pitched
 /// BGRA buffer). The compositor renders Argb8888, whose little-endian bytes are B,G,R,A = BGRA.
+#[cfg(feature = "cuda")]
 fn cuda_caps(dmabuf: &Dmabuf) -> gst::Caps {
     gst::Caps::builder("video/x-raw")
         .features(["memory:CUDAMemory"])
@@ -1043,12 +1063,14 @@ fn cuda_caps(dmabuf: &Dmabuf) -> gst::Caps {
 }
 
 /// A DRM fourcc as its four characters, for logs.
+#[cfg(feature = "cuda")]
 fn fourcc_str(fourcc: u32) -> String {
     String::from_utf8_lossy(&fourcc.to_le_bytes()).into_owned()
 }
 
 /// Extract plane 0 of a dmabuf as a `cuda_dmabuf::DmabufPlane` (the compositor renders a single
 /// interleaved RGBA plane). The fd is borrowed for the import and stays owned by the frame.
+#[cfg(feature = "cuda")]
 fn first_plane(dmabuf: &Dmabuf) -> Option<cuda_dmabuf::DmabufPlane> {
     let fd = dmabuf.handles().next()?;
     let offset = dmabuf.offsets().next()?;

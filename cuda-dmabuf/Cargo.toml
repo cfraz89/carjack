@@ -3,6 +3,11 @@ name = "cuda-dmabuf"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+# Links libcuda/libEGL/libgbm/libgstcuda (build.rs). Enabled transitively by the workspace's `cuda`
+# feature; this crate alone doesn't link them by default so it still compiles on non-NVIDIA hosts.
+cuda = []
+
 [dependencies]
 # All native libs (libcuda, libEGL, libgbm, libgstcuda) are linked at build time via
 # build.rs. The build toolbox must have the corresponding -devel packages installed.

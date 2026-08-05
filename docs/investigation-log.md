@@ -12,6 +12,45 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
 
 ## 2026-08
 
+- **2026-08-05 (`logs/cfmoto.log`, `catplay_carplay=info`): the car answers every AirPlay request
+  through `assert_modes`, and is silent exactly at the screen SETUP.** This was the cheap test
+  status.md planned - it settles whether the car replies to the screen SETUP before deauthing.
+
+  The RTSP exchange this run (13 of 14 requests answered, all but the last 200 OK):
+
+  | CSeq | request | response |
+  |---|---|---|
+  | 0 | `SETUP /setup` (unencrypted) | 401 Unauthorized |
+  | 1 | `POST /pair-verify` | 200 OK |
+  | 2 | `POST /pair-verify` | 200 OK |
+  | 3 | `SETUP /setup` (crypto) | 200 OK (keepAlive/event/timing ports) |
+  | 4 | `GET /info` | 200 OK (32 KB, display `800x1280`, uuid `e5f7a68d-…`) |
+  | 5 | `POST /command` `modesChanged` | 200 OK |
+  | 6 | **`SETUP /` (screen stream)** | **no response, ever** |
+
+  Two things are new and both rule out the Bluetooth/bootstrap side:
+
+  - **The crypto-upgrade path now works end to end.** Known HomeKit accessory
+    `9a011f99-597e-424d-b490-806fd7c07800` -> expecting pair-verify; the first bare `SETUP /setup`
+    gets `401`, pair-verify x2 returns 200, the encrypted `SETUP /setup` returns 200 with ports,
+    `/info` returns the full plist. So persistence paid off and `/setup` is not the trigger.
+  - **`assert_modes` is definitively not the trigger.** The `modesChanged` command was answered
+    200 OK at .809 (42 bytes, `{}`), the screen SETUP goes out at .814 with a fresh
+    `stream_connection_id` and the `/info` uuid, and then - nothing. No `Screen setup response
+    received` line, no ack, no RST. The request times out 11 s later -> `Request/channel timeout`
+    at 05:43:10.8, restart, Bluetooth page timeout on retry.
+
+  So the car handles the entire control session, including the modes assertion, and refuses the
+  single request that actually starts the video stream. The candidate plist is small and clean
+  (`streamConnectionID` u64, `type: 110`, `latencyMs: 100`, `uuid` matching `/info`); `cfmoto_16`
+  once *answered* a SETUP like it and still dropped the station 77 ms later when the data socket
+  opened. Either way the head unit tears down at the moment the video screen session begins - now
+  shown to be with no ACK to the SETUP at all in this run, not a response-then-drop.
+
+  No change made; the trigger is confirmed car-side and the SETUP bytes themselves remain the only
+  remaining suspect (plist contents vs. the car reconfiguring its AP when a session moves to
+  streaming).
+
 - **2026-08-03 22:53 (`cfmoto.pcapng` + `/tmp/carjack.btsnoop` + the journal): the bike does no
   Bonjour at all, and the WiFi association survived the whole run.** The first bike test of the
   invite path, and it answers the question cleanly in the negative.

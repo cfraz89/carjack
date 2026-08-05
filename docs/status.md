@@ -1,6 +1,6 @@
 # Where things stand
 
-**Last updated: 2026-08-03.** This is the living document - if it disagrees with
+**Last updated: 2026-08-05.** This is the living document - if it disagrees with
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
 
@@ -11,6 +11,15 @@ authenticate and get handed the car's WiFi credentials, then CarPlay video over 
 AirPlay.
 
 ## The blocker on the bike (2026-08-04): the car deauths us 16 ms after the screen SETUP
+
+**Experiment (2026-08-05, `logs/cfmoto.log` with `catplay_carplay=info`): the car answers every
+AirPlay request through `assert_modes`, and goes silent exactly at the screen SETUP.** Pair-verify,
+the encrypted `SETUP /setup`, `/info` (32 KB) and `modesChanged` all return 200 OK; the very next
+request - `SETUP /` for the screen stream - is never answered at all (times out 11 s later into
+`Request/channel timeout`). No `Screen setup response received`, no ACK, no RST. So the "did the
+car answer the SETUP before deauthing" question is settled: **it does not answer it, in this run**;
+it drops the session the moment the video screen session begins. Full exchange table in the
+investigation log.
 
 The sharpest evidence yet, from `cfmoto.log` + `cfmoto.pcapng` (17:05, the first run of the
 `0x4301` fallback). Everything works until one exact moment:
