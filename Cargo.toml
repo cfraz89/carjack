@@ -36,14 +36,11 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "tracing-lo
 usb-gadget = "1.2.0"
 tap = "1.0.1"
 ring = "0.17"
-# Pinned to a fork/branch carrying an unmerged fix for a strict /info plist
-# parse failure (audio_output_formats must be optional - real head units omit
-# it for input-only audio entries like Siri). Revert to catplay-labs/catplay
-# once https://github.com/catplay-labs/catplay/pull/new/fix/audio-output-formats-optional
-# (or equivalent) lands upstream.
-catplay_hap = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/audio-output-formats-optional", default-features=false, features = ["std"] }
-catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/audio-output-formats-optional", default-features = false, features = ["tx"]}
-catplay_util = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/audio-output-formats-optional" }
+# Upstream catplay-labs/catplay (default branch `master`). It has since integrated
+# the optional /info plist field fix, so no fork is needed.
+catplay_hap = { git = "https://github.com/catplay-labs/catplay.git", branch = "master", default-features=false, features = ["std"] }
+catplay_carplay = { git = "https://github.com/catplay-labs/catplay.git", branch = "master", default-features = false, features = ["tx"]}
+catplay_util = { git = "https://github.com/catplay-labs/catplay.git", branch = "master" }
 bytes = "1.12.1"
 gstreamer = "0.24"
 gstreamer-app = "0.24"
@@ -56,7 +53,9 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", default-features = false, features = ["client", "staging"] }
 gstreamer-allocators = "0.24"
 gstreamer-video = { version = "0.24", features = ["v1_24"] }
-cuda-dmabuf = { path = "cuda-dmabuf" }
+# NVIDIA zero-copy encode path. Opt-in via the `cuda` feature (off by default) so the project
+# builds on non-NVIDIA machines without the cuda-dmabuf native libs (libcuda, libgstcuda).
+cuda-dmabuf = { path = "cuda-dmabuf", optional = true }
 serde = { version = "1", features = ["derive"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }
 libc = "0.2"
@@ -69,6 +68,12 @@ ashpd = { version = "0.13", default-features = false, features = ["remote_deskto
 zbus = { version = "5.18.0", features = ["tokio"] }
 thiserror = "2.0.19"
 reis = { version = "0.7.0", features = ["tokio"] }
+
+[features]
+# NVIDIA zero-copy encode (`nvh264enc` via `cuda-dmabuf`). Off by default so the project builds on
+# non-NVIDIA machines; enable with `--features cuda` (or `just build cuda=true`).
+default = []
+cuda = ["dep:cuda-dmabuf", "cuda-dmabuf/cuda"]
 
 # Agent-facing driver for the `run-carjack` skill: brings the compositor up and writes a frame to
 # PNG. Lives beside the skill it documents rather than in `examples/` so the pair stays together.
