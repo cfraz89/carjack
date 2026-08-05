@@ -293,6 +293,7 @@ async fn relink(device: &Device, gate: &Arc<Semaphore>) {
     }
     let device = device.clone();
     tokio::spawn(async move {
+        let _permit = permit;
         let res = (|| async { device.connect().await })
             .retry(
                 ConstantBuilder::new()

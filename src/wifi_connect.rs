@@ -4,8 +4,8 @@ use std::str::FromStr;
 use eyre::{Result, eyre};
 use futures::StreamExt;
 use nm_automata::{
-    ActivationOptions, ActivationPersist, ActivationStateFlags, ActiveConnectionState, ActiveProxy,
-    AssignedMacAddress, ConnectionProfile, ConnectionSetting, DeviceProxy, DeviceState, DeviceType,
+    ActivationStateFlags, ActiveConnectionState, ActiveProxy, AssignedMacAddress, ConnectionProfile,
+    ConnectionSetting, DeviceProxy, DeviceState, DeviceType,
     Ipv4Method, Ipv4Setting, Ipv6Method, Ipv6Setting, MacAddress, NetworkManagerProxy, NonEmpty,
     ProxyExt, Ssid, WirelessBand, WirelessMode, WirelessProxy, WirelessSecurityKeyMgmt,
     WirelessSecuritySetting, WirelessSetting,
@@ -77,7 +77,7 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
                         &existing.object_path(),
                         &device.object_path(),
                         // No specific access point: let NetworkManager pick the BSS for the SSID.
-                        &zbus::zvariant::ObjectPath::from_static_str_unchecked("/"),
+                        None,
                     )
                     .await?;
                 (existing, active)
@@ -87,7 +87,7 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
                     .add_and_activate_connection(
                         &profile,
                         &device.object_path(),
-                        &Default::default(),
+                        None,
                     )
                     .await?;
                 tracing::info!(path = ?conn.object_path(), "Connection created");

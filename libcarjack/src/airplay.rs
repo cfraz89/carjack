@@ -65,6 +65,8 @@ pub fn init_homekit_storage(path: &Path) -> Result<()> {
 pub async fn connect_airplay(
     peer_addr: SocketAddr,
     remote_homekit_id: Option<Uuid>,
+    device_id: String,
+    mac_address: String,
 ) -> Result<AirPlayConnection> {
     let homekit = HOMEKIT
         .get()
@@ -93,6 +95,9 @@ pub async fn connect_airplay(
         // does.
         controller_features: vec![],
         remote_homekit_id,
+        device_id,
+        mac_address,
+        pair_verify_first: remote_homekit_id.is_some(),
     };
 
     let tx = AirPlayTransmitterProxy::connect(bootstrap).await?;

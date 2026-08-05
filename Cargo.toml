@@ -36,11 +36,12 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "tracing-lo
 usb-gadget = "1.2.0"
 tap = "1.0.1"
 ring = "0.17"
-# Upstream catplay-labs/catplay (default branch `master`). It has since integrated
-# the optional /info plist field fix, so no fork is needed.
-catplay_hap = { git = "https://github.com/catplay-labs/catplay.git", branch = "master", default-features=false, features = ["std"] }
-catplay_carplay = { git = "https://github.com/catplay-labs/catplay.git", branch = "master", default-features = false, features = ["tx"]}
-catplay_util = { git = "https://github.com/catplay-labs/catplay.git", branch = "master" }
+# Fork `cfraz89/catplay`, branch `fix/airplay-device-identity` - carries the plumbed-through
+# AirPlay `/setup` device identity (BT MAC as `deviceID`, associated WiFi MAC as `macAddress`),
+# on top of upstream `catplay-labs/catplay` master.
+catplay_hap = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/airplay-device-identity", default-features=false, features = ["std"] }
+catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/airplay-device-identity", default-features = false, features = ["tx"]}
+catplay_util = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/airplay-device-identity" }
 bytes = "1.12.1"
 gstreamer = "0.24"
 gstreamer-app = "0.24"

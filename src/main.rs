@@ -352,17 +352,18 @@ const AIRPLAY_CONNECT_DELAY: Duration = Duration::from_millis(500);
 /// notice the record - and when the car has already named its receiver, waiting at all is just
 /// politeness towards a unit that might do both.
 const INVITE_WAIT: Duration = Duration::from_secs(15);
-const INVITE_WAIT_WITH_ADDRESS: Duration = Duration::from_secs(3);
 
 /// Connect to the endpoint the car's invite pointed at.
 async fn connect_airplay_endpoint(
     addr: std::net::SocketAddr,
     remote_homekit_id: Option<uuid::Uuid>,
+    device_id: String,
+    mac_address: String,
 ) -> Result<libcarjack::airplay::AirPlayConnection> {
     tracing::info!("Connecting to AirPlay endpoint {addr}");
     // `SocketAddr` is `Copy`, so a plain `move` closure hands each attempt its own copy -
     // nothing to clone into it.
-    (move || libcarjack::airplay::connect_airplay(addr, remote_homekit_id))
+    (move || libcarjack::airplay::connect_airplay(addr, remote_homekit_id, device_id.clone(), mac_address.clone()))
         .retry(
             ConstantBuilder::new()
                 .with_delay(AIRPLAY_CONNECT_DELAY)
@@ -445,38 +446,35 @@ async fn establish_carplay(host: Arc<IapHost>, bt_device: &str) -> Result<Establ
     };
     let car_wifi = car_wifi_result?;
 
-    // Prefer being invited: a unit that discovers our `_carplay-ctrl._tcp` record sends
-    // `GET /ctrl-int/1/connect`, and the record's `id` must be the Bluetooth address, which is
-    // how it ties the station on its AP back to the device it authenticated over Bluetooth. But
-    // a unit that named its receiver in 0x4301 does no Bonjour at all - it neither browses nor
-    // advertises - so it has to be connected to. Advertise either way, and wait only briefly
-    // when there is an address to fall back on.
     let bluetooth_id = host.bluetooth_address().await?;
-    let invite_wait = match airplay_hint {
-        Some(_) => INVITE_WAIT_WITH_ADDRESS,
-        None => INVITE_WAIT,
-    };
-    tracing::info!("Car WiFi connected, waiting for the car's CarPlay invite...");
-    let endpoint = match wait_for_carplay_ctrl_probe(&car_wifi.iface, &bluetooth_id, invite_wait)
-        .await
-    {
-        Ok((addr, pi)) => Some((addr, pi)),
-        Err(e) => match airplay_hint {
-            Some((addr, pi)) => {
-                tracing::info!("{e}; connecting to the receiver the car named at {addr}");
-                Some((addr, pi))
+    let picked = match airplay_hint {
+        Some(hint) => {
+            tracing::info!("Car named its AirPlay receiver over iAP2 at {}", hint.0);
+            Some(hint)
+        }
+        None => {
+            tracing::info!("Car WiFi connected, waiting for the car's CarPlay invite...");
+            match wait_for_carplay_ctrl_probe(&car_wifi.iface, &bluetooth_id, INVITE_WAIT).await {
+                Ok((addr, pi)) => {
+                    tracing::info!("Got CarPlay ctrl invite; AirPlay peer at {addr}");
+                    Some((addr, pi))
+                }
+                Err(e) => {
+                    tracing::warn!("{e}; no AirPlay receiver to connect to");
+                    None
+                }
             }
-            None => None,
-        },
+        }
     };
-    let (endpoint, remote_homekit_id) = endpoint.ok_or_else(|| {
+    let (endpoint, remote_homekit_id) = picked.ok_or_else(|| {
         eyre!("Car neither invited us nor named an AirPlay receiver")
     })?;
     // Either source's address comes from the car itself, so it can be link-local.
     let endpoint = with_scope_id(endpoint, &car_wifi.iface);
 
     // Connect AirPlay to learn the car's display size + refresh.
-    let conn = connect_airplay_endpoint(endpoint, remote_homekit_id).await?;
+    let mac_address = crate::wifi_connect::get_wifi_mac().await?;
+    let conn = connect_airplay_endpoint(endpoint, remote_homekit_id, bluetooth_id, mac_address).await?;
     Ok(Established {
         conn,
         carplay_handle,
