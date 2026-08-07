@@ -70,6 +70,8 @@ zbus = { version = "5.18.0", features = ["tokio"] }
 exacl = "0.13"
 thiserror = "2.0.19"
 reis = { version = "0.7.0", features = ["tokio"] }
+rtnetlink = "0.21.0"
+netlink-packet-route = "0.30"
 
 [features]
 # NVIDIA zero-copy encode (`nvh264enc` via `cuda-dmabuf`). Off by default so the project builds on

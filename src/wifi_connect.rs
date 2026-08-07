@@ -7,15 +7,18 @@
 use backon::{ConstantBuilder, Retryable};
 use std::fmt::Write as _;
 use std::io::Write as _;
-use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eyre::{Result, eyre};
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use iwd_automata::{
     DaemonProxy, DeviceProxy, NetworkProxy, ProxyExt, Ssid, StationProxy, StationState, discover,
+};
+use netlink_packet_route::AddressFamily;
+use netlink_packet_route::address::{
+    AddressAttribute, AddressFlags, AddressHeaderFlags, AddressMessage, AddressScope,
 };
 use tokio::sync::OnceCell;
 
@@ -25,7 +28,7 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long to wait for a scan to settle before reading its results anyway.
 const SCAN_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// How long to wait after association for both address families, and how often to poll.
+/// How long to wait after association for the link-local IPv6 to settle, and how often to poll.
 const ADDRESS_TIMEOUT: Duration = Duration::from_secs(20);
 const ADDRESS_POLL: Duration = Duration::from_millis(200);
 
@@ -52,8 +55,6 @@ async fn iwd() -> &'static zbus::Connection {
 pub struct CarWifi {
     #[allow(dead_code)]
     pub ssid: Ssid,
-    #[allow(dead_code)]
-    pub ip: IpAddr,
     pub iface: String,
 }
 
@@ -107,10 +108,9 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
             Err(e) => tracing::debug!(?e, "Could not read back the associated address"),
         }
 
-        let ip = wait_for_addresses(&iface).await?;
+        wait_for_addresses(&iface).await?;
         Ok(CarWifi {
             ssid: ssid.clone(),
-            ip,
             iface,
         })
     })
@@ -295,17 +295,14 @@ async fn live_connection(ssid: &Ssid) -> Result<Option<CarWifi>> {
         return Ok(None);
     }
     let iface = device.name().await?;
-    match addresses(&iface) {
-        Ok(Some(ip)) => Ok(Some(CarWifi {
+    if link_local_is_ready(&iface).await? {
+        Ok(Some(CarWifi {
             ssid: ssid.clone(),
-            ip,
             iface,
-        })),
-        Ok(None) => {
-            tracing::debug!("On {ssid} already, but it has no usable addresses yet");
-            Ok(None)
-        }
-        Err(e) => Err(e),
+        }))
+    } else {
+        tracing::debug!("On {ssid} already, but its link-local IPv6 hasn't settled yet");
+        Ok(None)
     }
 }
 
@@ -368,71 +365,72 @@ async fn power_up_devices() -> Result<()> {
     Ok(())
 }
 
-/// Wait for the interface to carry a routable IPv4 and a DAD-settled link-local IPv6 - carjack
-/// needs the former to reach AirPlay by route and the latter as its source address. iwd reports
-/// neither over D-Bus, so this reads the interface itself.
-async fn wait_for_addresses(iface: &str) -> Result<IpAddr> {
+/// Wait for the interface's link-local IPv6 to settle out of duplicate-address detection - that's
+/// the address AirPlay is actually reached on. A destination is unreachable from a still-tentative
+/// source, `connect()` failing `EADDRNOTAVAIL` before anything hits the wire.
+async fn wait_for_addresses(iface: &str) -> Result<()> {
     let deadline = tokio::time::Instant::now() + ADDRESS_TIMEOUT;
     loop {
-        if let Some(ip) = addresses(iface)? {
-            return Ok(ip);
+        if link_local_is_ready(iface).await? {
+            return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(eyre!(
-                "{iface} has no DHCP address and settled link-local after {ADDRESS_TIMEOUT:?}"
+                "{iface} has no settled link-local IPv6 after {ADDRESS_TIMEOUT:?}"
             ));
         }
         tokio::time::sleep(ADDRESS_POLL).await;
     }
 }
 
-/// The interface's routable IPv4 address, but only once its link-local IPv6 is out of DAD.
-fn addresses(iface: &str) -> Result<Option<IpAddr>> {
-    let Some(ip) = routable_ipv4(iface)? else {
-        return Ok(None);
-    };
-    let if_inet6 = std::fs::read_to_string("/proc/net/if_inet6")?;
-    Ok(link_local_is_ready(&if_inet6, iface).then_some(IpAddr::V4(ip)))
+/// The rtnetlink socket address queries run on, opened once and reused - iwd reports no address
+/// state over D-Bus, so this reads the interface directly.
+static RTNETLINK: OnceCell<rtnetlink::Handle> = OnceCell::const_new();
+
+async fn rtnetlink_handle() -> Result<&'static rtnetlink::Handle> {
+    RTNETLINK
+        .get_or_try_init(|| async {
+            let (connection, handle, _) =
+                rtnetlink::new_connection().map_err(|e| eyre!("open rtnetlink socket: {e}"))?;
+            tokio::spawn(connection);
+            Ok::<_, eyre::Report>(handle)
+        })
+        .await
 }
 
-/// The interface's IPv4 address from the car's DHCP server. 169.254/16 is skipped - it means DHCP
-/// failed, not that we have an address the car can be reached over.
-fn routable_ipv4(iface: &str) -> Result<Option<Ipv4Addr>> {
-    for ifaddr in nix::ifaddrs::getifaddrs()? {
-        if ifaddr.interface_name != iface {
-            continue;
-        }
-        let Some(ip) = ifaddr
-            .address
-            .as_ref()
-            .and_then(|address| address.as_sockaddr_in())
-            .map(|address| address.ip())
-        else {
-            continue;
-        };
-        if !ip.is_unspecified() && !ip.is_link_local() {
-            return Ok(Some(ip));
+/// Whether `iface` has a settled (non-tentative) link-local IPv6 address, queried over rtnetlink.
+async fn link_local_is_ready(iface: &str) -> Result<bool> {
+    let index = nix::net::if_::if_nametoindex(iface)
+        .map_err(|e| eyre!("if_nametoindex {iface}: {e}"))?;
+    let handle = rtnetlink_handle().await?;
+    let mut addresses = handle.address().get().set_link_index_filter(index).execute();
+    while let Some(msg) = addresses
+        .try_next()
+        .await
+        .map_err(|e| eyre!("rtnetlink address dump for {iface}: {e}"))?
+    {
+        if is_settled_link_local(&msg) {
+            return Ok(true);
         }
     }
-    Ok(None)
+    Ok(false)
 }
 
-/// Whether `iface`'s link-local IPv6 has finished duplicate-address detection, read from
-/// `/proc/net/if_inet6` (`<addr> <ifindex> <prefixlen> <scope> <flags> <device>`, all hex).
-fn link_local_is_ready(if_inet6: &str, iface: &str) -> bool {
-    const IFA_F_TENTATIVE: u32 = 0x40;
-    const SCOPE_LINK: u32 = 0x20;
-    if_inet6.lines().any(|line| {
-        let mut fields = line.split_whitespace().skip(3);
-        let (Some(scope), Some(flags), Some(device)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
-            return false;
-        };
-        device == iface
-            && u32::from_str_radix(scope, 16) == Ok(SCOPE_LINK)
-            && u32::from_str_radix(flags, 16).is_ok_and(|flags| flags & IFA_F_TENTATIVE == 0)
-    })
+/// Whether a netlink address is a non-tentative IPv6 link-local address. Falls back to the
+/// header's flags if the kernel didn't send the extended `IFA_FLAGS` attribute.
+fn is_settled_link_local(msg: &AddressMessage) -> bool {
+    if msg.header.family != AddressFamily::Inet6 || msg.header.scope != AddressScope::Link {
+        return false;
+    }
+    let tentative = msg
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            AddressAttribute::Flags(flags) => Some(flags.contains(AddressFlags::Tentative)),
+            _ => None,
+        })
+        .unwrap_or_else(|| msg.header.flags.contains(AddressHeaderFlags::Tentative));
+    !tentative
 }
 
 /// The WiFi address carjack announces and associates with - derived from the permanent hardware
@@ -562,22 +560,56 @@ mod tests {
     }
 
     #[test]
-    fn link_local_is_ready_only_once_dad_has_finished() {
-        // scope 20 = link-local, flags 80 = IFA_F_PERMANENT.
-        let settled = "fe8000000000000056f5ac6d67819bf3 03 40 20 80     wlan0\n";
-        // flags c0 = IFA_F_PERMANENT | IFA_F_TENTATIVE.
-        let tentative = "fe8000000000000056f5ac6d67819bf3 03 40 20 c0     wlan0\n";
-        // scope 00 = global: a routable address is not a link-local one.
-        let global = "2401dc2028170000941b1a8217270993 03 40 00 80     wlan0\n";
+    fn settled_link_local_requires_scope_link_and_no_tentative_flag() {
+        use netlink_packet_route::AddressFamily;
+        use netlink_packet_route::address::{
+            AddressAttribute, AddressFlags, AddressHeader, AddressHeaderFlags, AddressMessage,
+            AddressScope,
+        };
 
-        assert!(super::link_local_is_ready(settled, "wlan0"));
-        assert!(!super::link_local_is_ready(tentative, "wlan0"));
-        assert!(!super::link_local_is_ready(global, "wlan0"));
-        assert!(!super::link_local_is_ready(settled, "wlan1"));
-        assert!(super::link_local_is_ready(
-            &format!("{global}{tentative}{settled}"),
-            "wlan0"
-        ));
+        // AddressMessage is #[non_exhaustive], so it's built off Default rather than a literal.
+        let msg = |family, scope, flags: AddressFlags| {
+            let mut msg = AddressMessage::default();
+            msg.header = AddressHeader {
+                family,
+                scope,
+                ..Default::default()
+            };
+            msg.attributes = vec![AddressAttribute::Flags(flags)];
+            msg
+        };
+
+        assert!(super::is_settled_link_local(&msg(
+            AddressFamily::Inet6,
+            AddressScope::Link,
+            AddressFlags::Permanent
+        )));
+        assert!(!super::is_settled_link_local(&msg(
+            AddressFamily::Inet6,
+            AddressScope::Link,
+            AddressFlags::Tentative
+        )));
+        // A routable (global-scope) address is not a link-local one, tentative or not.
+        assert!(!super::is_settled_link_local(&msg(
+            AddressFamily::Inet6,
+            AddressScope::Universe,
+            AddressFlags::Permanent
+        )));
+        // IPv4 is never the link-local address AirPlay is reached on.
+        assert!(!super::is_settled_link_local(&msg(
+            AddressFamily::Inet,
+            AddressScope::Link,
+            AddressFlags::Permanent
+        )));
+        // No IFA_FLAGS attribute: falls back to the header's (older, 8-bit) flags.
+        let mut header_only = AddressMessage::default();
+        header_only.header = AddressHeader {
+            family: AddressFamily::Inet6,
+            scope: AddressScope::Link,
+            flags: AddressHeaderFlags::Tentative,
+            ..Default::default()
+        };
+        assert!(!super::is_settled_link_local(&header_only));
     }
 
     /// Live check against iwd: needs `CARJACK_TEST_SSID` set to the SSID we're currently on.

@@ -412,7 +412,7 @@ dependencies = [
  "libc",
  "log",
  "macaddr",
- "nix",
+ "nix 0.29.0",
  "num-derive",
  "num-traits",
  "pin-project",
@@ -511,15 +511,17 @@ dependencies = [
  "iwd-automata",
  "libc",
  "libcarjack",
- "nix",
+ "netlink-packet-route",
+ "nix 0.29.0",
  "reis",
  "ring",
+ "rtnetlink",
  "serde",
  "serde_json",
  "smithay",
  "socket2",
  "tap",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -567,7 +569,7 @@ dependencies = [
  "fdk-aac",
  "log",
  "opus2",
- "thiserror",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -611,7 +613,7 @@ dependencies = [
  "macaddr",
  "rand 0.9.5",
  "serde",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "uuid",
 ]
@@ -629,7 +631,7 @@ name = "catplay_fairplay"
 version = "0.1.0"
 source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -653,7 +655,7 @@ dependencies = [
  "ring",
  "serde",
  "srp",
- "thiserror",
+ "thiserror 2.0.19",
  "uuid",
 ]
 
@@ -672,7 +674,7 @@ dependencies = [
  "libc",
  "log",
  "macaddr",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-util",
 ]
@@ -688,7 +690,7 @@ dependencies = [
  "catplay_tracing",
  "catplay_util",
  "log",
- "thiserror",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -699,7 +701,7 @@ dependencies = [
  "libc",
  "log",
  "socket2",
- "thiserror",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -716,7 +718,7 @@ dependencies = [
  "serde",
  "serde_repr",
  "serde_with",
- "thiserror",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -741,7 +743,7 @@ dependencies = [
  "futures",
  "libc",
  "log",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-util",
 ]
@@ -780,7 +782,7 @@ dependencies = [
  "futures",
  "libc",
  "log",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-util",
 ]
@@ -935,7 +937,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1863,7 +1865,7 @@ dependencies = [
  "pastey",
  "pin-project-lite",
  "smallvec",
- "thiserror",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1972,7 +1974,7 @@ dependencies = [
  "gstreamer-base",
  "gstreamer-video-sys",
  "libc",
- "thiserror",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -2085,7 +2087,7 @@ dependencies = [
  "futures",
  "pretty-hex",
  "tap",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2394,6 +2396,55 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "956787520e75e9bd233246045d19f42fb73242759cc57fba9611d940ae96d4b0"
 
 [[package]]
+name = "netlink-packet-core"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b897d7bd4f0af82e68d40d0344cf37e97f9c97ddf74a098de3e4da05e96ca395"
+dependencies = [
+ "paste",
+]
+
+[[package]]
+name = "netlink-packet-route"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be8919612f6028ab4eacbbfe1234a9a43e3722c6e0915e7ff519066991905092"
+dependencies = [
+ "bitflags",
+ "libc",
+ "log",
+ "netlink-packet-core",
+]
+
+[[package]]
+name = "netlink-proto"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6f7398dddf5f152d2a91a2921a134c6097056e292c0d4b9906007855e7cece6"
+dependencies = [
+ "bytes",
+ "futures-channel",
+ "futures-util",
+ "log",
+ "netlink-packet-core",
+ "netlink-sys",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "netlink-sys"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd6c30ed10fa69cc491d491b85cc971f6bdeb8e7367b7cde2ee6cc878d583fae"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "libc",
+ "log",
+ "tokio",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2404,6 +2455,18 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
+]
+
+[[package]]
+name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -2602,8 +2665,14 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b25ada56da40bd4266a924109037ec9a9c59306e002dd2c30b00c0c3d648b93"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.19",
 ]
+
+[[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pastey"
@@ -2934,6 +3003,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtnetlink"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc19f84f710fa2f337617f9bc0400260a94224bde7bae28fd8879f3771ca5784"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "log",
+ "netlink-packet-core",
+ "netlink-packet-route",
+ "netlink-proto",
+ "netlink-sys",
+ "nix 0.30.1",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3199,7 +3286,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.19",
  "tracing",
  "wayland-protocols",
  "wayland-protocols-misc",
@@ -3379,11 +3466,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.19",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
