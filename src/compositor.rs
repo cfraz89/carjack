@@ -1,17 +1,12 @@
-//! Internal Wayland compositor (Smithay-based). carjack runs its own minimal headless
-//! compositor so it can: render the desktop at exactly the car's resolution (no scaling),
-//! render on a chosen GPU (so capture and encode share a GPU - required for zero-copy), get
-//! composited frames straight out of the render loop (no `ext-image-copy-capture` protocol),
-//! and inject CarPlay touch directly into the seat.
+//! Internal Wayland compositor (Smithay-based). carjack runs its own minimal headless compositor
+//! so it can render at exactly the car's resolution, render on the same GPU it encodes on
+//! (zero-copy), pull composited frames straight out of the render loop, and inject CarPlay touch
+//! directly into the seat.
 //!
-//! Because we own the render loop we render on our own 30fps timer rather than waiting on
-//! client damage, so the "static desktop produces no frames" problem (which the capture path
-//! needed a repeater to work around) simply doesn't exist here - the compositor always emits
-//! a frame.
-//!
-//! The compositor runs its calloop event loop on a dedicated thread (the GLES/EGL context is
-//! thread-bound and `!Send`); it publishes rendered frames on a `watch` channel and receives
-//! touch events on a calloop channel.
+//! Renders on its own 30fps timer rather than waiting on client damage, so a static desktop still
+//! emits frames. Runs its calloop event loop on a dedicated thread (the GLES/EGL context is
+//! thread-bound and `!Send`), publishing frames on a `watch` channel and taking touch on a calloop
+//! channel.
 
 use std::ffi::OsString;
 use std::os::fd::OwnedFd;
@@ -121,11 +116,9 @@ pub struct Compositor {
 
 impl Compositor {
     /// Start a headless compositor rendering at `width`x`height` @ `fps` on `render_node`.
-    /// `zero_copy` selects whether it forwards its rendered dmabuf (for a same-GPU hardware
-    /// encoder) or reads frames back to system memory (software encode) - it must match the
-    /// resolved encode backend. Blocks until the compositor is up and its socket is listening. The
-    /// size/rate are a starting point - call [`reconfigure`](Self::reconfigure) once the car's
-    /// real display parameters are known.
+    /// `zero_copy` must match the resolved encode backend - it picks whether frames are forwarded
+    /// as a dmabuf or read back to system memory. Blocks until the socket is listening; the
+    /// size/rate are a starting point, refined later by [`reconfigure`](Self::reconfigure).
     pub fn start(
         render_node: String,
         zero_copy: bool,
@@ -362,10 +355,10 @@ impl State {
         let _ = self.display_handle.flush_clients();
     }
 
-    /// Re-size/re-time the compositor to the car's real display parameters (learned from AirPlay
-    /// after startup). Reallocates the render pool at the new size, updates the output mode + the
-    /// render-timer period, and reconfigures mapped clients to the new fullscreen size. Runs on
-    /// the compositor thread. Returns the error as a `String` so it can cross the ack channel.
+    /// Re-size/re-time the compositor to the car's real display parameters: reallocates the render
+    /// pool, updates the output mode and render-timer period, and reconfigures mapped clients to
+    /// the new fullscreen size. Runs on the compositor thread; the error is a `String` so it can
+    /// cross the ack channel.
     fn reconfigure(
         &mut self,
         width: u32,
@@ -513,11 +506,8 @@ fn run(
     let gbm = GbmDevice::new(device_fd).map_err(|e| eyre!("create GbmDevice: {e}"))?;
     let renderer = make_renderer(&gbm)?;
 
-    // Allocate the render target with a modifier the GPU can actually render *into*. NVIDIA
-    // can't render into a Linear dmabuf ("EGLImage not supported") but can into its own tiled
-    // modifiers; Intel handles both. GL readback (copy_framebuffer) works regardless of the
-    // modifier, so this only broadens hardware support. Fall back to Linear if the driver
-    // advertises no renderable modifiers for the format.
+    // A modifier the GPU can render *into* - NVIDIA rejects a Linear dmabuf but accepts its own
+    // tiled modifiers. Falls back to Linear if the driver advertises none.
     let render_modifiers: Vec<smithay::backend::allocator::Modifier> = renderer
         .egl_context()
         .dmabuf_render_formats()
@@ -664,16 +654,12 @@ fn run(
         })
         .map_err(|e| eyre!("insert control source: {e}"))?;
 
-    // Render on an *absolute* schedule: rearm to the next fixed deadline rather than
-    // "now + interval". A relative rearm would add each frame's render time to the period, so the
-    // effective rate would sag below target and jitter with load - a stutter source. Advancing a
-    // fixed deadline keeps a steady cadence (resyncing only if we genuinely fall a frame behind).
-    // The interval is re-read from `state.frame_interval` so `reconfigure` can change it live.
+    // Rearm to a fixed deadline rather than "now + interval", so render time doesn't accumulate
+    // into the period and sag the rate under load. Re-read from `state.frame_interval` each tick
+    // so `reconfigure` can change it live.
     let frame_interval = Duration::from_micros(1_000_000 / fps as u64);
     let mut next_deadline = std::time::Instant::now() + frame_interval;
-    // Lightweight cadence stats (logged ~every 5s): how many frames we actually rendered per
-    // second, and the worst render time - to tell apart "compositor can't keep up" from
-    // downstream stutter. Compare against the encoder/send-side heartbeat's fps.
+    // Cadence stats, logged ~every 5s.
     let mut stat_count: u32 = 0;
     let mut stat_render_max = Duration::ZERO;
     let mut stat_since = std::time::Instant::now();

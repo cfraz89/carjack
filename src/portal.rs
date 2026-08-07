@@ -19,21 +19,13 @@ use wayland_protocols::wp::fractional_scale::v1::client::{
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
-/// The display scale reported by whatever Wayland compositor is running (any DE), used to convert
-/// the desktop's *physical* pixel size into the *logical* coordinates the RemoteDesktop portal
-/// injects touch in: `pipewiresrc` delivers physical pixels, so on a HiDPI desktop (e.g. a
-/// 3456x2160 panel at scale 2 = 1728x1080 logical) the physical size must be divided by this before
-/// touch is scaled to it, else the bottom/right of the screen is unreachable.
+/// The display scale reported by the compositor - used to convert `pipewiresrc`'s *physical* pixel
+/// size into the *logical* coordinates the RemoteDesktop portal injects touch in.
 ///
-/// Primary source is `wp_fractional_scale_v1::preferred_scale`, which carries the scale as a
-/// fraction over 120 and so reports 1.25/1.5/... exactly. `wl_output.scale` is the fallback for
-/// compositors without the protocol, but it's an *integer* - under fractional scaling it rounds
-/// (a 1.5 desktop reports 2), which put touch in the wrong place. `None` if there's no Wayland
-/// display or neither source answered (callers then assume 1.0).
-///
-/// Single-scale assumption: the fractional scale is whichever output the compositor puts the probe
-/// surface on (and the `wl_output` fallback takes the max across outputs), so a multi-monitor setup
-/// with *different* scales can report the wrong one for the monitor being streamed.
+/// Prefers `wp_fractional_scale_v1::preferred_scale` (exact, a fraction over 120) over the integer
+/// `wl_output.scale` fallback, which rounds under fractional scaling. `None` if there's no Wayland
+/// display or neither source answered (callers then assume 1.0). Multi-monitor setups with
+/// different per-output scales can get the wrong one, since this only probes one surface.
 pub fn display_scale() -> Option<f64> {
     let state = probe_scale()?;
     if let Some(num) = state.fractional_scale {
@@ -92,12 +84,9 @@ struct FractionalProbe {
 
 impl ScaleState {
     /// Create the throwaway surface and its `wp_fractional_scale_v1`, so the next roundtrip can
-    /// pick up a `preferred_scale`.
-    ///
-    /// The surface is given an `xdg_toplevel` role: Mutter only reports a preferred scale once a
-    /// surface has a role (a bare `wl_surface` gets no `preferred_scale` at all - verified against
-    /// GNOME 50). No buffer is ever attached, so the toplevel can't map and nothing appears on the
-    /// user's desktop.
+    /// pick up a `preferred_scale`. Given an `xdg_toplevel` role since Mutter only reports a
+    /// preferred scale once a surface has one; no buffer is ever attached, so nothing appears
+    /// on the user's desktop.
     fn start_fractional_probe(&self, qh: &QueueHandle<Self>) -> Option<FractionalProbe> {
         let compositor = self.compositor.as_ref()?;
         let manager = self.fractional_manager.as_ref()?;
@@ -240,31 +229,24 @@ pub struct RemoteDesktopStream {
     /// Held to keep the portal ScreenCast/RemoteDesktop session (and its PipeWire node) alive.
     pub session: Session<RemoteDesktop>,
     pub node_id: u32,
-    /// The stream size the portal advertised, which is the coordinate space it *validates* touch
-    /// against (`xdg-desktop-portal`'s `check_position` requires `0 <= x < width`). `None` if the
-    /// portal didn't report one, in which case the caller's frame size is used instead.
+    /// The stream size the portal advertised - the space its `check_position` validates touch
+    /// against. `None` if it didn't report one; the caller's frame size is used instead.
     stream_size: Option<(f64, f64)>,
-    /// The desktop's scale factor ([`display_scale`], probed once at startup). Only used to detect
-    /// the compositor whose advertised stream size is *logical* while its buffers are physical - see
-    /// [`Self::warn_on_scale_mismatch`].
+    /// The desktop's scale factor, probed once at startup - see `warn_on_scale_mismatch`.
     display_scale: f64,
     /// So the mismatch warning is logged once per session, not once per touch.
     warned_mismatch: std::sync::atomic::AtomicBool,
-    /// libei injection over the socket from `ConnectToEIS`, which is how touch is normally sent:
-    /// it has no `check_position` to disagree with the compositor's own coordinate handling. `None`
-    /// only when the portal or compositor can't do libei, in which case the legacy `NotifyTouch*`
-    /// D-Bus path below is used (and is subject to that validation).
+    /// libei injection over `ConnectToEIS` - the normal path, with no `check_position` to fight.
+    /// `None` when the portal/compositor can't do it, falling back to the D-Bus path below.
     ei: Option<EiTouch>,
 }
 
 impl RemoteDesktopStream {
     /// Inject a CarPlay touch. `car_size` is the car's display size (the space `event.x/.y` are in).
     ///
-    /// Over libei the coordinates go into the device's region (see [`EiTouch::send_touch`]). On the
-    /// D-Bus fallback they're scaled to the portal's advertised `stream_size` when it gave one - that
-    /// is exactly what its `check_position` bounds coordinates by - else the caller's `frame_size`
-    /// (the encoder's negotiated pipewiresrc caps), then clamped just inside that bound, because the
-    /// check is exclusive (`x < width`) while CarPlay reports touch *at* the edge of its display.
+    /// Over libei the coordinates go straight into the device's region. On the D-Bus fallback
+    /// they're scaled to `stream_size` (or `frame_size` if the portal gave no size) and clamped
+    /// just inside it, since `check_position` is exclusive but CarPlay reports touch at the edge.
     pub async fn send_touch(
         &self,
         event: &TouchEvent,
@@ -341,13 +323,10 @@ impl RemoteDesktopStream {
             .is_none_or(crate::libei::EiTouch::is_connected)
     }
 
-    /// Warn (once) when the advertised stream size is the desktop's *logical* size while the frames
-    /// are physical - i.e. `advertised * display_scale == frame`. Mutter does exactly this, and its
-    /// input transform then divides what we send by the scale again, so touch lands at
-    /// `1/display_scale` of the intended position and coordinates past the advertised width are
-    /// rejected outright ("Invalid position"). Nothing we can send satisfies both, hence the
-    /// GNOME-only [`crate::mutter`] path; this warning is for any *other* compositor that turns out
-    /// to have the same mismatch.
+    /// Warn (once) when the advertised stream size is the desktop's *logical* size while frames are
+    /// physical - `advertised * display_scale == frame`. Mutter does this, and no D-Bus coordinate
+    /// satisfies both its validation and its input transform - hence the libei path above; this
+    /// warning is for any other compositor with the same mismatch.
     fn warn_on_scale_mismatch(&self, frame: Option<(f64, f64)>) {
         use std::sync::atomic::Ordering;
         let (Some((sw, _)), Some((fw, _))) = (self.stream_size, frame) else {
@@ -405,8 +384,7 @@ pub(crate) fn scale_touch(
 mod tests {
     use super::{TouchEvent, clamp_inside, scale_touch};
 
-    /// Machine-gated probe: prints what this compositor reports through each source, so a HiDPI
-    /// touch-mapping problem can be diagnosed without a car (run with `-- --nocapture`).
+    /// Machine-gated probe: prints what this compositor reports through each scale source.
     #[test]
     fn display_scale_probe() {
         let Some(state) = super::probe_scale() else {
@@ -444,10 +422,8 @@ mod tests {
         assert_eq!(scale_touch(500.0, 250.0, stream, (0, 0)), (500.0, 250.0));
     }
 
-    /// Machine-gated *and* human-gated: opens a real portal session and checks touch ends up on
-    /// libei rather than the D-Bus fallback, reporting the regions the compositor offered. Needs
-    /// someone to accept the consent dialog, hence `#[ignore]`; run with
-    /// `cargo test --bin carjack portal_session_uses_libei -- --ignored --nocapture`.
+    /// Opens a real portal session and checks touch ends up on libei rather than the D-Bus
+    /// fallback. Needs a human to accept the consent dialog, hence `#[ignore]`.
     /// `CARJACK_TEST_INJECT=1` also injects one tap at the centre of the screen.
     #[tokio::test]
     #[ignore = "opens a portal consent dialog, needs a human"]
@@ -472,14 +448,8 @@ mod tests {
         Ok(())
     }
 
-    /// With `CARJACK_TEST_INJECT=1`: inject a real tap and confirm libei *accepted* it - a protocol
-    /// violation (bad frame usage, out-of-region coordinates, a stale serial) makes the EIS
-    /// implementation hang up, which closes the command channel and makes the next send fail.
-    ///
-    /// Where the tap lands can't be observed from here; that was checked separately by aiming the
-    /// session's absolute pointer at the car view's top-left corner and watching GNOME's hot corner
-    /// fire (and *not* fire for a centre aim), which confirmed both delivery and that the region
-    /// maps 1:1 onto the screen.
+    /// Inject a real tap and confirm libei *accepted* it - a protocol violation makes the EIS
+    /// implementation hang up, closing the command channel and failing the next send.
     async fn inject_tap(stream: &super::RemoteDesktopStream) -> eyre::Result<()> {
         use libcarjack::carplay_session::TouchEventType::{Down, Up};
         let car_size = (1080u32, 600u32);
@@ -504,9 +474,8 @@ mod tests {
         Ok(())
     }
 
-    /// `check_position` is exclusive (`x < width`), so an edge touch - which CarPlay does report,
-    /// at exactly the car's display size - has to be pulled just inside or the portal rejects the
-    /// event with "Invalid position".
+    /// `check_position` is exclusive, so an edge touch - which CarPlay does report - has to be
+    /// pulled just inside or the portal rejects it with "Invalid position".
     #[test]
     fn edge_touch_is_clamped_inside_the_stream() {
         let stream = Some((1920.0, 1080.0));
@@ -529,13 +498,9 @@ pub async fn start_remote_desktop() -> Result<RemoteDesktopStream> {
         .select_devices(
             &session,
             SelectDevicesOptions::default()
-                // Touchscreen is what carjack actually injects. `Pointer` is requested only
-                // because Mutter's EIS refuses to create *any* viewport-backed device without it:
-                // `add_viewport_devices` starts with
-                // `g_return_if_fail (eis_seat_has_capability (seat, EIS_DEVICE_CAP_POINTER_ABSOLUTE))`,
-                // so asking for Keyboard|Touchscreen alone yields a keyboard and nothing else, and
-                // libei touch silently never becomes available (verified on GNOME 50: the
-                // assertion shows up in gnome-shell's journal).
+                // `Pointer` is requested even though only Touchscreen is injected: Mutter's EIS
+                // refuses to create any viewport-backed device without a pointer capability, so
+                // Keyboard|Touchscreen alone silently yields no touch device at all.
                 .set_devices(DeviceType::Keyboard | DeviceType::Pointer | DeviceType::Touchscreen)
                 .set_persist_mode(PersistMode::Application),
         )
@@ -565,9 +530,8 @@ pub async fn start_remote_desktop() -> Result<RemoteDesktopStream> {
     let node_id = stream.pipe_wire_node_id();
     let stream_size = stream.size().map(|(w, h)| (f64::from(w), f64::from(h)));
 
-    // Touch goes over libei when the portal supports `ConnectToEIS` (API v2). The stream's
-    // `mapping_id` tells libei which of the compositor's input regions corresponds to what the car
-    // is looking at.
+    // Touch goes over libei when the portal supports `ConnectToEIS` (API v2); `mapping_id` ties
+    // the stream to the compositor's matching input region.
     let mapping_id = stream.mapping_id().map(str::to_string);
     let ei = match EiTouch::connect(&remote_desktop, &session, mapping_id).await {
         Ok(ei) => Some(ei),
@@ -580,9 +544,8 @@ pub async fn start_remote_desktop() -> Result<RemoteDesktopStream> {
         }
     };
 
-    // Probe the desktop scale once, here, to spot the advertised-logical/delivered-physical
-    // mismatch (see `warn_on_scale_mismatch`); only the D-Bus fallback is affected by it.
-    // `display_scale` does blocking Wayland roundtrips, so it goes on the blocking pool.
+    // Probed once, here, to spot the scale mismatch `warn_on_scale_mismatch` checks for. Runs on
+    // the blocking pool since it does blocking Wayland roundtrips.
     let display_scale = tokio::task::spawn_blocking(display_scale)
         .await
         .ok()

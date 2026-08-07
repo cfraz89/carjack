@@ -21,11 +21,9 @@ use crate::compositor::CapturedFrame;
 use crate::config::ZeroCopyMode;
 use libcarjack::airplay::EncodedFrame;
 
-/// The configured target video bitrate (`[graphics] bitrate` / `--bitrate`, in kbit/s), passed to
-/// whichever encoder is selected. A newtype because the encoders disagree on units - x264enc,
-/// nvh264enc and vah264enc take kbit/s while openh264enc and the v4l2 controls take bit/s - so the
-/// encoder descriptions in [`HW_BACKENDS`] / [`DEFAULT_SW_ENCODER`] spell the unit they want as a
-/// `{kbps}` / `{bps}` placeholder and [`Bitrate::apply`] fills it in.
+/// The configured target video bitrate, in kbit/s. A newtype because encoders disagree on units -
+/// most take kbit/s, openh264enc and v4l2 take bit/s - so encoder descriptions spell the unit they
+/// want as a `{kbps}`/`{bps}` placeholder and [`Bitrate::apply`] fills it in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bitrate {
     kbps: u32,
@@ -165,14 +163,11 @@ pub fn resolve_backend(mode: ZeroCopyMode, render_node: &str) -> Result<EncodeBa
 }
 
 /// Try to construct a zero-copy backend for `render_node` by probing [`HW_BACKENDS`], honouring an
-/// explicit `CARPLAY_ENCODE_BACKEND` (`cuda`/`vaapi`/`v4l2`) override. Returns `None` if none are
-/// usable.
+/// explicit `CARPLAY_ENCODE_BACKEND` override. `None` if none are usable.
 ///
-/// Rows whose `drivers` match the node's actual kernel driver are tried first, because a zero-copy
-/// import only works within one GPU: with `drm_device` pointed at an Intel node on a hybrid box,
-/// plain table order reaches `cuda` first, whose elements all probe fine while every frame's
-/// `eglCreateImageKHR` then fails `BAD_MATCH`. Sorting rather than filtering keeps the rest as
-/// fallbacks, in table order - same as the desktop path.
+/// Rows matching the node's actual kernel driver are tried first - a zero-copy import only works
+/// within one GPU, so plain table order can reach a backend whose elements probe fine but whose
+/// import then fails per-frame on a mismatched GPU. The rest stay as fallbacks, in table order.
 fn try_zero_copy(render_node: &str) -> Option<EncodeBackend> {
     let driver = crate::config::render_node_driver(render_node);
     let mut candidates: Vec<&HwBackend> = HW_BACKENDS
@@ -263,10 +258,8 @@ pub async fn encode_h264_to_channel(
     src.set_property("do-timestamp", true);
     pipeline.add(&src).map_err(|_| eyre!("add source"))?;
 
-    // A small leaky queue decouples the feeder from the encode chain and, crucially, keeps
-    // latency bounded: if the encoder or the car's WiFi momentarily falls behind, it drops the
-    // oldest frame (leaky=downstream) rather than letting buffers pile up and lag grow. It's a
-    // live stream, so a dropped frame is always better than a growing delay.
+    // Leaky queue: drops the oldest frame (rather than growing latency) if the encoder or the
+    // car's WiFi momentarily falls behind.
     let queue = mk("queue", "queue")?;
     queue.set_property_from_str("leaky", "downstream");
     queue.set_property("max-size-buffers", 3u32);
@@ -382,17 +375,12 @@ pub async fn encode_h264_to_channel(
 }
 
 /// Stream the user's existing desktop, captured via the xdg-desktop-portal ScreenCast PipeWire
-/// `node_id`, scaled/re-timed to the car's `width`x`height` @ 30fps. Used for
-/// `source = "desktop"`; input is injected back through the portal (see `src/portal.rs`), not
-/// here. `pipewiresrc` is a live source with its own timestamps, so no appsrc/feeder is needed.
+/// `node_id`, scaled/re-timed to the car's `width`x`height` @ 30fps. Input goes back through the
+/// portal (see `src/portal.rs`), not here. `pipewiresrc` is a live source with its own
+/// timestamps, so no appsrc/feeder is needed.
 ///
-/// `zerocopy` selects the convert/scale path:
-/// - **GPU zero-copy** (`Auto`/`Force`, when a [`HW_BACKENDS`] row's `desktop` elements exist):
-///   `pipewiresrc ! <backend desktop chain> ! videorate ! <backend encoder>` - the chain imports
-///   the portal's dmabuf and does convert/scale/retime on the GPU (`videorate` is
-///   memory-agnostic). The backend on the GPU that renders the desktop is preferred.
-/// - **Software** (`Off`, or `Auto` with no usable backend): `pipewiresrc ! videorate !
-///   videoscale ! videoconvert ! <DEFAULT_SW_ENCODER>` - convert/scale on the CPU.
+/// `zerocopy` picks GPU convert/scale (a [`HW_BACKENDS`] row's `desktop` chain, preferring the
+/// backend on the GPU that renders the desktop) or software (`videoscale ! videoconvert`).
 pub async fn encode_pipewire_to_channel(
     node_id: u32,
     width: u32,
@@ -480,15 +468,10 @@ fn build_pipewire_encode(
         }
     };
 
-    // A GPU import chain + encoder from the backend's `desktop` elements - Intel/AMD
-    // `vapostproc ! vah264enc`, Qualcomm `v4l2convert ! v4l2h264enc`, NVIDIA
-    // `glupload ! glcolorconvert ! glcolorscale ! nvh264enc`. The chain imports the portal's
-    // dmabuf and does convert + scale on the GPU (`videorate` is memory-agnostic, so it re-times
-    // inside the GPU chain), handing GPU memory to the encoder. Genuinely zero-copy for the
-    // postproc backends; on NVIDIA the *final* GL->CUDA handoff still downloads to system memory
-    // (interop fails with INVALID_GRAPHICS_CONTEXT), but it's the right choice when the desktop
-    // *is* NVIDIA-rendered. (For the Intel `va` elements to register on a hybrid box, gst needs
-    // `GST_VA_ALL_DRIVERS=1`, which `run_desktop` sets.)
+    // A GPU import chain + encoder from the backend's `desktop` elements, importing the portal's
+    // dmabuf and converting/scaling on the GPU. Genuinely zero-copy for the postproc backends; on
+    // NVIDIA the final GL->CUDA handoff still downloads to system memory (interop fails), but it's
+    // still the right choice when the desktop is NVIDIA-rendered.
     let build_hw = |b: &HwBackend| -> Result<gst::Element> {
         let (enc_name, encoder) = make_encoder(&b.encoder_desc(bitrate))?;
         let mut chain = b
@@ -582,11 +565,9 @@ async fn drive_h264_pipeline(
 
     let h264parse = mk("h264parse", "h264parse")?;
     h264parse.set_property("config-interval", -1i32);
-    // Forced keyframes, asked for by the car (a `ForceKeyFrame` command, or catplay refusing
-    // delta frames) over on the AirPlay side. An *upstream* force-key-unit event delivered to
-    // the encoder's src pad is the portable way to ask for an IDR: every H264 encoder we use
-    // handles it, so this needs no per-backend special-casing. `all_headers` re-sends SPS/PPS
-    // with the IDR, which is what lets a car that has lost sync latch back on.
+    // Forced keyframes, asked for by the car. An upstream force-key-unit event on the encoder's
+    // src pad works portably across every backend, no per-backend special-casing needed.
+    // `all_headers` re-sends SPS/PPS with the IDR, letting a desynced car latch back on.
     let _keyframe_pump = {
         let encoder = encoder.clone();
         let mut keyframe_rx = keyframe_rx;
@@ -608,10 +589,8 @@ async fn drive_h264_pipeline(
         }))
     };
 
-    // Leaky queue between the encoder and the appsink: if the consumer (`video_tx` -> the car)
-    // stalls or is still setting up, drop the *oldest* encoded frames instead of letting them pile
-    // up - otherwise a backlog forms (e.g. while the AirPlay connection negotiates) and never
-    // drains, showing as a permanent 1-2s delay.
+    // Leaky queue: drops the oldest encoded frames if the consumer stalls or is still setting up,
+    // rather than letting an undrained backlog become a permanent delay.
     let sink_queue = mk("queue", "sink_queue")?;
     sink_queue.set_property_from_str("leaky", "downstream");
     sink_queue.set_property("max-size-buffers", 3u32);
@@ -701,54 +680,43 @@ enum Import {
     Cuda,
 }
 
-/// A GPU-side zero-copy encode backend: one platform's way of getting frames onto the GPU
-/// (`import` / `desktop`) plus the hardware H264 encoder that consumes them, tuned for real time.
-/// A backend is selected only when all of its elements exist (probed via `ElementFactory::find`),
-/// so a machine without the driver falls through to the next backend, then to software.
+/// A GPU-side zero-copy encode backend: one platform's way of getting frames onto the GPU plus the
+/// hardware H264 encoder that consumes them. A backend is selected only when all of its elements
+/// exist, so a machine without the driver falls through to the next backend, then to software.
 ///
-/// Both video sources share this table: the internal compositor path uses `import` + `postproc`,
-/// the desktop (portal/PipeWire) path uses `desktop` + `desktop_memory`. Adding a platform = one
-/// row here. Keep the highest-value/most-specific backends first.
+/// Both video sources share this table: the compositor path uses `import`/`postproc`, the desktop
+/// path uses `desktop`/`desktop_memory`. Adding a platform = one row.
 ///
-/// `pub` only because [`EncodeBackend::Hw`] names it; every field is private, so a row stays an
-/// implementation detail of this module and callers can only pass the value around.
+/// `pub` only because [`EncodeBackend::Hw`] names it; every field is private.
 pub struct HwBackend {
     /// Value for `CARPLAY_ENCODE_BACKEND` to force this backend, and what gets logged.
     name: &'static str,
-    /// DRM driver names this backend's GPU uses. The desktop path prefers the backend matching the
-    /// GPU that renders the desktop - encoding an Intel/AMD desktop on NVIDIA (or vice versa)
-    /// would be a cross-GPU copy.
+    /// DRM driver names this backend's GPU uses - the desktop path prefers the backend matching
+    /// the GPU that renders the desktop, to avoid a cross-GPU copy.
     drivers: &'static [&'static str],
     /// How the compositor's dmabuf enters the chain.
     import: Import,
-    /// Internal path: dmabuf-importing convert element (M2M) between the appsrc and the encoder,
-    /// doing RGB->NV12 on-GPU. `None` when the import already yields encoder-ready memory (CUDA).
-    /// No scale/convert is needed beyond it - the compositor renders at the car's exact resolution.
+    /// Compositor path: dmabuf-importing convert element (RGB->NV12 on-GPU). `None` when the
+    /// import already yields encoder-ready memory (CUDA).
     postproc: Option<&'static str>,
     /// Desktop path: elements between `pipewiresrc` and `videorate` that import the portal's
-    /// dmabuf and do convert+scale on the GPU (the desktop is *not* the car's resolution).
+    /// dmabuf and convert+scale on the GPU (the desktop isn't the car's resolution).
     desktop: &'static [&'static str],
     /// The memory feature `desktop` hands the encoder (`memory:DMABuf`, `memory:GLMemory`, ...).
     desktop_memory: &'static str,
-    /// gst-launch-style hardware encoder description ("name prop=val ..."), tuned for real time:
-    /// steady CBR, no B-frame reordering, minimal reference buffering, and a periodic keyframe
-    /// interval (the car tears the session down after ~1s without video, and IDRs are large -
-    /// emitting them every few frames bursts the car's WiFi). Property names differ per encoder; a
-    /// bare name leaves the encoder's defaults. Overridden wholesale by `CARPLAY_ENCODER`.
-    ///
-    /// One string serves every path this backend appears on - compositor, desktop, and the
-    /// system-memory fallback in [`software_encoder_desc`] - so the tuning has to hold whether the
-    /// encoder is fed GPU or system memory (see the nvenc note on the `cuda` row).
+    /// gst-launch-style hardware encoder description, tuned for real time (CBR, no B-frames, ~1s
+    /// keyframes). One string serves every path this backend appears on - compositor, desktop,
+    /// and the system-memory fallback in [`software_encoder_desc`] - so the tuning has to hold on
+    /// both GPU and system memory (see the nvenc gop-size note below). `CARPLAY_ENCODER` overrides
+    /// it wholesale.
     encoder: &'static str,
 }
 
 /// Probed in order; the first whose elements all exist wins.
 const HW_BACKENDS: &[HwBackend] = &[
-    // NVIDIA (only when the `cuda` feature is on, so a non-NVIDIA build doesn't reference
-    // cuda-dmabuf). Internal: `cuda-dmabuf` hands nvh264enc GstCudaMemory directly (it does
-    // RGB->NV12 itself), so there's no postproc. Desktop: the portal's buffer goes through GL
-    // instead - convert/scale on the GPU - because the CUDA importer only takes the compositor's
-    // own dmabuf.
+    // NVIDIA. `cuda-dmabuf` hands nvh264enc GstCudaMemory directly on the compositor path (no
+    // postproc); the desktop path goes through GL instead, since the CUDA importer only takes the
+    // compositor's own dmabuf.
     #[cfg(feature = "cuda")]
     HwBackend {
         name: "cuda",
@@ -757,27 +725,16 @@ const HW_BACKENDS: &[HwBackend] = &[
         postproc: None,
         desktop: &["glupload", "glcolorconvert", "glcolorscale"],
         desktop_memory: "memory:GLMemory",
-        // preset=p4 is the modern medium preset (used together with tune); ultra-low-latency +
-        // bframes=0 + rc-lookahead=0 + zerolatency means no reordering and no lookahead buffering,
-        // so frames come out immediately.
-        //
-        // gop-size=60 (~2s), not the 30 the other rows use, because this one encoder has to serve
-        // both memory kinds: fed *system memory* - the desktop GL path, whose final GL->CUDA
-        // handoff downloads, and the no-CPU-encoder fallback - nvenc emits an IDR *every frame* at
-        // gop-size=30 specifically. It's a quirk of that exact value (30 is fine on the internal
-        // path's CUDA memory, and other sizes are fine on system memory), so 60 is the one setting
-        // that behaves on every path. Verified via `tests/desktop.rs` on a real GNOME ScreenCast.
+        // gop-size=60, not the 30 other rows use: this encoder also serves system memory (the
+        // desktop GL path's GL->CUDA handoff downloads, and the no-CPU-encoder fallback), and
+        // nvenc emits an IDR every frame at gop-size=30 specifically when fed system memory. 60 is
+        // the one value that behaves on every path this row appears on.
         encoder: "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=cbr bitrate={kbps} \
                   gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true aud=true",
     },
-    // Qualcomm / embedded (the deployment target). v4l2 stateful encoders import DMABuf via
-    // V4L2_MEMORY_DMABUF; rate/keyframe control goes through the driver's V4L2 controls rather than
-    // gst properties, so `extra-controls` carries the rate setup the other rows express as encoder
-    // properties: `video_bitrate` (V4L2_CID_MPEG_VIDEO_BITRATE, in bit/s) at
-    // `video_bitrate_mode=1` (V4L2_MPEG_VIDEO_BITRATE_MODE_CBR - the enum's 0 is VBR), so this row
-    // is steady CBR like cuda/vaapi/x264. Keyframe interval stays at the driver's default, to
-    // revisit against the real device. Untested off-device: a driver that doesn't implement one of
-    // these controls just logs a warning and keeps its own default.
+    // Qualcomm / embedded (the deployment target). v4l2 stateful encoders take DMABuf directly;
+    // rate/keyframe control goes through V4L2 controls (`extra-controls`) rather than gst
+    // properties. Untested off-device.
     HwBackend {
         name: "v4l2",
         drivers: &["msm", "msm_drm"],
@@ -787,9 +744,8 @@ const HW_BACKENDS: &[HwBackend] = &[
         desktop_memory: "memory:DMABuf",
         encoder: "v4l2h264enc extra-controls=controls,video_bitrate_mode=1,video_bitrate={bps}",
     },
-    // Intel / AMD VA-API. vapostproc imports the DMA_DRM dmabuf and outputs NV12 in VAMemory,
-    // which vah264enc consumes on the same GPU - fully zero-copy. Defaults use B-frames + non-CBR
-    // rate control, which adds reordering/lookahead latency (visible lag) - tune for real-time.
+    // Intel / AMD VA-API. vapostproc imports the dmabuf and outputs NV12 in VAMemory, which
+    // vah264enc consumes on the same GPU - fully zero-copy.
     HwBackend {
         name: "vaapi",
         drivers: &["i915", "xe", "amdgpu", "radeon"],
@@ -909,37 +865,24 @@ fn build_backend(
     }
 }
 
-/// Software encoder default. x264enc is the most widely available H264 encoder (any GStreamer with
-/// gst-plugins-ugly), so it's what a machine with no usable GPU path lands on - but its defaults
-/// are tuned for *file* encoding and would add seconds of lag here:
-/// - `speed-preset=ultrafast` + `tune=zerolatency`: no lookahead, no frame reordering, no threaded
-///   frame delay - the encoder emits each frame as it takes it, which is what a live stream needs
-///   (and what keeps a CPU encode able to hold 30fps at the car's resolution).
-/// - `bframes=0`: B-frames reorder output, trading latency for size. Same reason the hardware
-///   backends disable them.
-/// - `key-int-max=30`: ~1s keyframes, matching the hardware backends - often enough that the car
-///   recovers quickly, rare enough that the IDR bursts don't congest its WiFi.
-/// - `pass=cbr` + `bitrate={kbps}` (the configured [`Bitrate`], in kbit/s): a steady rate the link
-///   can sustain, not x264's spiky quality-targeted default.
-/// - `byte-stream=true` + `aud=true`: Annex-B with access-unit delimiters, which is what the
-///   AirPlay screen sink consumes (otherwise h264parse has to repackage every buffer).
+/// Software encoder default. x264enc is the most widely available H264 encoder, but its defaults
+/// are tuned for *file* encoding and would add seconds of lag: `ultrafast`/`zerolatency` and
+/// `bframes=0` remove reordering/lookahead delay, `key-int-max=30` matches the hardware backends'
+/// ~1s keyframes, `pass=cbr` gives a steady rate instead of x264's spiky default, and
+/// `byte-stream`/`aud` match what the AirPlay screen sink consumes.
 const DEFAULT_SW_ENCODER: &str = "x264enc speed-preset=ultrafast tune=zerolatency pass=cbr \
     bitrate={kbps} key-int-max=30 bframes=0 byte-stream=true aud=true";
 
-/// Tried in order when [`DEFAULT_SW_ENCODER`] isn't installed. openh264enc (LGPL, in
-/// gst-plugins-bad) is the usual stand-in where gst-plugins-ugly is absent; it's baseline-only, so
-/// there's no B-frame reordering to disable - just pin it to a steady bitrate (bits/s here, unlike
-/// x264enc's kbit/s - hence `{bps}`) and ~1s keyframes.
+/// Tried in order when [`DEFAULT_SW_ENCODER`] isn't installed. openh264enc is the usual stand-in
+/// where gst-plugins-ugly is absent; baseline-only, so there's no B-frame reordering to disable.
 const SW_ENCODER_FALLBACKS: &[&str] =
     &["openh264enc complexity=low rate-control=bitrate bitrate={bps} gop-size=30"];
 
 /// The encoder for a software (non-zero-copy) chain, honouring `CARPLAY_ENCODER` first.
 ///
-/// The last resort is a *hardware* encoder fed system memory: `zerocopy=false` rules out
-/// zero-copy import, not the GPU's encoder block, and plenty of machines (this project's NVIDIA
-/// dev box included) ship a vendor encoder but no CPU one - so falling back to nvh264enc/vah264enc
-/// beats failing outright. Each row's `encoder` is tuned to hold up on system memory too (see the
-/// nvenc gop-size note), so it can be used here as-is.
+/// Last resort is a hardware encoder fed system memory: `zerocopy=false` rules out zero-copy
+/// import, not the GPU's encoder block, and plenty of machines ship a vendor encoder but no CPU
+/// one. Each row's `encoder` is tuned to hold up on system memory too, so it's usable as-is.
 fn software_encoder_desc(bitrate: Bitrate) -> Result<String> {
     if let Some(desc) = encoder_override() {
         return Ok(bitrate.apply(&desc));
@@ -1005,10 +948,9 @@ fn build_hw_chain(
 
 /// Software (non-zero-copy) chain: `appsrc(video/x-raw) ! videoconvert ! <encoder>`.
 ///
-/// `videoscale`/`videorate` are intentionally absent: the compositor renders at exactly the
-/// car's resolution and the feeder pushes a steady 30fps, so there's nothing to scale or
-/// re-time. `videoconvert` stays because most encoders don't accept the compositor's BGRx (e.g.
-/// x264enc wants planar YUV) - it does the BGRx->encoder-format conversion on the CPU.
+/// `videoscale`/`videorate` are absent - the compositor already renders at the car's exact
+/// resolution at a steady rate. `videoconvert` stays since most encoders reject the compositor's
+/// BGRx.
 fn build_software_chain(
     pipeline: &gst::Pipeline,
     src_tail: &gst::Element,

@@ -1,22 +1,14 @@
 //! Touch injection over **libei** (the EI emulated-input protocol) using the `reis` crate.
 //!
-//! The portal still opens the session and asks the user's consent, but input then travels over the
-//! EI socket handed back by `RemoteDesktop.ConnectToEIS` instead of the `NotifyTouch*` D-Bus
-//! methods. That matters for more than tidiness: xdg-desktop-portal validates `NotifyTouch*`
-//! coordinates against the stream's *advertised* size (`check_position`), while Mutter's screen-cast
-//! transform expects them in the stream's *buffer* space and divides by the monitor scale itself - so
-//! on a scaled monitor no coordinate satisfies both (logical coords land at `1/scale` of the intended
-//! spot, physical ones come back as "Invalid position"). libei sidesteps that entirely: an
-//! `ei_device` advertises **regions** in logical pixels and touch is addressed within a region, with
-//! no separate validation layer to disagree with the compositor.
+//! Input travels over the EI socket from `RemoteDesktop.ConnectToEIS`, not the portal's
+//! `NotifyTouch*` D-Bus methods - those validate coordinates against the stream's *advertised*
+//! size while Mutter's transform expects *buffer* space, so on a scaled monitor no coordinate
+//! satisfies both. An `ei_device`'s regions are already in logical pixels, with no such mismatch.
+//! `ConnectToEIS` is portal API v2 (Mutter and KWin both implement it), not GNOME-specific.
 //!
-//! It's also not GNOME-specific - `ConnectToEIS` is portal API v2, implemented by Mutter and KWin -
-//! so this replaces the Mutter-only D-Bus path that preceded it.
-//!
-//! Threading: `reis`'s event stream is `!Send` (it holds boxed `FnOnce` callbacks), so everything EI
-//! lives on its own thread running a current-thread runtime, exactly like the compositor's GLES
-//! loop. The async side only ever sends [`TouchCommand`]s down a channel; dropping [`EiTouch`]
-//! closes it, which ends the loop and the thread.
+//! Threading: `reis`'s event stream is `!Send`, so it runs on its own thread with a current-thread
+//! runtime. The async side only sends [`Command`]s down a channel; dropping [`EiTouch`] closes it,
+//! ending the thread.
 use std::time::Instant;
 
 use ashpd::desktop::{
@@ -345,17 +337,13 @@ impl EiSession {
 
     /// Map a queued touch into the device's region and emit it, if the slot's state allows it.
     ///
-    /// Coordinates go into the region in *logical* pixels, offset by the region's position - that's
-    /// libei's coordinate space, and the compositor applies its own scaling from there. There is
-    /// deliberately no display-scale division: doing one here is what halved touch on the D-Bus path.
+    /// Coordinates go into the region in logical pixels, offset by its position - no display-scale
+    /// division, since that's what halved touch on the old D-Bus path.
     ///
-    /// Every event is filtered through [`SlotTracker`] first, because Mutter's EIS treats
-    /// out-of-order touch as a *fatal* error rather than a client mistake: releasing a slot that was
-    /// never acquired hits `g_assert (device->slots[slot].is_acquired)` in `release_slot` and takes
-    /// gnome-shell (i.e. the user's whole session) down with it. A second `down` for a live slot
-    /// leaks slots until `acquire_slot` returns -1, and a `motion` for an unknown id silently moves
-    /// slot 0 - the *wrong* finger. The car can produce any of those after a dropped event or a
-    /// paused device, so carjack must never forward them blindly.
+    /// Every event is filtered through [`SlotTracker`] first: Mutter's EIS treats an `up` for a
+    /// slot it never acquired as a fatal `g_assert`, aborting gnome-shell (the whole session), and
+    /// a `motion` for an unknown slot silently moves the wrong finger. The car can produce either
+    /// after a dropped event or a paused device, so nothing reaches the wire unfiltered.
     fn inject(&mut self, event: &TouchEvent, car_size: (u32, u32)) {
         let Some(touch) = self.touch.as_ref().filter(|t| t.emulating) else {
             // Paused, or gone: dropping is correct, not an error. The tracker is cleared on pause,
@@ -434,12 +422,8 @@ impl EiSession {
 }
 
 /// Which touch slots are currently down, so carjack only ever emits a well-formed sequence
-/// (`down` -> `motion`* -> `up`) per slot.
-///
-/// This is a safety mechanism, not bookkeeping: Mutter's EIS aborts the whole compositor on an `up`
-/// for a slot it never acquired (`g_assert` in `release_slot`), so anything the car sends - a
-/// duplicated `up`, an `up` whose `down` we dropped while the device was paused, a `motion` after
-/// `up` - has to be filtered here.
+/// (`down` -> `motion`* -> `up`) per slot - Mutter's EIS aborts the whole compositor on an `up`
+/// for a slot it never acquired, so anything malformed the car sends has to be filtered here.
 #[derive(Default)]
 struct SlotTracker {
     down: std::collections::BTreeSet<u32>,

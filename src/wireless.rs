@@ -25,65 +25,20 @@ use crate::wifi_connect::get_wifi_mac;
 const IAP_CHANNEL: u16 = 1;
 
 /// How long to wait for the configured head unit to show up in discovery before giving up on this
-/// session. The caller retries, so this only bounds a single attempt.
+/// attempt (the caller retries).
 const DISCOVERY_WAIT: Duration = Duration::from_secs(60);
 
-/// Pause before re-arming the accept after a transient failure, so a persistently failing
-/// `ConnectRequest::accept` can't turn the wait loop into a busy spin.
+/// Pause before re-arming the accept after a transient failure, so it can't busy-spin.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
-/// How many times `relink` pages before giving up, and how long it waits between attempts. A Page
-/// Timeout is the unit's controller not answering; it frequently answers on a later try.
+/// How many times `relink` pages before giving up, and the delay between attempts. A Page Timeout
+/// is the unit's controller not answering; it frequently answers on a later try.
 const PAGE_ATTEMPTS: usize = 3;
 const PAGE_RETRY_DELAY: Duration = Duration::from_secs(2);
 
-/// How long to wait for a unit to offer its iAP channel before resetting bluetooth. When it works,
-/// it should usually happen almost immediately, in my experience
+/// How long to wait for a unit to offer its iAP channel before cycling the link.
 const OFFER_WAIT: Duration = Duration::from_secs(5);
 
-// fn generate_iap2_sdp() -> String {
-//     format!(
-//         r#"<?xml version="1.0" encoding="UTF-8" ?>
-// <record>
-//     <attribute id="0x0001">
-//         <sequence>
-//             <uuid value="{}"/>
-//         </sequence>
-//     </attribute>
-//     <attribute id="0x0004">
-//         <sequence>
-//             <sequence>
-//                 <uuid value="0x0100"/>
-//             </sequence>
-//             <sequence>
-//                 <uuid value="0x0003"/>
-//                 <uint8 value="{}"/>
-//             </sequence>
-//         </sequence>
-//     </attribute>
-//     <attribute id="0x0009">
-//         <sequence>
-//             <sequence>
-//                 <uuid value="0x1101"/>
-//                 <uint16 value="0x0102"/>
-//             </sequence>
-//         </sequence>
-//     </attribute>
-//     <attribute id="0x0005">
-//         <sequence>
-//             <uuid value="0x1002"/>
-//         </sequence>
-//     </attribute>
-//     <attribute id="0x0008">
-//         <uint8 value="0xFF"/>
-//     </attribute>
-//     <attribute id="0x0100">
-//         <text value="Wireless iAP"/>
-//     </attribute>
-// </record>"#,
-//         IAP_ACCESSORY_UUID, IAP_CHANNEL
-//     )
-// }
 /// BlueZ session, pairing agent, CarPlay advertisement and iAP profile registrations.
 ///
 /// Must outlive every session - dropping it deregisters the profiles.
@@ -93,15 +48,12 @@ pub struct IapHost {
     /// Held only to keep the registrations alive for the process lifetime.
     _session: Session,
     /// The iAP profile the head unit connects in to; a session takes exclusive use of its stream.
-    /// Registered at startup, not per target: a unit runs its SDP search for it while bonding.
     iap_profile: Mutex<ProfileHandle>,
     _agent: bluer::agent::AgentHandle,
-    // Held only to keep the registration alive; nothing consumes its request stream.
-    // _iap_v2: Option<ProfileHandle>,
 }
 
-/// The one iAP profile. The head unit connects in to it, and finding this record in our SDP is
-/// what makes it speak iAP rather than Android Auto.
+/// The one iAP profile - finding it in our SDP is what makes a head unit speak iAP rather than
+/// Android Auto.
 fn device_profile() -> rfcomm::Profile {
     rfcomm::Profile {
         uuid: IAP_DEVICE_UUID,
@@ -114,9 +66,8 @@ fn device_profile() -> rfcomm::Profile {
     }
 }
 
-/// The CarPlay service. Registered purely for its UUID: bluetoothd adds a registered profile's
-/// UUID to the adapter's EIR, which is what a head unit inspects while bonding. Server role so
-/// bluetoothd actually publishes it; the channel is BlueZ's to pick.
+/// The CarPlay service, registered purely for its UUID: bluetoothd adds a registered profile's
+/// UUID to the adapter's EIR, which a head unit inspects while bonding.
 fn carplay_profile() -> rfcomm::Profile {
     rfcomm::Profile {
         uuid: CARPLAY_DEVICE_UUID,
@@ -130,9 +81,9 @@ fn carplay_profile() -> rfcomm::Profile {
 
 /// Run the privileged sidecar that gives the adapter an iPhone-like Class of Device.
 ///
-/// Best-effort, and deliberately not fatal: the capability is granted out of band (`just setcap`,
-/// on the sidecar binary only - never on `carjack`, which a capability would /proc-lock to root and
-/// break desktop mode). Without it carjack still runs, the unit just sees a plain computer.
+/// Best-effort: the capability lives on the sidecar binary only (never `carjack`, which it would
+/// /proc-lock to root and break desktop mode), and skipping it just leaves the unit seeing a plain
+/// computer.
 async fn apply_device_class() {
     let Some(exe) = std::env::current_exe()
         .ok()
@@ -156,16 +107,10 @@ async fn apply_device_class() {
 }
 
 /// What carjack calls itself in `RequestAccessoryWiFiConfiguration` - the adapter's Bluetooth
-/// address, colon-separated and uppercase.
-///
-/// afd6605 changed this to a 24-character zero-padded form, on the reasoning that an iPhone sends
-/// a UDID there rather than an address. The bike does not answer it: `0x4300` carrying
-/// `0000000000004C796EDA294B` is acked and never replied to, while the same request carrying
-/// `4C:79:6E:DA:29:4B` gets `0x4301` back. An iPhone's own 24-character identifier is answered
-/// fine, so the format is not inherently wrong - ours specifically is not accepted, and the bike
-/// is the target.
+/// address, colon-separated and uppercase. The bike answers only this form, not a zero-padded
+/// 24-character one.
 fn transport_identifier(addr: bluer::Address) -> String {
-    // `CARJACK_WIFI_ID=padded` restores afd6605's form, for testing against a unit that wants it.
+    // `CARJACK_WIFI_ID=padded` restores the zero-padded form, for testing against a unit that wants it.
     if std::env::var("CARJACK_WIFI_ID").as_deref() == Ok("padded") {
         let hex: String = addr.iter().map(|b| format!("{b:02X}")).collect();
         return format!("{hex:0>24}");
@@ -182,9 +127,8 @@ fn colon_address(addr: bluer::Address) -> String {
 }
 
 impl IapHost {
-    /// The adapter's Bluetooth address. A head unit keys the phone on it in both directions -
-    /// `_carplay-ctrl._tcp`'s `id` is what ties the station on its AP back to the device it
-    /// authenticated over Bluetooth.
+    /// The adapter's Bluetooth address - a head unit keys the phone on it in both directions,
+    /// including `_carplay-ctrl._tcp`'s `id`.
     pub async fn bluetooth_address(&self) -> Result<String> {
         Ok(colon_address(self.adapter.address().await?))
     }
@@ -200,31 +144,11 @@ impl IapHost {
             transport_identifier: transport_identifier(adapter.address().await?),
             wifi_mac: get_wifi_mac().await?,
         };
-        // Some head units look for the v2 UUID. Shares `IAP_CHANNEL`, so BlueZ may refuse it.
-        // let iap_v2 = match session
-        //     .register_profile(rfcomm::Profile {
-        //         uuid: IAP2_UUID,
-        //         name: Some(String::from("Wireless iAP v2")),
-        //         role: Some(Role::Server),
-        //         channel: Some(IAP_CHANNEL),
-        //         require_authentication: Some(true),
-        //         require_authorization: Some(false),
-        //         ..Default::default()
-        //     })
-        //     .await
-        // {
-        //     Ok(handle) => Some(handle),
-        //     Err(e) => {
-        //         tracing::debug!(?e, "iAP v2 profile not registered (shares a channel)");
-        //         None
-        //     }
-        // };
 
         let iap_profile = Mutex::new(session.register_profile(device_profile()).await?);
         // Registered only so bluetoothd puts the CarPlay UUID in the adapter's EIR. The drain task
-        // owns the handle for the process lifetime (dropping it would deregister) and rejects
-        // anything that arrives - an unanswered request would pin its fd, since bluer buffers one
-        // per profile behind BlueZ's `NewConnection` call.
+        // owns the handle for the process lifetime and rejects anything that arrives, so an
+        // unanswered request can't pin its fd.
         let mut carplay_profile = session.register_profile(carplay_profile()).await?;
         tokio::spawn(async move {
             while let Some(rq) = carplay_profile.next().await {
@@ -233,8 +157,8 @@ impl IapHost {
             }
         });
 
-        // After the registrations: bluetoothd re-asserts the adapter class as its service set
-        // changes, so set ours once that has settled. Best-effort - see `apply_device_class`.
+        // bluetoothd re-asserts the adapter class as its service set changes, so set ours once
+        // that has settled.
         apply_device_class().await;
 
         tracing::info!("Registered iAP and CarPlay profiles");
@@ -245,7 +169,6 @@ impl IapHost {
             _session: session,
             iap_profile,
             _agent: agent,
-            // _iap_v2: iap_v2,
         })
     }
 }
@@ -279,8 +202,7 @@ pub enum LinkAttemptError {
 ///
 /// The teardown happens before this returns, the page after: a `disconnect` racing the accept loop
 /// aborts the very channel the unit just opened, while `Connect()` blocks until every profile has
-/// been tried and so cannot be awaited there. `connect_profile` is not a substitute for either; it
-/// leaves a connection in progress.
+/// been tried and so cannot be awaited there.
 async fn relink(device: &Device, gate: &Arc<Semaphore>) {
     // One at a time: a second disconnect landing on an in-flight connect cancels it.
     let Ok(permit) = gate.clone().try_acquire_owned() else {
@@ -316,10 +238,8 @@ async fn attempt_iap2_link(
 
     loop {
         tracing::debug!("Waiting for iAP2 connection requests");
-        // `stale_link` is sampled once, before pairing, so a link that appears *after* that -
-        // the unit connecting on its own, or BlueZ auto-connecting a trusted device - is one we
-        // never cycled and the unit will not offer a channel on. Re-check while waiting rather
-        // than trusting the startup sample.
+        // Re-checked on every wait, not just a startup sample - a link can appear after that (e.g.
+        // BlueZ auto-connecting a trusted device) and we'd never have cycled it.
         let rq = loop {
             match tokio::time::timeout(OFFER_WAIT, profile.next()).await {
                 Ok(rq) => break rq.ok_or(LinkAttemptError::ProfilesClosed)?,
@@ -360,15 +280,14 @@ pub async fn wireless_carplay(
     let identity = host.identity.clone();
 
     let device = find_target_device(adapter, &target).await?;
-    // Surface the car's MAC (known now, early) so the caller can look up its cached display and
-    // size the compositor / launch the app before AirPlay reports the display.
+    // Surface the car's MAC early so the caller can size the compositor / launch the app from its
+    // cached display before AirPlay reports the real one.
     let _ = car_addr_tx.send(device.address().to_string());
 
     // Gate on relinks: one at a time.
     let connect_attempt = Arc::new(tokio::sync::Semaphore::new(1));
 
-    //If the link is stale, we need to reconnect, as we've probably missed our window to accept the iap connection.
-    //If it isn't, we need to connect if we haven't alreaady.
+    // Cycles any stale link so the unit offers a fresh channel.
     relink(&device, &connect_attempt).await;
 
     let task_device = device.clone();
@@ -378,13 +297,12 @@ pub async fn wireless_carplay(
             let res = attempt_iap2_link(&mut ctx).await;
             if let Err(LinkAttemptError::Iap2(e)) = &res {
                 tracing::warn!(?e, "No channel carried the iAP2 handshake");
-                // ctx.device.disconnect().await?;
                 relink(&ctx.device, &ctx.connect_attempt).await;
             }
             (ctx, res)
         }
     })
-    //Retry our link unless our profiles start to return None.
+    // Retry the link unless our profiles start returning None.
     .retry(
         ConstantBuilder::new()
             .with_delay(ACCEPT_RETRY_DELAY)
@@ -405,7 +323,7 @@ pub async fn wireless_carplay(
     Ok(())
 }
 
-/// Resolve the we paired it this sessionconfigured accesory and get it ready to connect.
+/// Resolve the configured accessory and get it ready to connect.
 async fn find_target_device(adapter: &Adapter, target: &str) -> Result<Device> {
     let wanted: Option<Address> = target.parse().ok();
 
@@ -419,8 +337,7 @@ async fn find_target_device(adapter: &Adapter, target: &str) -> Result<Device> {
         }
     }
 
-    // Otherwise wait for it to show up. This is discovery aimed at one known target, not a survey:
-    // every device that isn't the configured one is ignored outright.
+    // Otherwise wait for it to show up - discovery aimed at this one target, not a survey.
     adapter
         .set_discovery_filter(DiscoveryFilter {
             discoverable: true,
@@ -461,7 +378,7 @@ async fn device_matches(device: &Device, target: &str, wanted: Option<Address>) 
     }
 }
 
-/// Pair (if needed) and trust the target. Reports whether a link *predated* us - see `relink`.
+/// Pair (if needed) and trust the target.
 async fn prepare_device(device: Device) -> Result<Device> {
     let alias = device.alias().await.unwrap_or_default();
     let rssi = device.rssi().await.ok().flatten();
@@ -490,8 +407,7 @@ async fn prepare_device(device: Device) -> Result<Device> {
 mod tests {
     use super::transport_identifier;
 
-    /// The bike answers `0x4300` carrying this form and ignores the 24-character padded one that
-    /// afd6605 introduced - see `transport_identifier`.
+    /// The bike answers `0x4300` carrying this form and ignores the 24-character padded one.
     #[test]
     fn transport_identifier_is_the_colon_bluetooth_address() {
         let id = transport_identifier(bluer::Address::new([0x4c, 0x79, 0x6e, 0xda, 0x29, 0x4b]));

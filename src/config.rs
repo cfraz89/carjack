@@ -56,9 +56,8 @@ pub struct Graphics {
     /// Zero-copy encode mode: `"auto"` (try it, fall back to software with a warning), `true`
     /// (require it - error out if the pipeline can't be built), or `false` (software).
     pub zerocopy: ZeroCopyMode,
-    /// Target H264 bitrate in kbit/s, applied (as CBR) to whichever encoder ends up selected. The
-    /// default is deliberately modest: the car's WiFi link is the bottleneck, so overshooting it
-    /// shows up as stutter rather than as detail.
+    /// Target H264 bitrate in kbit/s (CBR). Kept modest by default since the car's WiFi link is
+    /// the bottleneck - overshooting it shows up as stutter, not detail.
     pub bitrate: u32,
 }
 
@@ -142,9 +141,8 @@ impl Default for Display {
 pub struct App {
     /// Desktop command to stream (run via `sh -c`). Empty = stream black until a client connects.
     pub command: String,
-    /// Whether the app can live-resize. `true`: launched at startup and left to resize itself.
-    /// `false` (Android/Waydroid, which fix their resolution at boot): *not* launched until the
-    /// car's resolution is known, and relaunched on later reconnects that change the size.
+    /// `true`: launched at startup and left to resize itself. `false` (apps that fix their
+    /// resolution at boot, e.g. Waydroid): held until the car's resolution is known.
     pub resizable: bool,
 }
 
@@ -222,10 +220,8 @@ impl Config {
         if let Some(p) = &path {
             builder = builder.add_source(config::File::from(p.clone()));
         }
-        // Environment support: any setting can be overridden via `CARJACK.<...>`, dot-separated
-        // to match the config paths - `CARJACK.SOURCE`, `CARJACK.GRAPHICS.ZEROCOPY`,
-        // `CARJACK.APP.COMMAND`, `CARJACK.DISPLAY.WIDTH`. The prefix separator is a dot too (not
-        // the crate default `_`), so it's dots all the way. (`try_parsing` coerces numbers/bools.)
+        // `CARJACK.<dotted.path>` overrides any setting - dots throughout, including the prefix
+        // separator (not the crate's default `_`), to match the config paths.
         builder = builder.add_source(
             config::Environment::with_prefix("CARJACK")
                 .prefix_separator(".")
@@ -286,11 +282,8 @@ impl Config {
     }
 }
 
-/// The kernel driver of the GPU that renders the desktop - taken as the driver of the card with a
-/// connected display (`/sys/class/drm/card*-<connector>/status == "connected"`). The desktop-capture
-/// path uses this to pick a zero-copy encoder on the *same* GPU the ScreenCast dmabuf lives on
-/// (encoding an Intel-rendered desktop on NVIDIA would be a cross-GPU copy). `None` if it can't be
-/// determined (headless / sysfs unavailable) or on an exotic render-vs-scanout split.
+/// The kernel driver of the GPU that renders the desktop - the driver of the card with a connected
+/// display. Used to pick a zero-copy encoder on the same GPU the ScreenCast dmabuf lives on.
 pub fn desktop_render_driver() -> Option<String> {
     for entry in std::fs::read_dir("/sys/class/drm").ok()?.flatten() {
         let name = entry.file_name();
@@ -410,9 +403,8 @@ fn enumerate_render_nodes() -> Vec<(String, String)> {
         .collect()
 }
 
-/// Rank a driver by how well we can hardware-encode on it, so `auto` picks the GPU we can do
-/// zero-copy on: nvidia (NVENC) first, then amdgpu/i915 (VA-API), then others (v4l2), avoiding
-/// virtual devices. Lower is better.
+/// Rank a driver by hardware-encode capability, so `auto` picks it: nvidia first, then
+/// amdgpu/i915, then others, virtual devices last. Lower is better.
 fn driver_rank(driver: &str) -> u8 {
     match driver {
         "nvidia" | "nvidia-drm" => 0,

@@ -31,7 +31,7 @@ mod wifi_connect;
 mod wireless;
 
 /// The desktop app streamed into the compositor. Owns the child process so it's killed on exit
-/// (Drop) and can be relaunched on a resize (for apps that fix their resolution at boot).
+/// (Drop) and can be relaunched on a resize.
 struct DesktopApp {
     command: String,
     socket: OsString,
@@ -52,8 +52,7 @@ impl DesktopApp {
     fn launch(&mut self) {
         self.kill();
         tracing::info!("Launching desktop app: {0}", self.command);
-        // `exec` so the child *is* the app (not an intermediate `sh`), and its own process group
-        // so `kill` reaches the whole tree.
+        // `exec` so the child *is* the app, in its own process group so `kill` reaches the tree.
         match std::process::Command::new("sh")
             .arg("-c")
             .arg(format!("exec {0}", self.command))
@@ -66,10 +65,8 @@ impl DesktopApp {
         }
     }
 
-    /// Whether the app is currently running (spawned and not yet exited).
     fn is_running(&mut self) -> bool {
         match &mut self.child {
-            // `try_wait` -> Ok(None) means still running; Ok(Some(_))/Err means it exited.
             Some(child) => matches!(child.try_wait(), Ok(None)),
             None => false,
         }
@@ -80,7 +77,6 @@ impl DesktopApp {
         let Some(mut child) = self.child.take() else {
             return;
         };
-        // SIGKILL the process group (negative pid); the child leads its own group.
         unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
         let _ = child.kill(); // fallback if the group signal missed the leader
         let _ = child.wait();
@@ -104,13 +100,10 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Before any GPU/portal/Bluetooth setup, so it covers the whole run.
     spawn_sigint_watchdog()?;
 
     let config = Config::load(&Cli::parse())?;
 
-    // Fail fast and loudly: without a target there is nothing to connect to, and carjack no longer
-    // guesses one. Checked here so both source paths get it before any GPU/compositor setup.
     if config.bluetooth_device().is_none() {
         return Err(eyre!(
             "no head unit configured - set [bluetooth] device (its MAC or advertised name) in \
@@ -118,9 +111,8 @@ async fn main() -> Result<()> {
         ));
     }
 
-    // Before either source path: both connect AirPlay, and the identity has to be the same one
-    // across runs for a car to recognise us. In the data dir, not the cache - losing it means
-    // every paired car has a dead pairing left in its table.
+    // Shared HomeKit identity across both source paths and runs - in the data dir, not the cache,
+    // so losing it doesn't leave every paired car with a dead pairing in its table.
     match xdg::BaseDirectories::with_prefix("carjack").place_data_file("homekit.bin") {
         Ok(path) => libcarjack::airplay::init_homekit_storage(&path)?,
         Err(e) => tracing::warn!("No HomeKit storage path ({e}); pairing from scratch every run"),
@@ -132,18 +124,11 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Make a second Ctrl-C always kill carjack, however wedged the graceful path is.
+/// Make a second Ctrl-C always kill carjack, even if the graceful path is stuck.
 ///
-/// The moment anything awaits `tokio::signal::ctrl_c()`, tokio installs a SIGINT handler and the
-/// default "terminate the process" disposition is gone *process-wide*. From then on Ctrl-C only
-/// resolves futures - so if nothing is awaiting one, or the task that is has stalled, Ctrl-C does
-/// nothing at all. That happens easily here: the session `select!`s below poll the Ctrl-C branch
-/// and the session future in the *same* task, so a blocking call inside a session (GStreamer
-/// `set_state`, a DRM ioctl) starves the Ctrl-C branch; and the teardown *after* the loop
-/// (`drop(compositor)` joins the compositor thread) can block with no listener left at all.
-///
-/// One `signal()` stream rather than two `ctrl_c()` awaits: a stream can't miss a SIGINT that
-/// arrives between the first and second receipt.
+/// Awaiting `ctrl_c()` replaces the process's default SIGINT disposition for good, so if the task
+/// polling it stalls (a blocking GStreamer/DRM call, or teardown with no listener left), Ctrl-C
+/// stops doing anything. One `signal()` stream means a SIGINT between two awaits is never missed.
 fn spawn_sigint_watchdog() -> Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
     tokio::spawn(async move {
@@ -169,8 +154,6 @@ async fn backoff_or_ctrl_c() -> bool {
 
 /// `source = app`: run `[app] command` in carjack's own headless compositor and stream that.
 async fn run_app(config: Config) -> Result<()> {
-    // Resolve which GPU to render + encode on, then decide the encode backend (this is where
-    // zerocopy=auto falls back to software, or zerocopy=true errors out).
     let render_node = carjack::config::resolve_render_node(&config.graphics.drm_device)?;
     let backend = encode::resolve_backend(config.graphics.zerocopy, &render_node)?;
     tracing::info!(
@@ -178,12 +161,10 @@ async fn run_app(config: Config) -> Result<()> {
         backend.describe()
     );
 
-    // If we've seen a car before, start the compositor at its cached resolution rather than the
-    // config default - so the app (even a non-resizable one like Waydroid) can boot at the right
-    // size straight away, during the BT/WiFi/AirPlay setup, instead of after the display is known.
-    // Held for the whole run - see `IapHost`.
     let host = Arc::new(IapHost::start().await?);
 
+    // Size the compositor from the last car's cached display, if any, so even a non-resizable app
+    // can boot at the right size during the BT/WiFi/AirPlay setup rather than after.
     let mut cache = DisplayCache::load();
     let cached = cache.last_props();
     let (start_w, start_h, start_fps) = match cached {
@@ -205,17 +186,14 @@ async fn run_app(config: Config) -> Result<()> {
         config.desktop_command().to_owned(),
         compositor.socket_name.clone(),
     );
-    // Launch the app up front (so slow apps like Waydroid boot during the BT/WiFi phase) when we
-    // already know the target size - i.e. it can live-resize, or we have a cached resolution.
-    // Otherwise a non-resizable app is held back until the resolution is known (in `run_session`).
+    // Launch up front only if the target size is already known (resizable, or a cached display) -
+    // otherwise `run_session` launches it once the car's real resolution comes in.
     if config.app.resizable || cached.is_some() {
         app.launch();
     }
 
-    // Each session runs the full flow (Bluetooth -> WiFi -> AirPlay). On failure - most
-    // importantly when the car tears down the screen socket - restart from a fresh Bluetooth
-    // connection rather than exiting. Ctrl-C breaks out and cleans up (compositor thread joined,
-    // app killed) via the drops below.
+    // Each session runs the full flow (Bluetooth -> WiFi -> AirPlay); on failure, restart from a
+    // fresh Bluetooth connection instead of exiting.
     let exit = loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -239,7 +217,6 @@ async fn run_app(config: Config) -> Result<()> {
         }
     };
 
-    // Deterministic cleanup (Drop would also handle these, but do it before returning).
     app.kill();
     drop(compositor);
     exit
@@ -248,11 +225,10 @@ async fn run_app(config: Config) -> Result<()> {
 /// `source = desktop`: stream the user's existing desktop via xdg-desktop-portal, with touch
 /// injected back over libei (see [`libei`]).
 async fn run_desktop(config: Config) -> Result<()> {
-    // The gst `va` plugin only registers its VA-API elements (vapostproc/vah264enc) with this set
-    // on multi-GPU boxes - it's how the desktop zero-copy path reaches an integrated (e.g. Intel)
-    // GPU that renders the desktop. Set it before any gst init.
-    // SAFETY: nothing in desktop mode has initialized gst or read this var yet, and no other
-    // thread races on it here.
+    // Makes the gst `va` plugin register VA-API elements for every GPU on a multi-GPU box, not
+    // just the first - needed to reach an integrated GPU that isn't the primary one. Must be set
+    // before gst initializes.
+    // SAFETY: nothing has initialized gst or read this var yet, and no other thread races on it.
     if std::env::var_os("GST_VA_ALL_DRIVERS").is_none() {
         unsafe { std::env::set_var("GST_VA_ALL_DRIVERS", "1") };
     }
@@ -262,16 +238,12 @@ async fn run_desktop(config: Config) -> Result<()> {
         .await
         .map_err(|e| eyre!("gstreamer init task panicked: {e}"))??;
 
-    // Ask the portal for ScreenCast + RemoteDesktop access once - a consent dialog appears on the
-    // first run (`PersistMode::Application` remembers it after). Touch is then injected over libei
-    // (see `src/libei.rs`). The PipeWire node and input session persist across CarPlay reconnects,
-    // the way the compositor does in app mode.
-    // Held for the whole run - see `IapHost`.
     let host = Arc::new(IapHost::start().await?);
 
+    // ScreenCast + RemoteDesktop access, asked for once - a consent dialog appears on first run
+    // (`PersistMode::Application` remembers it after). Persists across CarPlay reconnects.
     let rd = portal::start_remote_desktop().await?;
     tracing::info!("Desktop source ready (PipeWire node {})", rd.node_id());
-    // `[graphics] zerocopy` here selects the desktop encode path: GL (GPU) vs software convert.
     let zerocopy = config.graphics.zerocopy;
     let bitrate = Bitrate::from_kbps(config.graphics.bitrate);
     let bt_device = config.bluetooth_device().unwrap_or_default().to_owned();
@@ -304,8 +276,7 @@ async fn run_desktop(config: Config) -> Result<()> {
     exit
 }
 
-/// Result of the shared Bluetooth -> WiFi -> AirPlay handshake, common to both source modes: the
-/// AirPlay connection, the still-running CarPlay/Bluetooth task, and the touch plumbing.
+/// Result of the shared Bluetooth -> WiFi -> AirPlay handshake, common to both source modes.
 struct Established {
     conn: libcarjack::airplay::AirPlayConnection,
     carplay_handle: AbortOnDropHandle<Result<()>>,
@@ -317,11 +288,8 @@ struct Established {
     car_addr_rx: tokio::sync::oneshot::Receiver<String>,
 }
 
-/// Bind an IPv6 link-local address to the interface it has to be used on.
-///
-/// The accessory's AirPlay address is link-local (`fe80::/10`), which is ambiguous on a host
-/// with more than one interface - connecting to one without a scope id fails outright rather
-/// than picking the car's WiFi. Anything else is returned untouched.
+/// Bind an IPv6 link-local address to the interface it has to be used on - link-local is
+/// ambiguous on a multi-interface host, and connecting without a scope id just fails.
 fn with_scope_id(addr: std::net::SocketAddr, iface: &str) -> std::net::SocketAddr {
     let std::net::SocketAddr::V6(mut v6) = addr else {
         return addr;
@@ -341,16 +309,13 @@ fn with_scope_id(addr: std::net::SocketAddr, iface: &str) -> std::net::SocketAdd
     }
 }
 
-/// How hard to try the AirPlay endpoint the car invited us to. The car repeats its WiFi
-/// configuration for ~15s after handing it over, so there is room to retry - and giving up costs
-/// a full Bluetooth teardown and reconnect cycle, which is far more disruptive than waiting.
+/// How hard to try the AirPlay endpoint the car invited us to before giving up (which costs a
+/// full Bluetooth teardown and reconnect).
 const AIRPLAY_CONNECT_ATTEMPTS: usize = 4;
 const AIRPLAY_CONNECT_DELAY: Duration = Duration::from_millis(500);
 
-/// How long to wait for the car's invite before giving up on it. A unit that browses Bonjour
-/// invites within a fraction of a second, so the long wait only exists for one that is slow to
-/// notice the record - and when the car has already named its receiver, waiting at all is just
-/// politeness towards a unit that might do both.
+/// How long to wait for the car's invite before giving up on it and trying the receiver it named
+/// (if any) instead.
 const INVITE_WAIT: Duration = Duration::from_secs(15);
 
 /// Connect to the endpoint the car's invite pointed at.
@@ -361,8 +326,6 @@ async fn connect_airplay_endpoint(
     mac_address: String,
 ) -> Result<libcarjack::airplay::AirPlayConnection> {
     tracing::info!("Connecting to AirPlay endpoint {addr}");
-    // `SocketAddr` is `Copy`, so a plain `move` closure hands each attempt its own copy -
-    // nothing to clone into it.
     (move || libcarjack::airplay::connect_airplay(addr, remote_homekit_id, device_id.clone(), mac_address.clone()))
         .retry(
             ConstantBuilder::new()
@@ -376,8 +339,8 @@ async fn connect_airplay_endpoint(
         .map_err(|e| eyre!("AirPlay endpoint {addr} never came up: {e}"))
 }
 
-/// Run the Bluetooth -> WiFi -> AirPlay flow and return once AirPlay is connected (so the caller
-/// knows the car's display and can wire up the video source + input). Shared by both source modes.
+/// Run the Bluetooth -> WiFi -> AirPlay flow and return once AirPlay is connected. Shared by both
+/// source modes.
 async fn establish_carplay(host: Arc<IapHost>, bt_device: &str) -> Result<Established> {
     let (touch_tx, touch_rx) = mpsc::channel::<TouchEvent>(64);
     let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCredentials>(4);
@@ -386,13 +349,9 @@ async fn establish_carplay(host: Arc<IapHost>, bt_device: &str) -> Result<Establ
 
     tracing::info!("Starting CarPlay session");
 
-    // Run the CarPlay/iAP2 Bluetooth session as its own task so the runtime keeps polling
-    // it continuously. It must keep servicing the iAP2 link (keep-alives, ACKs) throughout
-    // WiFi connect and AirPlay setup - if it only advanced when awaited in the loops below,
-    // it would be starved for ~10s during screen-sharing setup and the car would reset the
-    // Bluetooth link, tearing down CarPlay right as streaming starts.
-    // AbortOnDropHandle guarantees the task (and its BlueZ resources) is torn down when the
-    // returned handle is dropped (e.g. before a session restart) rather than detached.
+    // Its own task so the runtime keeps servicing the iAP2 link (keep-alives, ACKs) continuously
+    // through WiFi connect and AirPlay setup, rather than being starved by the loops below.
+    // AbortOnDropHandle tears the task (and its BlueZ resources) down when dropped, not detached.
     let mut carplay_handle = AbortOnDropHandle::new(tokio::spawn(wireless_carplay(
         host.clone(),
         bt_device.to_owned(),
@@ -472,7 +431,6 @@ async fn establish_carplay(host: Arc<IapHost>, bt_device: &str) -> Result<Establ
     // Either source's address comes from the car itself, so it can be link-local.
     let endpoint = with_scope_id(endpoint, &car_wifi.iface);
 
-    // Connect AirPlay to learn the car's display size + refresh.
     let mac_address = crate::wifi_connect::get_wifi_mac().await?;
     let conn = connect_airplay_endpoint(endpoint, remote_homekit_id, bluetooth_id, mac_address).await?;
     Ok(Established {
@@ -502,14 +460,11 @@ async fn run_session(
         car_addr_rx,
     } = establish_carplay(host.clone(), config.bluetooth_device().unwrap_or_default()).await?;
 
-    // Reconfigure the already-running compositor (and its client) to exactly match the car's size
-    // and rate - so it renders at the car's resolution, no scaling needed downstream.
+    // Reconfigure the already-running compositor to exactly match the car's size and rate.
     let resized = compositor.reconfigure(conn.width, conn.height, conn.max_fps)?;
 
-    // Remember this car's display so next startup can size everything up front (the compositor was
-    // likely already at these dimensions from the cache, in which case `reconfigure` was a no-op).
-    // The car's MAC was surfaced early by the Bluetooth task. Normalize a missing fps to 30 so the
-    // cached value is directly usable to start the compositor (which would otherwise clamp 0 -> 1).
+    // Remember this car's display so next startup can size everything up front. Normalize a
+    // missing fps to 30 so the cached value is directly usable to start the compositor.
     if conn.width > 0 && conn.height > 0 {
         if let Ok(car_mac) = car_addr_rx.await {
             cache.remember(
@@ -523,28 +478,17 @@ async fn run_session(
         }
     }
 
-    // A resizable app is already running and resizes itself - leave it. A non-resizable app is
-    // (re)launched here at the now-known resolution: on the first session it wasn't started yet;
-    // on a reconnect (or a wrong cache guess) it's only relaunched if the size actually changed
-    // (else it's still running at the right size).
+    // A resizable app already resizes itself. A non-resizable one is (re)launched here at the
+    // now-known resolution, and only if it wasn't already running at the right size.
     if !config.app.resizable && (resized || !app.is_running()) {
         tracing::info!("launching desktop app at {}x{}", conn.width, conn.height);
         app.launch();
     }
     let frame_rx = compositor.subscribe_frames();
 
-    // Encode the compositor's frames to H264 on its own task and stream them to the car. This
-    // spawn builds the GStreamer pipeline; it cannot move to launch time because the appsrc latches
-    // its caps once, so it must follow `reconfigure`.
-    // The encoder and the video stream are both
-    // session-lifetime, so their arms live directly in the loop below alongside the Bluetooth
-    // handle and touch - one place for the whole streaming session to end or error.
-    // Small on purpose: this is a real-time stream, so a shallow channel (plus the pipeline's leaky
-    // queue) keeps latency low - a deep buffer just fills once and adds a permanent delay.
+    // Built here, not at launch time: the appsrc latches its caps once, so this must follow
+    // `reconfigure`. Channels are shallow - a real-time stream wants low latency, not buffering.
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(4);
-    // Keyframe requests travelling the other way: the car asks (ForceKeyFrame, or catplay
-    // rejecting a delta frame) and the encoder answers with an IDR. Depth 1 is enough - a
-    // second request while one is outstanding would only ask for the same thing.
     let (keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_h264_to_channel(
         frame_rx,
@@ -556,11 +500,9 @@ async fn run_session(
     let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx, keyframe_tx);
     tokio::pin!(video);
 
-    // If the car later drops Bluetooth on its own, that's not fatal - keep streaming.
     let mut carplay_done = false;
-    // touch_tx lives on the AirPlay/HID side (run_video_stream), not on carplay_handle, so it's
-    // tracked separately - gating it on carplay_done meant a BT drop silently killed touch for
-    // the rest of the session even though it kept working fine.
+    // touch_tx lives on the AirPlay/HID side, not on carplay_handle - gating touch on a BT drop
+    // would silently kill it for the rest of the session even though it kept working fine.
     let mut touch_done = false;
 
     loop {
@@ -573,8 +515,8 @@ async fn run_session(
                     Err(e) => tracing::warn!("CarPlay task panicked: {e}"),
                 }
             }
-            // Race the encoder so a GStreamer failure surfaces as a real error rather than a
-            // silently closed video channel (which the stream side only sees as a clean end).
+            // Raced explicitly so a GStreamer failure surfaces as a real error rather than a
+            // silently closed video channel.
             result = &mut encoder => {
                 return match result {
                     Ok(Ok(())) => Err(eyre!("video encoder task ended unexpectedly")),
@@ -583,8 +525,6 @@ async fn run_session(
                 };
             }
             result = &mut video => {
-                // Propagate so the caller restarts the whole flow (e.g. car closed the
-                // screen socket).
                 result?;
                 return Ok(());
             }
@@ -617,12 +557,7 @@ async fn run_desktop_session(
     let (width, height) = (conn.width, conn.height);
     tracing::info!("Streaming desktop to car at {width}x{height}");
 
-    // Small on purpose: this is a real-time stream, so a shallow channel (plus the pipeline's leaky
-    // queue) keeps latency low - a deep buffer just fills once and adds a permanent delay.
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(4);
-    // Keyframe requests travelling the other way: the car asks (ForceKeyFrame, or catplay
-    // rejecting a delta frame) and the encoder answers with an IDR. Depth 1 is enough - a
-    // second request while one is outstanding would only ask for the same thing.
     let (keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
     // The encoder reports the desktop's real frame size here; touch is scaled from car space to it.
     let (desktop_size_tx, desktop_size_rx) =
@@ -667,11 +602,8 @@ async fn run_desktop_session(
             }
             touch = touch_rx.recv(), if !touch_done => {
                 match touch {
-                    // Inject back into the real desktop via the portal (async, unlike the
-                    // compositor's synchronous seat injection).
+                    // Async, unlike the compositor's synchronous seat injection.
                     Some(event) => {
-                        // The encoder's negotiated pipewiresrc size, in physical pixels;
-                        // `send_touch` converts to the portal's logical space itself.
                         let desktop_size = *desktop_size_rx.borrow();
                         if let Err(e) = rd.send_touch(&event, (width, height), desktop_size).await {
                             tracing::warn!("portal touch inject failed: {e}");
@@ -689,8 +621,6 @@ mod tests {
     use super::with_scope_id;
     use std::net::SocketAddr;
 
-    /// A link-local AirPlay address is unusable without knowing which interface it is on, so
-    /// the car's WiFi interface index has to be stamped into it. `lo` is always index 1.
     #[test]
     fn link_local_addresses_get_the_interface_scope() {
         let addr: SocketAddr = "[fe80::9083:8eff:feef:a7d3]:7000".parse().unwrap();
@@ -703,8 +633,6 @@ mod tests {
         assert_eq!(v6.ip().to_string(), "fe80::9083:8eff:feef:a7d3");
     }
 
-    /// Everything else is left exactly as the car gave it: routable addresses need no scope,
-    /// and an unknown interface must not turn into a silently wrong one.
     #[test]
     fn other_addresses_are_untouched() {
         for addr in [
