@@ -37,7 +37,14 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
     let (node, backend, bitrate) = resolve_gpu()?;
-    let comp = Compositor::start(node, backend.is_zero_copy(), 1280, 720, 30)?;
+    let comp = Compositor::start(
+        node,
+        backend.is_zero_copy(),
+        carjack::encode::importable_modifiers(&backend),
+        1280,
+        720,
+        30,
+    )?;
     tracing::info!("compositor started, socket={:?}", comp.socket_name);
 
     // Use the configured desktop app if set (so this validates the real CARJACK_DESKTOP_CMD),
@@ -149,7 +156,14 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
 #[tokio::test]
 async fn reconfigure_switches_frame_size() -> Result<()> {
     let (node, backend, _bitrate) = resolve_gpu()?;
-    let comp = Compositor::start(node, backend.is_zero_copy(), 1280, 720, 30)?;
+    let comp = Compositor::start(
+        node,
+        backend.is_zero_copy(),
+        carjack::encode::importable_modifiers(&backend),
+        1280,
+        720,
+        30,
+    )?;
     let mut rx = comp.subscribe_frames();
 
     // First frame should be at the start size.

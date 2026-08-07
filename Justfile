@@ -37,12 +37,13 @@ toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BU
 cuda := env('CARJACK_CUDA', 'false')
 cuda_features := if cuda == 'true' { '--features cuda' } else { '' }
 
-run +flags="": (build flags)
+# setcap follows build because relinking drops the capabilities.
+run +flags="": (build flags) (setcap flags)
     waydroid session stop && cargo run {{cuda_features}} {{flags}} < /dev/null
 
 #Run the app until timeout, then kill it and restore the original wifi connection
 [script('bash')]
-test-run timeout="60" +flags="": (build flags)
+test-run timeout="60" +flags="": (build flags) (setcap flags)
     set -uo pipefail
     # The station iwd drives, from the kernel rather than from iwctl's table: a wireless netdev is
     # the one with a phy80211 link, and that is true whatever iwd calls it. A glob is no good here

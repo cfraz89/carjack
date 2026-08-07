@@ -403,8 +403,8 @@ fn enumerate_render_nodes() -> Vec<(String, String)> {
         .collect()
 }
 
-/// Rank a driver by hardware-encode capability, so `auto` picks it: nvidia first, then
-/// amdgpu/i915, then others, virtual devices last. Lower is better.
+/// Rank a driver by hardware-encode capability: nvidia first, then amdgpu/i915, then others,
+/// virtual devices last. Lower is better. Only a tiebreak - see [`pick_auto`].
 fn driver_rank(driver: &str) -> u8 {
     match driver {
         "nvidia" | "nvidia-drm" => 0,
@@ -416,10 +416,18 @@ fn driver_rank(driver: &str) -> u8 {
 }
 
 fn pick_auto(nodes: &[(String, String)]) -> &(String, String) {
-    // min_by_key keeps the first on ties, which is the lowest-numbered node (stable/predictable).
+    // A GPU this build can actually zero-copy encode on beats a nominally faster one it cannot:
+    // on a non-cuda build nvidia has no encode path, so ranking it first forces software encode
+    // while an Intel/AMD GPU sits idle. min_by_key keeps the first on ties - the lowest-numbered
+    // node, so the choice stays predictable.
     nodes
         .iter()
-        .min_by_key(|(_, drv)| driver_rank(drv))
+        .min_by_key(|(_, drv)| {
+            (
+                !crate::encode::driver_has_zero_copy_backend(drv),
+                driver_rank(drv),
+            )
+        })
         .unwrap()
 }
 
@@ -589,12 +597,26 @@ mod tests {
         assert!(cfg.app.resizable);
     }
 
+    /// Machine-gated: only asserts on hosts that expose a render node at all. `auto` must land on
+    /// a GPU this build can zero-copy encode on whenever one exists - preferring nvidia on a
+    /// non-cuda build was silently costing zero-copy on hybrid machines.
     #[test]
-    fn auto_selects_nvidia_when_present() {
-        // Machine-gated: only asserts on hosts that actually expose an nvidia render node.
+    fn auto_prefers_a_gpu_this_build_can_encode_on() {
         let nodes = enumerate_render_nodes();
-        if let Some((nv_path, _)) = nodes.iter().find(|(_, d)| d == "nvidia") {
-            assert_eq!(&resolve_render_node("auto").unwrap(), nv_path);
+        if nodes.is_empty() {
+            return;
+        }
+        let picked = resolve_render_node("auto").unwrap();
+        let picked_driver = render_node_driver(&picked).unwrap_or_default();
+        if nodes
+            .iter()
+            .any(|(_, d)| crate::encode::driver_has_zero_copy_backend(d))
+        {
+            assert!(
+                crate::encode::driver_has_zero_copy_backend(&picked_driver),
+                "auto chose {picked} (driver {picked_driver}), which has no zero-copy backend, \
+                 while another node does"
+            );
         }
     }
 }

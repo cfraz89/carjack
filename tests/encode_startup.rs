@@ -36,7 +36,14 @@ async fn time_to_first_keyframe(
     car_fps: u32,
 ) -> Result<(Duration, Duration, u32, String)> {
     let (node, backend, bitrate) = resolve_gpu()?;
-    let comp = Compositor::start(node, backend.is_zero_copy(), start_size.0, start_size.1, 30)?;
+    let comp = Compositor::start(
+        node,
+        backend.is_zero_copy(),
+        carjack::encode::importable_modifiers(&backend),
+        start_size.0,
+        start_size.1,
+        30,
+    )?;
 
     let resized = comp.reconfigure(car_size.0, car_size.1, car_fps)?;
     println!(

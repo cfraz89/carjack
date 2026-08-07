@@ -172,13 +172,21 @@ fn try_zero_copy(render_node: &str) -> Option<EncodeBackend> {
     let driver = crate::config::render_node_driver(render_node);
     let mut candidates: Vec<&HwBackend> = HW_BACKENDS
         .iter()
-        .filter(|b| wanted(b) && b.available())
+        .filter(|b| wanted(b) && b.available() && b.can_import_from(driver.as_deref()))
         .collect();
     candidates.sort_by_key(|b| !b.matches_driver(driver.as_deref()));
     tracing::info!(
-        "{render_node} is driven by {}; preferring '{}' encode backend",
+        "{render_node} is driven by {}; usable zero-copy backends: {}",
         driver.as_deref().unwrap_or("an unknown driver"),
-        candidates.first().map(|b| b.name).unwrap_or("none"),
+        if candidates.is_empty() {
+            "none".to_string()
+        } else {
+            candidates
+                .iter()
+                .map(|b| b.name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
     );
 
     for backend in candidates {
@@ -211,6 +219,68 @@ fn try_zero_copy(render_node: &str) -> Option<EncodeBackend> {
         }
     }
     None
+}
+
+/// DRM modifiers this backend's postproc can import for Argb8888 (`AR24`); empty means
+/// unconstrained. The compositor allocates from this, or GBM picks one the encoder cannot take
+/// and negotiation fails only once frames flow.
+pub fn importable_modifiers(backend: &EncodeBackend) -> Vec<u64> {
+    let EncodeBackend::Hw { backend, .. } = backend else {
+        return Vec::new();
+    };
+    let Some(postproc) = backend.postproc else {
+        return Vec::new();
+    };
+    let _ = gst::init();
+    // The element has to outlive the query: a pad whose element has been dropped answers with the
+    // template's ANY caps, not the device's real drm-format list.
+    let Ok(element) = gst::ElementFactory::make(postproc).build() else {
+        return Vec::new();
+    };
+    let Some(pad) = element.static_pad("sink") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for structure in pad.query_caps(None).iter() {
+        let Ok(value) = structure.value("drm-format") else {
+            continue;
+        };
+        if let Ok(one) = value.get::<&str>() {
+            collect_argb_modifier(one, &mut out);
+        } else if let Ok(list) = value.get::<gst::List>() {
+            for item in list.iter() {
+                if let Ok(one) = item.get::<&str>() {
+                    collect_argb_modifier(one, &mut out);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `"AR24:0x0100000000000002"` -> that modifier, keeping only the compositor's fourcc. A bare
+/// `"AR24"` carries no modifier, which means linear.
+fn collect_argb_modifier(drm_format: &str, out: &mut Vec<u64>) {
+    let (fourcc, modifier) = match drm_format.split_once(':') {
+        Some((f, m)) => (
+            f,
+            u64::from_str_radix(m.trim_start_matches("0x"), 16).unwrap_or(0),
+        ),
+        None => (drm_format, 0),
+    };
+    if fourcc == "AR24" && !out.contains(&modifier) {
+        out.push(modifier);
+    }
+}
+
+/// Whether this build has a usable zero-copy backend for a GPU on `driver`. `auto` render-node
+/// selection weighs this above raw GPU capability: without the `cuda` feature nvidia has no encode
+/// path here, so preferring an nvidia GPU would rule out zero-copy on a hybrid machine.
+pub fn driver_has_zero_copy_backend(driver: &str) -> bool {
+    let _ = gst::init();
+    HW_BACKENDS
+        .iter()
+        .any(|b| wanted(b) && b.matches_driver(Some(driver)) && b.available())
 }
 
 /// Whether `CARPLAY_ENCODE_BACKEND` allows this backend (unset = all of them). Applies to both
@@ -789,6 +859,17 @@ impl HwBackend {
         driver.is_some_and(|d| self.drivers.contains(&d))
     }
 
+    /// A dmabuf import cannot cross GPUs, and a mismatched one fails only once frames flow - the
+    /// pipeline builds, then rejects the caps mid-session. So it must be ruled out here, unlike
+    /// `Cuda`, which reports failure up front. Permissive when the driver is unknown.
+    fn can_import_from(&self, driver: Option<&str>) -> bool {
+        match self.import {
+            Import::DmaBuf => driver.is_none() || self.matches_driver(driver),
+            #[cfg(feature = "cuda")]
+            Import::Cuda => true,
+        }
+    }
+
     /// `"name: elem ! elem ! encoder"`, for logging and the no-backend-available error.
     fn describe_elements(&self) -> String {
         let chain = self.postproc.map(|p| format!("{p} ! ")).unwrap_or_default();
@@ -1163,6 +1244,68 @@ fn normalize_annexb_4byte(buf: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn argb_modifiers_are_parsed_and_filtered_by_fourcc() {
+        let mut out = Vec::new();
+        for s in [
+            "NV12:0x0100000000000002",
+            "AR24:0x0100000000000002",
+            "YU12",
+            "AR24",                    // no modifier means linear
+            "AR24:0x0100000000000002", // deduped
+            "AB24:0x1",
+        ] {
+            super::collect_argb_modifier(s, &mut out);
+        }
+        assert_eq!(out, vec![0x0100000000000002, 0]);
+    }
+
+    /// Software imposes no constraint, so the compositor keeps its full modifier set.
+    #[test]
+    fn software_backend_is_unconstrained() {
+        assert!(super::importable_modifiers(&EncodeBackend::Software).is_empty());
+    }
+
+    /// Machine-gated. This returned empty once because the element was dropped before its pad was
+    /// queried, and an orphaned pad answers with template ANY caps instead of the real list.
+    #[test]
+    fn an_available_dmabuf_backend_reports_its_modifiers() {
+        let _ = gst::init();
+        let Some(hw) = HW_BACKENDS
+            .iter()
+            .find(|b| b.import == Import::DmaBuf && b.postproc.is_some() && b.available())
+        else {
+            return;
+        };
+        let backend = EncodeBackend::Hw {
+            backend: hw,
+            #[cfg(feature = "cuda")]
+            importer: None,
+        };
+        assert!(
+            !super::importable_modifiers(&backend).is_empty(),
+            "'{}' reported no importable modifiers",
+            hw.name
+        );
+    }
+
+    /// A dmabuf backend on the wrong GPU used to be selectable, then died mid-session on
+    /// `caps ... not accepted` - vaapi picked for an NVIDIA render node because its elements
+    /// exist for a second, Intel GPU.
+    #[test]
+    fn dmabuf_backends_are_confined_to_their_own_gpu() {
+        for b in HW_BACKENDS.iter().filter(|b| b.import == Import::DmaBuf) {
+            assert!(
+                !b.can_import_from(Some("nvidia")),
+                "'{}' must not be offered for an nvidia render node",
+                b.name
+            );
+            assert!(b.can_import_from(Some(b.drivers[0])), "'{}'", b.name);
+            // Unknown driver stays permissive - there is nothing better to go on.
+            assert!(b.can_import_from(None), "'{}'", b.name);
+        }
+    }
 
     #[test]
     fn bitrate_substitutes_the_unit_each_encoder_wants() {

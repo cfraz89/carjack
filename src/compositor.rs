@@ -122,6 +122,7 @@ impl Compositor {
     pub fn start(
         render_node: String,
         zero_copy: bool,
+        importable_modifiers: Vec<u64>,
         width: u32,
         height: u32,
         fps: u32,
@@ -139,6 +140,7 @@ impl Compositor {
                 if let Err(e) = run(
                     render_node,
                     zero_copy,
+                    importable_modifiers,
                     width,
                     height,
                     fps,
@@ -492,6 +494,7 @@ impl State {
 fn run(
     render_node: String,
     zero_copy: bool,
+    importable_modifiers: Vec<u64>,
     width: u32,
     height: u32,
     fps: u32,
@@ -519,6 +522,31 @@ fn run(
         "compositor: {} renderable Argb8888 modifier(s) on this GPU",
         render_modifiers.len()
     );
+    // An empty intersection keeps the full set: guessing wrong here would break rendering
+    // outright, where letting negotiation fail at least says so.
+    let render_modifiers = if importable_modifiers.is_empty() {
+        render_modifiers
+    } else {
+        let usable: Vec<_> = render_modifiers
+            .iter()
+            .copied()
+            .filter(|m| importable_modifiers.contains(&u64::from(*m)))
+            .collect();
+        if usable.is_empty() {
+            tracing::warn!(
+                "compositor: none of the {} renderable modifier(s) are importable by the encoder; \
+                 leaving the choice to GBM",
+                render_modifiers.len()
+            );
+            render_modifiers
+        } else {
+            tracing::info!(
+                "compositor: {} of them importable by the encoder",
+                usable.len()
+            );
+            usable
+        }
+    };
     let mut allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING);
     // Kept (owned) so `reconfigure` can re-allocate the pool at a new size later.
     let modifiers: Vec<smithay::backend::allocator::Modifier> = if render_modifiers.is_empty() {

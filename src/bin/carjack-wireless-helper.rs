@@ -72,12 +72,10 @@ async fn set_device_class() -> Result<()> {
 
 /// Write one iwd provisioning file, body on stdin, into iwd's state directory.
 ///
-/// `CAP_DAC_OVERRIDE` gets past the directory (root-owned 0700, and systemd re-applies that mode
-/// on every iwd start, zeroing any ACL mask with it); `CAP_CHOWN` makes the result root's, which
-/// iwd needs since it runs uid 0 *without* `CAP_DAC_OVERRIDE`. See [`write_atomically`].
+/// `CAP_DAC_OVERRIDE` gets past the directory (root-owned 0700); `CAP_CHOWN` makes the result
+/// root's, which iwd needs since it runs uid 0 without `CAP_DAC_OVERRIDE`.
 ///
-/// The name is an argument but the directory is not - it comes from `Daemon.GetInfo`, so this
-/// can't be aimed elsewhere, which a `CAP_DAC_OVERRIDE` binary taking a full path could be.
+/// The directory comes from `Daemon.GetInfo`, not argv, so this can't be aimed elsewhere.
 async fn write_profile(name: &str) -> Result<()> {
     check_profile_name(name)?;
     let mut body = String::new();
@@ -136,10 +134,8 @@ fn check_profile_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Temp file then rename, the way iwd writes its own, so its inotify watch never sees a partial
-/// file. The `fchown` is needed because a capability doesn't change our uid - without it the file
-/// belongs to whoever ran carjack and iwd logs `Error loading`. Both land before the rename, since
-/// iwd loads on the rename's inotify event.
+/// Temp file then rename, so iwd's inotify watch never sees a partial file. Write and `fchown`
+/// both land before the rename, since iwd loads on that event.
 fn write_atomically(path: &Path, body: &str) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     // Dot-prefixed so iwd, which reads a file's security type after the first dot, ignores it.

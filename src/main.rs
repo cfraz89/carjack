@@ -178,6 +178,7 @@ async fn run_app(config: Config) -> Result<()> {
     let compositor = Compositor::start(
         render_node,
         backend.is_zero_copy(),
+        encode::importable_modifiers(&backend),
         start_w,
         start_h,
         start_fps,
@@ -507,6 +508,10 @@ async fn run_session(
 
     loop {
         tokio::select! {
+            // The encoder ending closes the video channel too, so `encoder` must be polled first
+            // or `video` reports a closed channel instead of the error that caused it.
+            biased;
+
             result = &mut carplay_handle, if !carplay_done => {
                 carplay_done = true;
                 match result {
@@ -515,8 +520,6 @@ async fn run_session(
                     Err(e) => tracing::warn!("CarPlay task panicked: {e}"),
                 }
             }
-            // Raced explicitly so a GStreamer failure surfaces as a real error rather than a
-            // silently closed video channel.
             result = &mut encoder => {
                 return match result {
                     Ok(Ok(())) => Err(eyre!("video encoder task ended unexpectedly")),
@@ -581,6 +584,10 @@ async fn run_desktop_session(
 
     loop {
         tokio::select! {
+            // The encoder ending closes the video channel too, so `encoder` must be polled first
+            // or `video` reports a closed channel instead of the error that caused it.
+            biased;
+
             result = &mut carplay_handle, if !carplay_done => {
                 carplay_done = true;
                 match result {

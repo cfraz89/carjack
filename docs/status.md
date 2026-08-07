@@ -310,11 +310,55 @@ Two real defects surfaced and fixed while standing this up against a live iwd on
 
 Verified against a live host iwd: `iwd_is_configured_for_carjack`, `live_connection_...` and
 `iwd_reads_back_the_car_provisioning_file` (writes a throwaway profile, confirms iwd registered
-it with `Hidden=true`/`AutoConnect=false`/type `psk`, then `Forget()`s it) all pass. **Not yet
-run against a car** - and the sidecar rewrite above is **not yet run against iwd either**: it
-needs `just setcap`, whose `/etc/sudoers.d/carjack-setcap` rule matches its arguments literally
-and so must be updated for the new binary name and capability pair before it will work
-unprompted.
+it with `Hidden=true`/`AutoConnect=false`/type `psk`, then `Forget()`s it) all pass. Then
+confirmed against the bench unit - see below. Note the live iwd tests must run **on the host**,
+not under `toolbox run`: inside the container iwd's D-Bus answers `AccessDenied` even though
+`wheel` is present in both, so `just test-bin` will always fail them.
+
+`/etc/sudoers.d/carjack-setcap` matches its arguments literally, so it has to name the binary and
+the exact capability list. Every comma must be backslash-escaped or sudoers reads it as the
+`Cmnd_List` separator and rejects the next capability as "expected a fully-qualified path name";
+double quotes do not help. `visudo -c -f <file>` catches it before installing.
+
+## Video works end to end on the bench unit (2026-08-07)
+
+**3249 frames at 30.0 fps over 108s, zero session failures**, stopped only by `just test-run`'s
+timeout: Bluetooth → iAP2 → WiFi provisioning → AirPlay → zero-copy VA-API H264. First keyframe
+10.4 ms after the screen SETUP, 0 delta frames skipped. The iAP2 `Connection reset by peer` at
+the WiFi handover happened as always and the session **carried on through it** - the first run
+where that held.
+
+Three separate bugs were in the way, none of them WiFi:
+
+- **A dmabuf backend could be selected for a GPU it cannot import from.** `matches_driver` was
+  only a *sort key* in `try_zero_copy`, never a filter, so on a hybrid machine `vaapi` was chosen
+  for an NVIDIA render node - its elements exist because of the *other* GPU, and `available()`
+  only checks that elements exist. `Import::Cuda` reports failure up front and falls through;
+  `Import::DmaBuf` has no such check, so the pipeline built and then died mid-session on
+  `caps ... not accepted`, taking the CarPlay session with it. Now `can_import_from()` filters it
+  out, and `zerocopy=true` correctly errors instead of picking something doomed.
+- **`auto` preferred the one GPU this build cannot encode on.** `driver_rank` ranks nvidia first
+  "by hardware-encode capability", but the nvidia row is `#[cfg(feature = "cuda")]` - on a
+  non-cuda build there is no NVIDIA encode path at all, so `auto` guaranteed software encode
+  while an Intel GPU able to do full zero-copy sat idle. `pick_auto` now sorts on
+  `driver_has_zero_copy_backend` first and keeps `driver_rank` as the tiebreak. Non-cuda builds
+  land on renderD128/i915 + vaapi; `cuda=true` still lands on renderD129/nvidia + nvh264enc.
+- **The compositor allocated a modifier the encoder cannot import.** It handed GBM all six
+  renderable Argb8888 modifiers and GBM picked the GPU's favourite, Tile4
+  (`0x0100000000000008`); `vapostproc` lists `AR24` with `I915_FORMAT_MOD_Y_TILED`
+  (`0x0100000000000002`) and nothing else. Negotiation therefore failed only once frames flowed
+  (`not-negotiated (-4)`, surfacing as appsrc "Internal data stream error"), never at link time.
+  `encode::importable_modifiers()` now reads the postproc's sink pad and the compositor
+  intersects before allocating: "6 renderable ... 1 of them importable by the encoder".
+
+Also fixed, because it made all of the above harder to read: the session `select!` loops (app and
+desktop paths) were **unbiased**, and the encoder ending makes both its arm and `video`'s ready at
+once - so identical faults reported either the real GStreamer error or "encoder stopped before
+producing a keyframe", at random. Both loops are now `biased;`.
+
+`tests/compositor.rs` drives compositor → encode with **no car** and reproduces the whole encode
+path in ~3s; it is the right first stop for anything in this area. `GST_DEBUG=*:2` alone hid the
+cause - the caps detail needs `GST_DEBUG=*:2,GST_CAPS:5`.
 
 ## What works
 
@@ -511,6 +555,10 @@ Not aimed at the deauth; all three are things that were making iteration harder.
 
 ## Next move
 
+0. **Retry the bike.** The bench now streams video end to end, and the three encode bugs fixed to
+   get there (wrong-GPU backend, `auto` picking a GPU with no encode path, the modifier mismatch)
+   all applied to the bike too - every run against it so far encoded on a path that could not
+   negotiate. The bike's own blocker below may or may not survive that.
 0. **Count the two new page-outcome log lines.** "Outbound page succeeded" vs "Outbound page timed
    out" now answers in one glance what previously needed HCI from a capture. If timeouts have
    dropped now that a healthy link is no longer torn down at session start, that confirms carjack

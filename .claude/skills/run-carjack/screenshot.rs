@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
     // straight to the encoder and `CapturedFrame::Dmabuf` carries no CPU-readable pixels - there
     // is nothing to write to a PNG. Forcing the SHM readback path costs one copy per frame and is
     // what makes a screenshot possible at all.
-    let comp = Compositor::start(node, false, args.width, args.height, args.fps)?;
+    let comp = Compositor::start(node, false, Vec::new(), args.width, args.height, args.fps)?;
     println!("compositor up on {:?}", comp.socket_name);
 
     let mut child = if args.no_client {
