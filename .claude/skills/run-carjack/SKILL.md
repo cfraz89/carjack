@@ -10,16 +10,16 @@ encoder. So "screenshot carjack" means "pull a frame off that stream", and the h
 Wayland client inside it, and writes a PNG.
 
 All paths below are relative to the repo root. **All commands here were run on a Fedora host
-(`thunderhorse-mk2`) with a real GPU, BlueZ and NetworkManager — not a container.** That matters:
+(`thunderhorse-mk2`) with a real GPU, BlueZ and iwd — not a container.** That matters:
 see [Safety](#safety) before running anything that touches the car.
 
 ## Safety
 
-carjack drives the **host's real NetworkManager and BlueZ over D-Bus**. An unguarded run can
+carjack drives the **host's real iwd and BlueZ over D-Bus**. An unguarded run can
 disconnect this machine's actual WiFi (it has happened) or leave stray processes behind.
 
 - The screenshot driver and the tests below are safe: they touch **only** the GPU/compositor and
-  never open Bluetooth, NetworkManager, or a socket to the car.
+  never open Bluetooth, iwd, or a socket to the car.
 - Anything that starts the full app (`just run`, `just test-run`) is **not** agent-safe — see
   [Live run](#live-run-needs-the-car-not-run-here).
 
@@ -164,7 +164,7 @@ present, and they mutate host state. Two hard blockers an agent will hit:
   if that command fails.
 
 Prefer `just test-run 60` over `just run` — it caps the run, force-kills leftover carjack
-processes, and restores whatever NetworkManager connection was active beforehand, however it ends.
+processes, and reconnects whatever network iwd was on beforehand, however it ends.
 
 ## Gotchas
 

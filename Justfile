@@ -42,23 +42,35 @@ run +flags="": (build flags)
 [script('bash')]
 test-run timeout="60" +flags="": (build flags)
     set -uo pipefail
+    # The station iwd drives, from the kernel rather than from iwctl's table: a wireless netdev is
+    # the one with a phy80211 link, and that is true whatever iwd calls it. A glob is no good here
+    # - /sys/class/net/* are symlinks and `/sys/class/net/*/phy80211` matches every one of them.
+    dev=""
+    for d in /sys/class/net/*; do
+        if [ -e "$d/phy80211" ]; then dev=$(basename "$d"); break; fi
+    done
+    # `iwctl station <dev> show` prints the SSID in a row labelled "Connected network"
+    # (iwd's client/station.c). Strip any colour escapes and the row's padding rather than
+    # `xargs`, which would mangle an SSID containing spaces or quotes.
+    connected() {
+        iwctl station "$dev" show 2>/dev/null \
+            | sed -e 's/\x1b\[[0-9;]*m//g' -n -e 's/^ *Connected network  *//p' \
+            | sed -e 's/[[:space:]]*$//' -e 1q
+    }
     original=""
     cleanup() {
-        # Anchored: unanchored, this matches *any* process whose command line merely contains the
-        # path - a tail on the log, an editor, a wrapper script driving this recipe - and kills it.
-        if [ -n "$original" ]; then
-            current=$(nmcli -t -f NAME,ACTIVE connection show --active 2>/dev/null | awk -F: '$2=="yes"{print $1; exit}')
-            if [ "$current" != "$original" ]; then
-                echo "Restoring original connection: $original" >&2
-                timeout --foreground --kill-after=5s 10s nmcli connection up id "$original" >/dev/null 2>&1 || true
-            fi
+        # carjack leaves the car's network provisioned (AutoConnect=false, so iwd will not go back
+        # to it on its own) and stays associated to it. Put the dev box back where it was.
+        if [ -n "$original" ] && [ "$(connected)" != "$original" ]; then
+            echo "Restoring original connection: $original" >&2
+            timeout --foreground --kill-after=5s 20s iwctl station "$dev" connect "$original" >/dev/null 2>&1 || true
         fi
     }
     trap cleanup EXIT
     trap cleanup ERR
 
-    original=$(nmcli -t -f NAME,TYPE,ACTIVE connection show --active 2>/dev/null | awk -F: '$2!="loopback" && $3=="yes" {print $1; exit}')
-    echo "Active connection before test: ${original:-none}" >&2
+    original=$(connected)
+    echo "Active connection before test: ${original:-none} (on ${dev:-no wireless device})" >&2
 
     waydroid session stop || true
     timeout --foreground --kill-after=5s "{{timeout}}s" cargo run {{cuda_features}} {{flags}} < /dev/null || true
@@ -96,4 +108,5 @@ install-cuda-dmabuf-deps:
 # Install dependencies in toolbox
 install-deps:
     {{toolbox_build}}sudo dnf install gcc g++ gstreamer1-devel gstreamer1-plugins-base-devel pipewire-gstreamer dbus-devel \
-    openssl-devel mesa-libgbm-devel libdrm-devel libxkbcommon-devel mesa-libEGL-devel mesa-libGLES-devel
+    openssl-devel mesa-libgbm-devel libdrm-devel libxkbcommon-devel mesa-libEGL-devel mesa-libGLES-devel \
+    libacl-devel

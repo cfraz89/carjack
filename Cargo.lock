@@ -500,6 +500,7 @@ dependencies = [
  "config",
  "cuda-dmabuf",
  "deku",
+ "exacl",
  "eyre",
  "futures",
  "gstreamer",
@@ -507,10 +508,10 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-video",
  "iap2-proto",
+ "iwd-automata",
  "libc",
  "libcarjack",
  "nix",
- "nm-automata",
  "reis",
  "ring",
  "serde",
@@ -1491,6 +1492,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "exacl"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8de9e551ced9d700a31dacb8b168129640240fcd7a279a3fa4d59608b84ebcae"
+dependencies = [
+ "bitflags",
+ "log",
+ "scopeguard",
+ "uuid",
+]
+
+[[package]]
 name = "exp-golomb"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2163,6 +2176,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "iwd-automata"
+version = "0.1.0"
+source = "git+ssh://git@github.com/cfraz89/iwd-automata.git#6a306cfa78abd66576bd7751690295f0bb25ee68"
+dependencies = [
+ "futures-util",
+ "serde",
+ "zbus",
+ "zbus_xml",
+]
+
+[[package]]
 name = "jobserver"
 version = "0.1.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2380,18 +2404,6 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
-]
-
-[[package]]
-name = "nm-automata"
-version = "0.1.0"
-source = "git+ssh://git@github.com/cfraz89/nm-automata.git#8d811f033899c94e58c80d6c0ae48230cc7cad14"
-dependencies = [
- "bitflags",
- "futures-util",
- "serde",
- "serde_repr",
- "zbus",
 ]
 
 [[package]]
@@ -4152,6 +4164,18 @@ checksum = "d8bf88b4a3ff53e883001e0e0115b297a9d53c31b9c1edd2bfdd853e3428624e"
 dependencies = [
  "serde",
  "winnow",
+ "zvariant",
+]
+
+[[package]]
+name = "zbus_xml"
+version = "5.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1586c021a01ca0a9216dcd874e546382e156a5cbab5fab6cb5f10087e22682a"
+dependencies = [
+ "serde",
+ "winnow",
+ "zbus_names",
  "zvariant",
 ]
 

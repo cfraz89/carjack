@@ -19,7 +19,7 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 
 - just build - builds project
 - just run - builds in the toolbox, then runs carjack on the **host** (it needs
-  native host access to the GPU/DRM, NetworkManager and BlueZ, and runs its own
+  native host access to the GPU/DRM, iwd and BlueZ, and runs its own
   internal Smithay compositor headless on the DRM render node - no external
   compositor). Only the build is in the toolbox. Configure a **host-installed**
   desktop app to stream via `[app] command` in the config file (or
@@ -33,13 +33,13 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
   device and errors out at startup if it isn't set; there is no scan-and-guess
   fallback (see the note under the iAP2 section).
 - just test-run [timeout] - **use this instead of `just run`/bare `cargo run`
-  for any live/manual testing.** carjack drives the real host NetworkManager and
+  for any live/manual testing.** carjack drives the real host iwd and
   BlueZ over D-Bus - including from inside toolbox, which shares the host's
   D-Bus session - so an unguarded run can disconnect the dev machine's actual
   WiFi or leave stray processes behind if killed mid-run (this has happened).
   `test-run` caps the run to `timeout` seconds (default 60), then force-kills
-  any leftover carjack processes and restores whatever NetworkManager connection
-  was active before the run, no matter how it ended.
+  any leftover carjack processes and reconnects whatever network iwd was on
+  before the run, no matter how it ended.
 - To exercise the compositor standalone without a car: `just test compositor`
   (the `tests/compositor.rs` integration test) brings it up, runs a client, and
   checks the composited frames contain client content and drive the encode path.
@@ -57,25 +57,72 @@ which wrap cargo in a toolbox runner, in order that dependencies are satisfied:
 
 ## CarPlay / iAP2 protocol notes
 
-- WiFi connectivity is handled only via NetworkManager (`nm-automata`, our own
-  fully-generated bindings) - there was a `nl80211.rs`/`iw` fallback path, it was
-  removed; don't re-add it. Every profile property is an `Option`: absent means
-  "NetworkManager decides", so only set what actually matters.
-- **The car's WiFi profile is created in memory, not on disk.** Its SSID and
-  passphrase change per session, so a persistent profile per run accumulates
-  without bound. `wifi_connect` calls `AddAndActivateConnection2` with
-  `persist = "memory"` and `bind-activation = "dbus-client"`; NetworkManager then
-  keeps it under `/run` and drops it when carjack's bus connection goes - which is
-  why the `NetworkManagerProxy` is a process-lifetime `OnceCell`.
-- **The car's profile sets `ipv6.method = "link-local"`.** The car answers no
-  router solicitation, so `auto` can only ever time out on SLAAC; and its AirPlay
-  address is link-local anyway. That setting is also what makes the activation's
-  `IP6_READY` state flag mean "the link-local address has finished duplicate-address
-  detection" - a link-local destination is unreachable from a *tentative* source
-  (`connect()` fails `EADDRNOTAVAIL` before anything hits the wire), so
-  `wait_for_activation` gates on that flag - and that gate is the whole of it. An
-  rtnetlink DAD watcher used to re-check the flag by hand; it never once found
-  anything left to wait for, so it and the `rtnetlink` dependency are gone.
+- WiFi connectivity is handled only via **iwd** (`iwd-automata`, our own
+  fully-generated bindings) - there was a `nl80211.rs`/`iw` fallback path, and
+  before that NetworkManager (`nm-automata`); both were removed, don't re-add
+  them. iwd has **no connection-profile API on D-Bus**: a network is either
+  provisioned by a file in iwd's state directory or it is not, and
+  `Network.Connect()` is the whole of the API. So `wifi_connect` writes the
+  profile as a file and then scans and connects.
+- **The host has to be set up for carjack, and carjack cannot do it over D-Bus.**
+  Two settings in `/etc/iwd/main.conf`, both checked or reported at runtime:
+  - `[General] EnableNetworkConfiguration=true` - iwd does no DHCP at all
+    without it (upstream default is `false`). `provision` reads
+    `Daemon.GetInfo().NetworkConfigurationEnabled` and refuses to go on.
+  - `[General] AddressRandomization=network` - **iwd silently ignores a
+    network's `AddressOverride` without it** (`src/network.c`: any other value
+    disqualifies the per-network address settings). Nothing reports this, so
+    `connect_to_car_wifi` compares the associated address to the announced one
+    afterwards and warns loudly.
+  carjack also has to be able to write iwd's state directory, which is
+  root-owned and mode 0700. D-Bus access itself only needs group `wheel` or
+  `netdev` (iwd ships that policy; there is no polkit).
+- **The car's network is a provisioning file, rewritten before every attempt.**
+  `<state dir>/<ssid>.psk` (or `=<lowercase hex>.psk` where the SSID has a byte
+  outside `[A-Za-z0-9-_ ]`, or is over 32 bytes - iwd warns into its own log and
+  ignores a misnamed file, so this is silent when wrong). It carries the four
+  things D-Bus cannot say: `[Security] Passphrase`, `[Settings] AutoConnect=false`,
+  `[Settings] Hidden=true` and `[Settings] AddressOverride`. Written **0600 plus a
+  root-read ACL** (`u:0:r`), never world-readable - the `[dependencies] exacl`
+  crate sets it, no shelling out. iwd runs as UID 0 but its systemd unit drops
+  `CAP_DAC_OVERRIDE` (CapabilityBoundingSet is only `NET_ADMIN NET_RAW
+  NET_BIND_SERVICE`), so it reads files by ordinary permission bits - a
+  chris-owned 0600 file is unreadable to it (measured 0/6) and only a file
+  `other` can read worked (0644, 6/6), which leaks the car's passphrase. Granting
+  uid 0 read via a POSIX ACL closes that: the file stays 0600 for everyone else
+  and iwd registers it (measured). carjack owns the file, so it sets the ACL
+  itself without root. **The ACL must be set before the atomic rename** - iwd
+  picks the file up from the rename's single inotify event, and an ACL that lands
+  after it races the grant and stays unprovisioned (measured: before 6/6, after
+  0/6). exacl links libacl, so building needs `libacl-devel` in the toolbox
+  (`just install-deps`). Rewritten each session rather than reused: the car's
+  passphrase changes per session, and iwd replaces the whole `[Security]` group
+  with a derived `PreSharedKey` after a successful connect (it leaves the other
+  groups alone, and afterward the file is root-owned 0600, which iwd reads as the
+  owner).
+- **`ConnectHiddenNetwork` is not the route to the car's hidden AP** - it returns
+  `AlreadyProvisioned` the moment a `.psk`/`.open` file exists for the SSID, i.e.
+  always, for us. `[Settings] Hidden=true` is what makes iwd send directed probes
+  for the SSID during a normal `Station.Scan()`, after which it is an ordinary
+  `Network` object and `Network.Connect()` works.
+- **The announced WiFi MAC is derived from the *phy's* address, read from
+  `/sys/class/net/<iface>/phy80211/macaddress`.** Not from `Device.Address`: iwd
+  reports the current netdev address there, which is our own `AddressOverride`
+  once we have connected - and iwd does **not** put the permanent address back on
+  disconnect. Deriving from that would announce a different address on the second
+  run, and the accessory would wait for a station that never appears. iwd exposes
+  the permanent address on no interface, so sysfs is the only source.
+- **The car's network sets `[IPv6] Enabled=false`, and carjack waits for the
+  kernel's link-local itself.** The car answers no router solicitation, so iwd's
+  IPv6 stage could only ever time out; the kernel still assigns a link-local
+  (iwd never writes sysfs `disable_ipv6`, whatever iwd.network(5) claims), and
+  that link-local is what AirPlay is actually reached on. iwd has no equivalent
+  of NetworkManager's `IP4_READY`/`IP6_READY`, so `wait_for_addresses` reads the
+  interface: a routable IPv4 from `getifaddrs` (169.254/16 is treated as "DHCP
+  failed", not as an address), and a link-local in `/proc/net/if_inet6` whose
+  flags no longer carry `IFA_F_TENTATIVE`. That last one is not cosmetic - a
+  link-local destination is unreachable from a *tentative* source, `connect()`
+  failing `EADDRNOTAVAIL` before anything hits the wire.
 - The target head unit is **configured, never auto-detected** (`[bluetooth]
   device`, MAC or advertised name). `wireless::find_target_device` looks it up in
   BlueZ's known devices, else waits for it in a discovery aimed at that one

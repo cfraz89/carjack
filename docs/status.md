@@ -1,6 +1,6 @@
 # Where things stand
 
-**Last updated: 2026-08-05.** This is the living document - if it disagrees with
+**Last updated: 2026-08-07.** This is the living document - if it disagrees with
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
 
@@ -250,6 +250,55 @@ Dead ends, recorded so they are not retried:
   path. Gone now, and `cfmoto_16` associated fresh. Full detail in the
 2026-07-31 entry of [investigation-log.md](investigation-log.md).
 
+## Changed: WiFi goes through iwd, not NetworkManager (2026-08-07)
+
+`src/wifi_connect.rs` is now written against `iwd-automata` and the `nm-automata` dependency is
+gone. Nothing else in carjack touched NetworkManager, so the port is that one module, the
+`test-run` cleanup in the `Justfile`, and the notes in `CLAUDE.md`.
+
+The interesting part is that iwd has **no connection-profile API on D-Bus at all** - a network is
+provisioned by a file in iwd's state directory or it is not, and `Network.Connect()` is the whole
+of the client side. So the NetworkManager `ConnectionProfile` became a `<ssid>.psk` file carrying
+the passphrase, `AutoConnect=false`, `Hidden=true` and `AddressOverride`, written temp-then-rename
+before every attempt. Three things that were free under NetworkManager are not:
+
+- **The pinned station address needs host configuration.** iwd ignores `[Settings]
+  AddressOverride` unless `/etc/iwd/main.conf` has `[General] AddressRandomization=network`, and
+  says nothing when it does. carjack compares the associated address to the announced one after
+  connecting and warns; that check was already there for NetworkManager and has become the only
+  detector.
+- **DHCP is off by default.** `[General] EnableNetworkConfiguration=true` or iwd does no IP
+  configuration whatsoever. `provision` reads `Daemon.GetInfo().NetworkConfigurationEnabled` and
+  refuses to go on without it, rather than failing later as a connection with no address.
+- **There is no `IP4_READY`/`IP6_READY`.** `wait_for_addresses` reads the interface instead: a
+  routable IPv4 out of `getifaddrs`, and a link-local out of `/proc/net/if_inet6` whose flags no
+  longer carry `IFA_F_TENTATIVE`. That is the same gate the NetworkManager flags gave, restored by
+  hand - and it matters for the same reason, that a link-local destination cannot be reached from
+  a tentative source.
+
+One latent bug the port closed: the announced address is now derived from the phy's address in
+`/sys/class/net/<iface>/phy80211/macaddress`. iwd's `Device.Address` is the *current* netdev
+address - our own override once connected - and iwd never restores the permanent one on
+disconnect, so deriving from it would have announced a different address on every second run.
+
+Two real defects surfaced and fixed while standing this up against a live iwd on the host:
+
+- **`iwd-automata`'s `discover` never set a D-Bus destination** (`src/ext.rs`,
+  `ObjectPathExt::proxy`). It only trips once iwd exposes an object of that kind, so the
+  device-less container CI never hit it - on real hardware every `discover()` failed with
+  "destination was not specified". Fixed by defaulting the destination to `net.connman.iwd`.
+- **iwd's systemd unit drops `CAP_DAC_OVERRIDE`, so it reads provisioning files by ordinary
+  permissions, not as root** - a chris-owned 0600 file stayed unprovisioned (0/6) while a
+  world-readable 0644 worked (6/6). Fixing it with 0644 would leak the car's passphrase, so
+  `wifi_connect` now writes 0600 and sets a root-read POSIX ACL via the `exacl` crate (`u:0:r`):
+  0600 for everyone else, readable by iwd, no root needed (measured: registers). The ACL has to
+  land before the atomic rename; set after, iwd scratches its head (0/6).
+
+Verified against a live host iwd: `iwd_is_configured_for_carjack`, `live_connection_...` and
+`iwd_reads_back_the_car_provisioning_file` (writes a throwaway profile, confirms iwd registered
+it with `Hidden=true`/`AutoConnect=false`/type `psk`, then `Forget()`s it) all pass. **Not yet
+run against a car.**
+
 ## What works
 
 Verified against the CFMOTO bike unless noted.
@@ -258,7 +307,8 @@ Verified against the CFMOTO bike unless noted.
   identification → the Apple authentication chain (`AA00`/`AA06`/`AA02`/`AA03`/`AA05`) →
   `4300`/`4301`, at which point the car hands over its WiFi credentials and the address of its
   AirPlay receiver. Confirmed clean in `cfmoto_11.pcapng`.
-- **WiFi association and DHCP** on the car's AP, via NetworkManager.
+- **WiFi association and DHCP** on the car's AP - via NetworkManager up to 2026-08-07, via iwd
+  since; the iwd path has not yet met a car (see below).
 - **AirPlay video and touch**, on the bench unit: the car's display is learned from `/info`, the
   compositor is reconfigured to it, and touch comes back over the AirPlay HID channel.
 - **The internal compositor and both encode paths** (zero-copy CUDA on NVIDIA, software
