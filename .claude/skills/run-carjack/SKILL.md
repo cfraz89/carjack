@@ -158,8 +158,8 @@ test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; fini
 real head unit. **These were deliberately not executed in this session** — no head unit was
 present, and they mutate host state. Two hard blockers an agent will hit:
 
-- They run `sudo setcap` on the `carjack-hci-helper` sidecar. With no cached sudo credential this
-  **prompts for a password**, so it fails or hangs non-interactively. Run `sudo -v` first.
+- They run `sudo setcap` on the `carjack-wireless-helper` sidecar. With no cached sudo credential
+  this **prompts for a password**, so it fails or hangs non-interactively. Run `sudo -v` first.
 - `just run` begins with `waydroid session stop && …`; the `&&` means the run is skipped entirely
   if that command fails.
 

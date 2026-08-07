@@ -1,29 +1,31 @@
 set dotenv-load
 mod armbian
 
-# Grant the `carjack-hci-helper` sidecar the cap_net_admin it needs for the raw HCI mgmt socket.
-# Not part of `build`: escalating on every build prompts, and a build only needs this when the
-# relink has dropped the capability. Run it after rebuilding the sidecar.
+# Capabilities for the sidecar. Run after rebuilding it - relinking drops them. Kept out of
+# `build` because escalating on every build prompts, which fails non-interactively.
 #
-# Passwordless via /etc/sudoers.d/carjack-setcap:
-#   chris ALL=(root) NOPASSWD: /usr/bin/setcap cap_net_admin+ep <abs>/target/debug/carjack-hci-helper, \
-#                              /usr/bin/setcap cap_net_admin+ep <abs>/target/release/carjack-hci-helper
-# sudoers matches arguments literally, which is why the paths below are absolute.
+# Passwordless via /etc/sudoers.d/carjack-setcap. Every comma must be backslash-escaped, or sudoers
+# reads it as the Cmnd_List separator; quotes don't work, and `visudo -c -f` catches it:
+#   chris ALL=(root) NOPASSWD: /usr/bin/setcap cap_chown\,cap_dac_override\,cap_net_admin+ep <abs>/target/debug/carjack-wireless-helper, \
+#                              /usr/bin/setcap cap_chown\,cap_dac_override\,cap_net_admin+ep <abs>/target/release/carjack-wireless-helper
 [script]
 setcap +flags="":
-    # Only the sidecar carries the capability. The main carjack binary stays unprivileged so
-    # xdg-desktop-portal can introspect it in desktop mode (a capability-carrying process is
-    # /proc-locked to root under fs.suid_dumpable=2).
-    binary="{{justfile_directory()}}/target/debug/carjack-hci-helper"
-    case " {{flags}} " in *" --release "*|*" -r "*) binary="{{justfile_directory()}}/target/release/carjack-hci-helper";; esac
-    # Only escalate when the capability is actually missing. Relinking the sidecar drops the cap,
-    # so `getcap` is an exact test for "needs setting" - and skipping it otherwise avoids a prompt
-    # on every single build (which outright fails in a non-interactive shell).
-    if getcap "$binary" 2>/dev/null | grep -q cap_net_admin; then
-        echo "cap_net_admin already set on ${binary}"
+    # Never the main binary: a capability-carrying process is /proc-locked to root under
+    # fs.suid_dumpable=2, which stops xdg-desktop-portal introspecting it in desktop mode.
+    binary="{{justfile_directory()}}/target/debug/carjack-wireless-helper"
+    case " {{flags}} " in *" --release "*|*" -r "*) binary="{{justfile_directory()}}/target/release/carjack-wireless-helper";; esac
+    # Checked individually - a binary from an earlier capability set has some already.
+    caps="$(getcap "$binary" 2>/dev/null || true)"
+    missing=""
+    for cap in cap_chown cap_dac_override cap_net_admin; do
+        grep -q "$cap" <<<"$caps" || missing="${missing} ${cap}"
+    done
+    if [ -z "$missing" ]; then
+        echo "cap_chown,cap_dac_override,cap_net_admin already set on ${binary}"
     else
-        sudo setcap cap_net_admin+ep "$binary"
-        echo "Gave cap_net_admin to ${binary}"
+        echo "Missing:${missing}"
+        sudo setcap cap_chown,cap_dac_override,cap_net_admin+ep "$binary"
+        echo "Gave cap_chown,cap_dac_override,cap_net_admin to ${binary}"
     fi
 
 toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }

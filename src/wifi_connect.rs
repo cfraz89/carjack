@@ -1,14 +1,13 @@
 //! Joining the car's access point, over iwd.
 //!
 //! iwd has no connection-profile API: a network is provisioned by a file in its state directory,
-//! and `Network.Connect()` is the whole of the API. So this writes the provisioning file, scans,
-//! then connects.
+//! and `Network.Connect()` is the whole of the API. The Agent API is no substitute - `AddressOverride`
+//! has no D-Bus equivalent, and `Device.Address`/`KnownNetwork.Hidden` are read-only. So this
+//! writes the file (via the privileged sidecar), scans, then connects.
 
 use backon::{ConstantBuilder, Retryable};
 use std::fmt::Write as _;
-use std::io::Write as _;
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use eyre::{Result, eyre};
@@ -20,6 +19,7 @@ use netlink_packet_route::AddressFamily;
 use netlink_packet_route::address::{
     AddressAttribute, AddressFlags, AddressHeaderFlags, AddressMessage, AddressScope,
 };
+use tokio::io::AsyncWriteExt as _;
 use tokio::sync::OnceCell;
 
 /// How long to give iwd to associate and configure IP before retrying.
@@ -138,16 +138,64 @@ async fn provision(ssid: &Ssid, passphrase: &str, announced_mac: &str) -> Result
     }
     let dir = PathBuf::from(info.state_directory.as_deref().unwrap_or(DEFAULT_STATE_DIR));
     let body = provisioning_file(passphrase, announced_mac);
-    let path = dir.join(network_file_name(ssid));
-    write_atomically(&path, &body).map_err(|e| {
+    let name = network_file_name(ssid);
+    write_profile(&name, &body).await.map_err(|e| {
         eyre!(
-            "Could not write {}: {e}. iwd's state directory is root-owned and mode 0700, so \
-             carjack has to run as the same user as iwd to provision the car's network",
-            path.display()
+            "Could not provision {}: {e}. The sidecar needs cap_dac_override to write iwd's \
+             state directory (root-owned, mode 0700) and cap_chown to leave the profile owned \
+             by root, which is the only way iwd can read it; run `just setcap`",
+            dir.join(&name).display()
         )
     })?;
-    tracing::info!(path = %path.display(), "Provisioned the car's network for iwd");
+    tracing::info!(path = %dir.join(&name).display(), "Provisioned the car's network for iwd");
     Ok(())
+}
+
+/// Written by the sidecar rather than here - it holds the capabilities iwd's state directory
+/// needs. The body goes over stdin, never argv, keeping the passphrase out of `/proc`.
+async fn write_profile(name: &str, body: &str) -> Result<()> {
+    let exe = sidecar_path()?;
+    let mut child = tokio::process::Command::new(&exe)
+        .arg("wifi-profile")
+        .arg(name)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| eyre!("could not run {}: {e}", exe.display()))?;
+    // Dropped before the wait, or the helper blocks on a pipe we still hold.
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    stdin.write_all(body.as_bytes()).await?;
+    drop(stdin);
+
+    let out = child.wait_with_output().await?;
+    if !out.status.success() {
+        return Err(eyre!(
+            "{} {}: {}",
+            exe.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Beside us, else one level up - a test binary lives in `target/debug/deps/`, the sidecar in
+/// `target/debug/`.
+fn sidecar_path() -> Result<PathBuf> {
+    const NAME: &str = "carjack-wireless-helper";
+    let exe = std::env::current_exe()?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| eyre!("carjack's own path has no parent directory"))?;
+    let beside = dir.join(NAME);
+    if beside.exists() {
+        return Ok(beside);
+    }
+    let up = dir.parent().map(|d| d.join(NAME));
+    match up {
+        Some(up) if up.exists() => Ok(up),
+        _ => Err(eyre!("{NAME} is not next to {}", exe.display())),
+    }
 }
 
 /// The provisioning file's contents; see [`provision`] for what each key does.
@@ -187,50 +235,6 @@ fn network_file_name(ssid: &Ssid) -> String {
     }
     name.push_str(".psk");
     name
-}
-
-/// Write the file the way iwd writes its own: a temp file beside it, then a rename - so iwd's
-/// inotify watch sees one complete file, never a partial write.
-fn write_atomically(path: &Path, body: &str) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    // Dot-prefixed so iwd, which reads a file's security type after the first dot, ignores it.
-    let temp = dir.join(format!(".carjack-{}.tmp", std::process::id()));
-    let write = || -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600) // Not world-readable - holds the car's passphrase.
-            .open(&temp)?;
-        file.write_all(body.as_bytes())?;
-        file.sync_all()
-    };
-    // The ACL must land before the rename: iwd loads the file on the rename's inotify event, and
-    // an ACL that lands after it races the grant and leaves the network unprovisioned.
-    if let Err(e) = write()
-        .and_then(|()| make_readable_by_iwd(&temp))
-        .and_then(|()| std::fs::rename(&temp, path))
-    {
-        let _ = std::fs::remove_file(&temp);
-        return Err(e);
-    }
-    Ok(())
-}
-
-/// Grant iwd's uid (0) read access to `path` via a POSIX ACL, without making it world-readable -
-/// iwd runs as root but without `CAP_DAC_OVERRIDE`, so it reads files by ordinary permission bits.
-fn make_readable_by_iwd(path: &Path) -> std::io::Result<()> {
-    use exacl::{AclEntry, AclEntryKind, Flag, Perm};
-    let mut acl = exacl::getfacl(path, None)?;
-    acl.push(AclEntry {
-        kind: AclEntryKind::User,
-        name: "0".to_owned(),
-        perms: Perm::READ,
-        flags: Flag::empty(),
-        allow: true,
-    });
-    exacl::setfacl(&[path], &acl, None)?;
-    Ok(())
 }
 
 /// The car's network object, scanning if the last scan didn't find it. Must run after
@@ -481,9 +485,7 @@ fn sysfs_mac(path: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use exacl::{AclEntryKind, Perm};
     use iwd_automata::Ssid;
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
     /// One runtime for every live test in this process - `iwd`'s cached D-Bus connection outlives
@@ -491,39 +493,6 @@ mod tests {
     static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
         tokio::runtime::Runtime::new().expect("building a runtime for the live tests")
     });
-
-    /// iwd (uid 0, no `CAP_DAC_OVERRIDE`) must be able to read the file while `other` gets nothing.
-    #[test]
-    fn root_read_acl_keeps_the_file_closed_to_other() {
-        let dir = std::env::temp_dir().join(format!("carjack-acl-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("carjack-profile.psk");
-        std::fs::write(&path, "[Security]\nPassphrase=hunter2hunter2\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        super::make_readable_by_iwd(&path).unwrap();
-
-        let acl = exacl::getfacl(&path, None).unwrap();
-        let root_reads = acl.iter().any(|e| {
-            e.kind == AclEntryKind::User
-                && e.allow
-                && matches!(e.name.as_str(), "0" | "root")
-                && e.perms.contains(Perm::READ)
-        });
-        let other_reads = acl
-            .iter()
-            .any(|e| e.kind == AclEntryKind::Other && e.perms.contains(Perm::READ));
-        let other_bit = std::fs::metadata(&path).unwrap().permissions().mode() & 0o004 != 0;
-
-        assert!(root_reads, "iwd (uid 0) must be granted read access");
-        assert!(
-            !other_reads,
-            "ACL `other` must not read the car's passphrase"
-        );
-        assert!(!other_bit, "the file must not be world-readable");
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
-    }
 
     /// iwd rejects, silently, any literal SSID carrying a character outside `[A-Za-z0-9-_ ]`.
     #[test]
@@ -664,7 +633,7 @@ mod tests {
 
     /// Live check against iwd: the provisioning file must be one the daemon reads back as written.
     #[test]
-    #[ignore = "needs a live iwd whose state directory carjack can write"]
+    #[ignore = "needs a live iwd and a capability-granted sidecar (`just setcap`)"]
     fn iwd_reads_back_the_car_provisioning_file() {
         const SSID: &str = "carjack provision-check";
         RUNTIME.block_on(async {

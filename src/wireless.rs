@@ -87,21 +87,26 @@ fn carplay_profile() -> rfcomm::Profile {
 async fn apply_device_class() {
     let Some(exe) = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("carjack-hci-helper")))
+        .and_then(|p| p.parent().map(|d| d.join("carjack-wireless-helper")))
     else {
-        tracing::warn!("Could not locate carjack-hci-helper; skipping Class of Device setup");
+        tracing::warn!("Could not locate carjack-wireless-helper; skipping Class of Device setup");
         return;
     };
-    match tokio::process::Command::new(&exe).output().await {
+    match tokio::process::Command::new(&exe)
+        .arg("device-class")
+        .output()
+        .await
+    {
         Ok(out) if out.status.success() => tracing::info!("Applied iPhone Class of Device"),
         Ok(out) => tracing::warn!(
             status = ?out.status,
             stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-            "carjack-hci-helper failed; continuing without the Class of Device (try `just setcap`)"
+            "carjack-wireless-helper failed; continuing without the Class of Device \
+             (try `just setcap`)"
         ),
         Err(e) => tracing::warn!(
             ?e,
-            "Could not run carjack-hci-helper; continuing without it"
+            "Could not run carjack-wireless-helper; continuing without it"
         ),
     }
 }

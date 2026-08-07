@@ -289,15 +289,32 @@ Two real defects surfaced and fixed while standing this up against a live iwd on
   "destination was not specified". Fixed by defaulting the destination to `net.connman.iwd`.
 - **iwd's systemd unit drops `CAP_DAC_OVERRIDE`, so it reads provisioning files by ordinary
   permissions, not as root** - a chris-owned 0600 file stayed unprovisioned (0/6) while a
-  world-readable 0644 worked (6/6). Fixing it with 0644 would leak the car's passphrase, so
-  `wifi_connect` now writes 0600 and sets a root-read POSIX ACL via the `exacl` crate (`u:0:r`):
-  0600 for everyone else, readable by iwd, no root needed (measured: registers). The ACL has to
-  land before the atomic rename; set after, iwd scratches its head (0/6).
+  world-readable 0644 worked (6/6). Fixing it with 0644 would leak the car's passphrase.
+- **Superseded (2026-08-07): the POSIX ACL answer to that does not survive an iwd restart.**
+  `wifi_connect` used to write 0600 and add a root-read ACL (`u:0:r`) via the `exacl` crate. That
+  holds until the *directory* is the problem: `iwd.service` sets `StateDirectory=iwd` with
+  `StateDirectoryMode=0700`, and systemd re-applies that mode on every start - which recomputes
+  any POSIX ACL mask from the new group bits, i.e. zeroes it. Seen as
+  `user:chris:rwx #effective:---` alongside `mask::---` on `/var/lib/iwd`, so carjack could not
+  even create its temp file there ("Permission denied (os error 13)").
+  **Now:** the write goes through `carjack-wireless-helper wifi-profile <name>` (body on stdin),
+  which carries `cap_dac_override+ep`. That bypasses the directory mode and the mask both, and
+  leaves a root-owned 0600 file iwd reads with no ACL at all - so `exacl` is gone. The sidecar
+  takes the file *name* only, deriving the directory from iwd's own `Daemon.GetInfo` and checking
+  the name against iwd's profile grammar, so a `CAP_DAC_OVERRIDE` binary is not an
+  arbitrary-file-write primitive for any local user.
+- **The HCI sidecar absorbed it** rather than a second binary being added:
+  `src/bin/carjack-hci-helper.rs` is now `src/bin/carjack-wireless-helper.rs`, with the old
+  behaviour under a `device-class` subcommand, and holds both capabilities
+  (`cap_net_admin,cap_dac_override+ep`). One thing to grant, one to deploy.
 
 Verified against a live host iwd: `iwd_is_configured_for_carjack`, `live_connection_...` and
 `iwd_reads_back_the_car_provisioning_file` (writes a throwaway profile, confirms iwd registered
 it with `Hidden=true`/`AutoConnect=false`/type `psk`, then `Forget()`s it) all pass. **Not yet
-run against a car.**
+run against a car** - and the sidecar rewrite above is **not yet run against iwd either**: it
+needs `just setcap`, whose `/etc/sudoers.d/carjack-setcap` rule matches its arguments literally
+and so must be updated for the new binary name and capability pair before it will work
+unprompted.
 
 ## What works
 
