@@ -85,14 +85,7 @@ fn carplay_profile() -> rfcomm::Profile {
 /// /proc-lock to root and break desktop mode), and skipping it just leaves the unit seeing a plain
 /// computer.
 async fn apply_device_class() {
-    let Some(exe) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("carjack-wireless-helper")))
-    else {
-        tracing::warn!("Could not locate carjack-wireless-helper; skipping Class of Device setup");
-        return;
-    };
-    match tokio::process::Command::new(&exe)
+    match tokio::process::Command::new("carjack-wireless-helper")
         .arg("device-class")
         .output()
         .await

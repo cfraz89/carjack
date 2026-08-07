@@ -1,31 +1,15 @@
 set dotenv-load
 mod armbian
 
-# Capabilities for the sidecar. Run after rebuilding it - relinking drops them. Kept out of
-# `build` because escalating on every build prompts, which fails non-interactively.
-#
-# Passwordless via /etc/sudoers.d/carjack-setcap. Every comma must be backslash-escaped, or sudoers
-# reads it as the Cmnd_List separator; quotes don't work, and `visudo -c -f` catches it:
-#   chris ALL=(root) NOPASSWD: /usr/bin/setcap cap_chown\,cap_dac_override\,cap_net_admin+ep <abs>/target/debug/carjack-wireless-helper, \
-#                              /usr/bin/setcap cap_chown\,cap_dac_override\,cap_net_admin+ep <abs>/target/release/carjack-wireless-helper
 [script]
-setcap +flags="":
-    # Never the main binary: a capability-carrying process is /proc-locked to root under
-    # fs.suid_dumpable=2, which stops xdg-desktop-portal introspecting it in desktop mode.
-    binary="{{justfile_directory()}}/target/debug/carjack-wireless-helper"
-    case " {{flags}} " in *" --release "*|*" -r "*) binary="{{justfile_directory()}}/target/release/carjack-wireless-helper";; esac
-    # Checked individually - a binary from an earlier capability set has some already.
-    caps="$(getcap "$binary" 2>/dev/null || true)"
-    missing=""
-    for cap in cap_chown cap_dac_override cap_net_admin; do
-        grep -q "$cap" <<<"$caps" || missing="${missing} ${cap}"
-    done
-    if [ -z "$missing" ]; then
-        echo "cap_chown,cap_dac_override,cap_net_admin already set on ${binary}"
-    else
-        echo "Missing:${missing}"
+setcap:
+    binary="$(which carjack-wireless-helper)"
+    if [ -n "$binary" ]; then
+        echo "Giving cap_chown,cap_dac_override,cap_net_admin to ${binary}"
         sudo setcap cap_chown,cap_dac_override,cap_net_admin+ep "$binary"
-        echo "Gave cap_chown,cap_dac_override,cap_net_admin to ${binary}"
+    else
+        echo "carjack-wireless-helper not found in PATH, aborting"
+        exit 1 
     fi
 
 toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }
@@ -38,23 +22,17 @@ cuda := env('CARJACK_CUDA', 'false')
 cuda_features := if cuda == 'true' { '--features cuda' } else { '' }
 
 # setcap follows build because relinking drops the capabilities.
-run +flags="": (build flags) (setcap flags)
+run +flags="": (install flags)
     waydroid session stop && cargo run {{cuda_features}} {{flags}} < /dev/null
 
 #Run the app until timeout, then kill it and restore the original wifi connection
 [script('bash')]
-test-run timeout="60" +flags="": (build flags) (setcap flags)
+test-run timeout="60" +flags="": (install flags)
     set -uo pipefail
-    # The station iwd drives, from the kernel rather than from iwctl's table: a wireless netdev is
-    # the one with a phy80211 link, and that is true whatever iwd calls it. A glob is no good here
-    # - /sys/class/net/* are symlinks and `/sys/class/net/*/phy80211` matches every one of them.
     dev=""
     for d in /sys/class/net/*; do
         if [ -e "$d/phy80211" ]; then dev=$(basename "$d"); break; fi
     done
-    # `iwctl station <dev> show` prints the SSID in a row labelled "Connected network"
-    # (iwd's client/station.c). Strip any colour escapes and the row's padding rather than
-    # `xargs`, which would mangle an SSID containing spaces or quotes.
     connected() {
         iwctl station "$dev" show 2>/dev/null \
             | sed -e 's/\x1b\[[0-9;]*m//g' -n -e 's/^ *Connected network  *//p' \
@@ -62,8 +40,6 @@ test-run timeout="60" +flags="": (build flags) (setcap flags)
     }
     original=""
     cleanup() {
-        # carjack leaves the car's network provisioned (AutoConnect=false, so iwd will not go back
-        # to it on its own) and stays associated to it. Put the dev box back where it was.
         if [ -n "$original" ] && [ "$(connected)" != "$original" ]; then
             echo "Restoring original connection: $original" >&2
             timeout --foreground --kill-after=5s 20s iwctl station "$dev" connect "$original" >/dev/null 2>&1 || true
@@ -79,11 +55,14 @@ test-run timeout="60" +flags="": (build flags) (setcap flags)
     timeout --foreground --kill-after=5s "{{timeout}}s" cargo run {{cuda_features}} {{flags}} < /dev/null || true
 
 build +flags="":
-    {{toolbox_build}}cargo build {{cuda_features}} {{flags}} < /dev/null
+    {{toolbox_build}}cargo build {{cuda_features}} {{flags}}
+
+install +flags="": (build flags) && setcap
+    {{toolbox_build}}cargo install --path . {{cuda_features}} {{flags}}
 
 # Run cargo tests
 test +flags="":
-    {{toolbox_build}}cargo test {{cuda_features}} {{flags}} < /dev/null
+    {{toolbox_build}}cargo test {{cuda_features}} {{flags}}
 
 # The carjack binary's own unit tests. Needs the toolbox like `just build` - the binary links
 # dbus/EGL/gbm/gstreamer, none of which the host has.

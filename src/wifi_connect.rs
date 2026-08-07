@@ -151,17 +151,16 @@ async fn provision(ssid: &Ssid, passphrase: &str, announced_mac: &str) -> Result
     Ok(())
 }
 
-/// Written by the sidecar rather than here - it holds the capabilities iwd's state directory
-/// needs. The body goes over stdin, never argv, keeping the passphrase out of `/proc`.
+const SIDECAR: &str = "carjack-wireless-helper";
+
 async fn write_profile(name: &str, body: &str) -> Result<()> {
-    let exe = sidecar_path()?;
-    let mut child = tokio::process::Command::new(&exe)
+    let mut child = tokio::process::Command::new(SIDECAR)
         .arg("wifi-profile")
         .arg(name)
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| eyre!("could not run {}: {e}", exe.display()))?;
+        .map_err(|e| eyre!("could not run {SIDECAR} (is it installed via `just install`?): {e}"))?;
     // Dropped before the wait, or the helper blocks on a pipe we still hold.
     let mut stdin = child.stdin.take().expect("stdin was piped");
     stdin.write_all(body.as_bytes()).await?;
@@ -170,32 +169,12 @@ async fn write_profile(name: &str, body: &str) -> Result<()> {
     let out = child.wait_with_output().await?;
     if !out.status.success() {
         return Err(eyre!(
-            "{} {}: {}",
-            exe.display(),
+            "{SIDECAR} {}: {}",
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
     Ok(())
-}
-
-/// Beside us, else one level up - a test binary lives in `target/debug/deps/`, the sidecar in
-/// `target/debug/`.
-fn sidecar_path() -> Result<PathBuf> {
-    const NAME: &str = "carjack-wireless-helper";
-    let exe = std::env::current_exe()?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| eyre!("carjack's own path has no parent directory"))?;
-    let beside = dir.join(NAME);
-    if beside.exists() {
-        return Ok(beside);
-    }
-    let up = dir.parent().map(|d| d.join(NAME));
-    match up {
-        Some(up) if up.exists() => Ok(up),
-        _ => Err(eyre!("{NAME} is not next to {}", exe.display())),
-    }
 }
 
 /// The provisioning file's contents; see [`provision`] for what each key does.
@@ -404,10 +383,14 @@ async fn rtnetlink_handle() -> Result<&'static rtnetlink::Handle> {
 
 /// Whether `iface` has a settled (non-tentative) link-local IPv6 address, queried over rtnetlink.
 async fn link_local_is_ready(iface: &str) -> Result<bool> {
-    let index = nix::net::if_::if_nametoindex(iface)
-        .map_err(|e| eyre!("if_nametoindex {iface}: {e}"))?;
+    let index =
+        nix::net::if_::if_nametoindex(iface).map_err(|e| eyre!("if_nametoindex {iface}: {e}"))?;
     let handle = rtnetlink_handle().await?;
-    let mut addresses = handle.address().get().set_link_index_filter(index).execute();
+    let mut addresses = handle
+        .address()
+        .get()
+        .set_link_index_filter(index)
+        .execute();
     while let Some(msg) = addresses
         .try_next()
         .await
