@@ -1,18 +1,18 @@
 set dotenv-load
 mod armbian
 
-# For local `just run`/`just test-run` only - the real deployment gets cap_net_admin from
-# carjack.service's AmbientCapabilities= instead. Either way carjack drops the capability itself
-# right after the one startup call that needs it (see src/caps.rs) - relinking drops the file
-# capability too, hence this runs after every build.
+# For local `just run`/`just test-run` only - the real deployment gets cap_net_admin via
+# carjack-hci-helper.service's AmbientCapabilities= instead (see carjack-hci-helper.service).
+# carjack itself never needs the capability; only the helper binary does. Relinking drops the file
+# capability, hence this runs after every build.
 [script]
 setcap:
-    binary="$(which carjack)"
+    binary="$(which carjack-hci-helper)"
     if [ -n "$binary" ]; then
         echo "Giving cap_net_admin to ${binary}"
         sudo setcap cap_net_admin+ep "$binary"
     else
-        echo "carjack not found in PATH, aborting"
+        echo "carjack-hci-helper not found in PATH, aborting"
         exit 1
     fi
 
@@ -25,9 +25,10 @@ toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BU
 cuda := env('CARJACK_CUDA', 'false')
 cuda_features := if cuda == 'true' { '--features cuda' } else { '' }
 
-# setcap follows build because relinking drops the capabilities.
+# setcap follows build because relinking drops the capabilities. carjack-hci-helper runs first
+# (best-effort - see its own doc comment) since carjack no longer sets the Class of Device itself.
 run +flags="": (install flags)
-    waydroid session stop && cargo run {{cuda_features}} {{flags}} < /dev/null
+    waydroid session stop && carjack-hci-helper; cargo run {{cuda_features}} {{flags}} < /dev/null
 
 #Run the app until timeout, then kill it and restore the original wifi connection
 [script('bash')]
@@ -52,6 +53,7 @@ test-run timeout="60" +flags="": (install flags)
     echo "Active connection before test: ${original:-none}" >&2
 
     waydroid session stop || true
+    carjack-hci-helper || true
     timeout --foreground --kill-after=5s "{{timeout}}s" cargo run {{cuda_features}} {{flags}} < /dev/null || true
 
 build +flags="":
@@ -60,13 +62,22 @@ build +flags="":
 install +flags="": (build flags) && setcap
     {{toolbox_build}}cargo install --path . {{cuda_features}} {{flags}}
 
-# Install carjack as a system service, with cap_net_admin via AmbientCapabilities= instead of
-# `just setcap`. Not ~/.cargo/bin: SELinux denies system services executing user_home_t files (see
-# carjack.service) - /usr/local/bin gets bin_t, which is permitted.
+# Install carjack as a system service, running as its own ephemeral `carjack` account (DynamicUser=,
+# not root, not the interactive user - see carjack.service). Setting the adapter's Class of Device
+# needs cap_net_admin; that lives entirely in carjack-hci-helper.service, a oneshot unit that runs
+# before carjack.service starts (see carjack-hci-helper.service) - carjack itself never holds the
+# capability. Not ~/.cargo/bin: SELinux denies system services executing user_home_t files (see
+# carjack.service) - /usr/local/bin gets bin_t, which is permitted. The polkit rule is required -
+# see carjack-polkit.rules for why. Desktop mode (source=desktop) needs a real logged-in user's
+# session and doesn't fit this account; run it as yourself instead (`just run`), not as this
+# service.
 [script]
 install-carjack-service: build
     sudo install -Dm755 target/debug/carjack /usr/local/bin/carjack
+    sudo install -Dm755 target/debug/carjack-hci-helper /usr/local/bin/carjack-hci-helper
     sudo install -Dm644 carjack.service /etc/systemd/system/carjack.service
+    sudo install -Dm644 carjack-hci-helper.service /etc/systemd/system/carjack-hci-helper.service
+    sudo install -Dm644 carjack-polkit.rules /etc/polkit-1/rules.d/49-carjack.rules
     sudo systemctl daemon-reload
     sudo systemctl enable --now carjack.service
     systemctl status carjack.service --no-pager

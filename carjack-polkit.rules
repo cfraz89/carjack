@@ -1,0 +1,14 @@
+// Installed by `just install-carjack-service`. The carjack service account has no logind
+// session, so NetworkManager's polkit actions for adding/activating/scanning WiFi connections
+// (see src/wifi_connect.rs) fall to their `allow_any` default, which is auth_admin - i.e. blocked
+// non-interactively. Grant them directly instead.
+polkit.addRule(function (action, subject) {
+    if (
+        subject.user == "carjack" &&
+        (action.id == "org.freedesktop.NetworkManager.network-control" ||
+            action.id == "org.freedesktop.NetworkManager.settings.modify.own" ||
+            action.id == "org.freedesktop.NetworkManager.wifi.scan")
+    ) {
+        return polkit.Result.YES;
+    }
+});

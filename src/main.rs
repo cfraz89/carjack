@@ -24,7 +24,6 @@ use crate::{
     wireless::{IapHost, wireless_carplay},
 };
 
-mod caps;
 mod libei;
 mod portal;
 mod usb;
@@ -90,7 +89,8 @@ impl Drop for DesktopApp {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     color_eyre::install()?;
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -100,22 +100,6 @@ fn main() -> Result<()> {
         )
         .init();
 
-    // Before the real runtime exists - see `wireless::apply_device_class`. A current-thread
-    // runtime never leaves the calling thread, so this stays confined to it; the multi-threaded
-    // runtime `async_main` builds spawns its worker pool afterward, once nothing is left to leak to
-    // them - capabilities are per-thread in Linux, inherited at thread-creation time.
-    apply_device_class();
-
-    async_main()
-}
-
-#[tokio::main(flavor = "current_thread")]
-async fn apply_device_class() {
-    wireless::apply_device_class().await;
-}
-
-#[tokio::main]
-async fn async_main() -> Result<()> {
     spawn_sigint_watchdog()?;
 
     let config = Config::load(&Cli::parse())?;
@@ -343,17 +327,22 @@ async fn connect_airplay_endpoint(
     mac_address: String,
 ) -> Result<libcarjack::airplay::AirPlayConnection> {
     tracing::info!("Connecting to AirPlay endpoint {addr}");
-    (move || libcarjack::airplay::connect_airplay(addr, remote_homekit_id, device_id.clone(), mac_address.clone()))
-        .retry(
-            ConstantBuilder::new()
-                .with_delay(AIRPLAY_CONNECT_DELAY)
-                .with_max_times(AIRPLAY_CONNECT_ATTEMPTS),
+    (move || {
+        libcarjack::airplay::connect_airplay(
+            addr,
+            remote_homekit_id,
+            device_id.clone(),
+            mac_address.clone(),
         )
-        .notify(|e, delay| {
-            tracing::warn!("AirPlay connect to {addr} failed ({e}); retry in {delay:?}")
-        })
-        .await
-        .map_err(|e| eyre!("AirPlay endpoint {addr} never came up: {e}"))
+    })
+    .retry(
+        ConstantBuilder::new()
+            .with_delay(AIRPLAY_CONNECT_DELAY)
+            .with_max_times(AIRPLAY_CONNECT_ATTEMPTS),
+    )
+    .notify(|e, delay| tracing::warn!("AirPlay connect to {addr} failed ({e}); retry in {delay:?}"))
+    .await
+    .map_err(|e| eyre!("AirPlay endpoint {addr} never came up: {e}"))
 }
 
 /// Run the Bluetooth -> WiFi -> AirPlay flow and return once AirPlay is connected. Shared by both
@@ -442,14 +431,14 @@ async fn establish_carplay(host: Arc<IapHost>, bt_device: &str) -> Result<Establ
             }
         }
     };
-    let (endpoint, remote_homekit_id) = picked.ok_or_else(|| {
-        eyre!("Car neither invited us nor named an AirPlay receiver")
-    })?;
+    let (endpoint, remote_homekit_id) =
+        picked.ok_or_else(|| eyre!("Car neither invited us nor named an AirPlay receiver"))?;
     // Either source's address comes from the car itself, so it can be link-local.
     let endpoint = with_scope_id(endpoint, &car_wifi.iface);
 
     let mac_address = crate::wifi_connect::get_wifi_mac().await?;
-    let conn = connect_airplay_endpoint(endpoint, remote_homekit_id, bluetooth_id, mac_address).await?;
+    let conn =
+        connect_airplay_endpoint(endpoint, remote_homekit_id, bluetooth_id, mac_address).await?;
     Ok(Established {
         conn,
         carplay_handle,

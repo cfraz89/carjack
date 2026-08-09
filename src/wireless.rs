@@ -1,4 +1,3 @@
-use std::io::{Read, Write};
 use std::{sync::Arc, time::Duration};
 use tap::TapFallible;
 use thiserror::Error;
@@ -18,28 +17,10 @@ use libcarjack::{
     carplay_session::{DeviceIdentity, WifiCredentials},
     uuid::{CARPLAY_DEVICE_UUID, IAP_DEVICE_UUID},
 };
-use socket2::{Domain, Protocol, SockAddr, SockAddrStorage, Socket, Type, socklen_t};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use tokio_stream::StreamExt;
 
 use crate::wifi_connect::get_wifi_mac;
-
-const AF_BLUETOOTH: i32 = 31;
-const BTPROTO_HCI: i32 = 1;
-const HCI_CHANNEL_CONTROL: u16 = 3;
-const MGMT_INDEX_NONE: u16 = 0xffff;
-const MGMT_OP_SET_DEV_CLASS: u16 = 0x000E;
-
-/// `SET_DEV_CLASS` takes `[major, minor]`, not the raw 3-byte CoD - the kernel derives the
-/// service-class byte from the enabled UUIDs. Phone / Smartphone, from an iPhone's `0x7a020c`.
-const CARPLAY_DEV_CLASS: [u8; 2] = [0x02, 0x0c];
-
-#[repr(C)]
-struct SockAddrHci {
-    family: u16,
-    dev: u16,
-    channel: u16,
-}
 
 const IAP_CHANNEL: u16 = 1;
 
@@ -98,125 +79,6 @@ fn carplay_profile() -> rfcomm::Profile {
     }
 }
 
-/// Give the adapter an iPhone-like Class of Device. Needs `CAP_NET_ADMIN` for the raw
-/// `AF_BLUETOOTH`/HCI control socket - granted to the whole process (systemd's
-/// `AmbientCapabilities=`, or `just setcap` for local runs).
-///
-/// Called from `main`, on a throwaway current-thread runtime, before the real multi-threaded
-/// runtime is built - not from `IapHost::start`. Capabilities are per-thread in Linux, inherited at
-/// thread-creation time; the multi-threaded runtime's worker pool is spawned as part of building
-/// it, so anything holding the capability at that point leaks it to every worker, and dropping it
-/// later from async code (which could run on any of those workers) never reaches the thread
-/// `/proc/<pid>/root` checks against. A current-thread runtime never leaves the calling thread, so
-/// running this - and dropping the capability - on one before the real runtime exists keeps it
-/// confined to the one thread that ever had it. Best-effort: skipping it just leaves the unit
-/// seeing a plain computer.
-pub(crate) async fn apply_device_class() {
-    let result = async {
-        let session = Session::new().await?;
-        let adapter = session.default_adapter().await?;
-        let index = adapter
-            .name()
-            .strip_prefix("hci")
-            .and_then(|index| index.parse().ok())
-            .ok_or_else(|| eyre!("unexpected adapter name {:?}, expected `hci<N>`", adapter.name()))?;
-        send_mgmt_command(index, MGMT_OP_SET_DEV_CLASS, &CARPLAY_DEV_CLASS)
-    }
-    .await;
-
-    if let Err(e) = crate::caps::mark_dumpable() {
-        tracing::debug!(?e, "prctl(PR_SET_DUMPABLE) failed");
-    }
-    if let Err(e) = crate::caps::drop_all() {
-        tracing::warn!(
-            ?e,
-            "Could not drop capabilities after startup; carjack may stay non-dumpable, which \
-             breaks xdg-desktop-portal in desktop mode"
-        );
-    }
-    match result {
-        Ok(()) => tracing::info!("Applied iPhone Class of Device"),
-        Err(e) => tracing::warn!(
-            ?e,
-            "Could not set the adapter's Class of Device; continuing without it (try `just setcap`)"
-        ),
-    }
-}
-
-/// Open the HCI control socket, send one mgmt command, and wait (up to 5s) for the matching
-/// CmdComplete. Blocking - see `set_device_class`.
-fn send_mgmt_command(adapter_index: u16, opcode: u16, payload: &[u8]) -> Result<()> {
-    let socket = Socket::new(
-        Domain::from(AF_BLUETOOTH),
-        Type::RAW,
-        Some(Protocol::from(BTPROTO_HCI)),
-    )?;
-    socket.bind(&hci_control_addr())?;
-    // Bound wait for the response; surfaces as EAGAIN/EWOULDBLOCK on expiry.
-    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
-
-    let mut packet = Vec::with_capacity(6 + payload.len());
-    packet.extend_from_slice(&opcode.to_le_bytes());
-    packet.extend_from_slice(&adapter_index.to_le_bytes());
-    packet.extend_from_slice(&(payload.len() as u16).to_le_bytes());
-    packet.extend_from_slice(payload);
-    // mgmt is message-oriented: the kernel takes the whole command or none of it. A short write
-    // means it took none - which is how an *untrusted* socket is refused (the permission-denied
-    // path returns 0 rather than an error), i.e. we're missing CAP_NET_ADMIN.
-    let written = (&socket).write(&packet)?;
-    if written != packet.len() {
-        return Err(eyre!(
-            "kernel accepted {written}/{} bytes of mgmt command {opcode:#06x} - the HCI control \
-             socket is untrusted (missing cap_net_admin?)",
-            packet.len()
-        ));
-    }
-
-    let mut buf = [0u8; 1024];
-    loop {
-        let len = (&socket).read(&mut buf)?;
-        if len < 6 {
-            return Err(eyre!("mgmt read too short ({len} bytes)"));
-        }
-        let rsp_opcode = u16::from_le_bytes([buf[0], buf[1]]);
-        let evt_len = u16::from_le_bytes([buf[4], buf[5]]) as usize;
-        if len < 6 + evt_len {
-            return Err(eyre!("mgmt payload shorter than its declared length"));
-        }
-        // Wait for a CmdComplete (evt 0x0001) for our opcode.
-        if rsp_opcode == 0x0001 && evt_len >= 3 {
-            let completed_opcode = u16::from_le_bytes([buf[6], buf[7]]);
-            let status = buf[8];
-            if completed_opcode != opcode {
-                continue;
-            }
-            if status != 0x00 {
-                return Err(eyre!("MGMT command failed (status={status})"));
-            }
-            return Ok(());
-        }
-    }
-}
-
-/// `sockaddr_hci` bound to the mgmt control channel. The mgmt protocol addresses the adapter
-/// per-command (the index in the packet header), so the socket itself binds `HCI_DEV_NONE`.
-///
-/// This is the one spot `socket2` can't cover: it has no typed constructor for a Bluetooth
-/// sockaddr, so the storage has to be filled in by hand.
-fn hci_control_addr() -> SockAddr {
-    let mut storage = SockAddrStorage::zeroed();
-    // SAFETY: `SockAddrHci` is a `repr(C)` `sockaddr_hci`, smaller than `sockaddr_storage`, and we
-    // declare the matching length below - so the kernel reads exactly the bytes we wrote.
-    unsafe {
-        *storage.view_as::<SockAddrHci>() = SockAddrHci {
-            family: AF_BLUETOOTH as u16,
-            dev: MGMT_INDEX_NONE,
-            channel: HCI_CHANNEL_CONTROL,
-        };
-        SockAddr::new(storage, size_of::<SockAddrHci>() as socklen_t)
-    }
-}
-
 /// What carjack calls itself in `RequestAccessoryWiFiConfiguration` - the adapter's Bluetooth
 /// address, colon-separated and uppercase. The bike answers only this form, not a zero-padded
 /// 24-character one.
@@ -268,7 +130,8 @@ impl IapHost {
             }
         });
 
-        // Class of Device is set earlier, in `main`, before this - see `apply_device_class`.
+        // Class of Device is set before carjack even starts, by carjack-hci-helper.service
+        // (src/bin/carjack-hci-helper.rs) running ahead of carjack.service.
         tracing::info!("Registered iAP and CarPlay profiles");
 
         Ok(Self {

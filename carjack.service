@@ -1,33 +1,15 @@
 [Unit]
 Description=carjack - wireless CarPlay bridge
-After=network.target bluetooth.target NetworkManager.service
-Wants=bluetooth.target NetworkManager.service
+After=network.target bluetooth.target NetworkManager.service carjack-hci-helper.service
+Wants=bluetooth.target NetworkManager.service carjack-hci-helper.service
 
 [Service]
 Type=simple
-User=chris
-# Not ~/.cargo/bin: SELinux denies system services (init_t) executing user_home_t files -
-# confirmed via `ausearch -m avc`, `avc: denied { execute } ... scontext=...init_t ...
-# tcontext=...user_home_t`. /usr/local/bin gets bin_t by default (verified with
-# `install -Dm755`, then `ls -Z`), which init_t is permitted to execute. Install with
-# `just install-carjack-service`.
+DynamicUser=yes
+User=carjack
+StateDirectory=carjack
+Environment=HOME=/var/lib/carjack
 ExecStart=/usr/local/bin/carjack
-
-# The one thing carjack needs elevated: setting the Bluetooth adapter's Class of Device over a raw
-# HCI mgmt socket (see src/wireless.rs). main() does this on a throwaway current-thread runtime
-# before building the real one, then drops every capability (src/caps.rs) - capabilities are
-# per-thread in Linux, so this has to happen before the real runtime's worker pool exists, or
-# they'd inherit it too. AmbientCapabilities just gets it there without a separate sidecar process.
-AmbientCapabilities=CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_ADMIN
-NoNewPrivileges=yes
-
-# Desktop mode (source=desktop) reaches the user's session bus for xdg-desktop-portal and the
-# user's Wayland socket to probe output scale - a system unit gets neither by default. Not needed
-# for the default mode, which renders through carjack's own internal headless compositor.
-Environment=XDG_RUNTIME_DIR=/run/user/%U
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
-Environment=WAYLAND_DISPLAY=wayland-0
 
 Restart=on-failure
 RestartSec=5
