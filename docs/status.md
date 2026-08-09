@@ -1,10 +1,30 @@
 # Where things stand
 
-**Last updated: 2026-08-07.** This is the living document - if it disagrees with
+**Last updated: 2026-08-09.** This is the living document - if it disagrees with
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
 
-## The goal
+## Reverted: back to NetworkManager, not iwd (2026-08-09)
+
+`main` goes through `nm-automata` again; the `iwd` work (`wifi_connect.rs` against
+`iwd-automata`, the `carjack-wireless-helper wifi-profile` sidecar path, the whole
+patched-iwd build pipeline) moved to the `iwd-backend` branch rather than being carried
+forward or deleted.
+
+The bench unit's HE-downgrade disconnect (see "Changed: WiFi goes through iwd" below) is real
+and driver-agnostic, but the fix does not need iwd specifically - wpa_supplicant has had
+per-network `disable_ht`/`disable_vht`/`disable_he`/`disable_eht` config keys for a while, and
+`nm-disable-modes.patch` (this repo) adds the missing piece, four `NMSettingWireless`
+properties (`disable-ht`/`-vht`/`-he`/`-eht`) that forward them to wpa_supplicant the same way
+`hidden` or `ap-isolation` do. Builds and compiles clean against a real NetworkManager
+checkout; not yet deployed.
+
+`wifi_connect.rs`'s retry-with-DisableHE mechanism carries over: `car_profile` sets
+`disable-he` through `WirelessSetting::other` (the generated binding's catch-all map for
+properties it doesn't have a typed field for) rather than a typed setter, since picking that
+up for real needs `nm-automata` regenerated against a patched NetworkManager - not done yet,
+so this is unverified against a live daemon. `other` is real plumbing, not a hack: it's what
+`nm-automata` round-trips unknown settings through by design.
 
 A wireless CarPlay bridge that impersonates an iPhone to a car head unit: Bluetooth iAP2 to
 authenticate and get handed the car's WiFi credentials, then CarPlay video over that WiFi via

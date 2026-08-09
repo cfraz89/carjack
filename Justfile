@@ -5,11 +5,11 @@ mod armbian
 setcap:
     binary="$(which carjack-wireless-helper)"
     if [ -n "$binary" ]; then
-        echo "Giving cap_chown,cap_dac_override,cap_net_admin to ${binary}"
-        sudo setcap cap_chown,cap_dac_override,cap_net_admin+ep "$binary"
+        echo "Giving cap_net_admin to ${binary}"
+        sudo setcap cap_net_admin+ep "$binary"
     else
         echo "carjack-wireless-helper not found in PATH, aborting"
-        exit 1 
+        exit 1
     fi
 
 toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }
@@ -29,27 +29,23 @@ run +flags="": (install flags)
 [script('bash')]
 test-run timeout="60" +flags="": (install flags)
     set -uo pipefail
-    dev=""
-    for d in /sys/class/net/*; do
-        if [ -e "$d/phy80211" ]; then dev=$(basename "$d"); break; fi
-    done
-    connected() {
-        iwctl station "$dev" show 2>/dev/null \
-            | sed -e 's/\x1b\[[0-9;]*m//g' -n -e 's/^ *Connected network  *//p' \
-            | sed -e 's/[[:space:]]*$//' -e 1q
-    }
     original=""
     cleanup() {
-        if [ -n "$original" ] && [ "$(connected)" != "$original" ]; then
-            echo "Restoring original connection: $original" >&2
-            timeout --foreground --kill-after=5s 20s iwctl station "$dev" connect "$original" >/dev/null 2>&1 || true
+        # Anchored: unanchored, this matches *any* process whose command line merely contains the
+        # path - a tail on the log, an editor, a wrapper script driving this recipe - and kills it.
+        if [ -n "$original" ]; then
+            current=$(nmcli -t -f NAME,ACTIVE connection show --active 2>/dev/null | awk -F: '$2=="yes"{print $1; exit}')
+            if [ "$current" != "$original" ]; then
+                echo "Restoring original connection: $original" >&2
+                timeout --foreground --kill-after=5s 10s nmcli connection up id "$original" >/dev/null 2>&1 || true
+            fi
         fi
     }
     trap cleanup EXIT
     trap cleanup ERR
 
-    original=$(connected)
-    echo "Active connection before test: ${original:-none} (on ${dev:-no wireless device})" >&2
+    original=$(nmcli -t -f NAME,TYPE,ACTIVE connection show --active 2>/dev/null | awk -F: '$2!="loopback" && $3=="yes" {print $1; exit}')
+    echo "Active connection before test: ${original:-none}" >&2
 
     waydroid session stop || true
     timeout --foreground --kill-after=5s "{{timeout}}s" cargo run {{cuda_features}} {{flags}} < /dev/null || true

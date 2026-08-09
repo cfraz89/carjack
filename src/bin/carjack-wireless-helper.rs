@@ -1,15 +1,9 @@
-//! `carjack-wireless-helper` - carjack's privileged one-shot sidecar. Capabilities are granted out
-//! of band (`just setcap`); without them a subcommand exits non-zero.
-//!
-//! - `device-class` sets an iPhone-like Class of Device. Needs `CAP_NET_ADMIN` for the raw
-//!   `AF_BLUETOOTH`/HCI control socket. Best-effort: unset, the unit just sees a plain computer.
-//! - `wifi-profile <name>` writes one iwd provisioning file, body on stdin. Needs
-//!   `CAP_DAC_OVERRIDE` and `CAP_CHOWN` - see [`write_profile`].
+//! `carjack-wireless-helper` - carjack's privileged one-shot sidecar. Sets an iPhone-like Class of
+//! Device (mgmt `SET_DEV_CLASS`), which needs a raw `AF_BLUETOOTH`/HCI control socket and so
+//! `CAP_NET_ADMIN`. The capability is granted out of band (`just setcap`); without it this exits
+//! non-zero and carjack carries on unadorned.
 
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -33,11 +27,6 @@ struct SockAddrHci {
     channel: u16,
 }
 
-/// Where iwd keeps provisioning files if `Daemon.GetInfo` doesn't say.
-const DEFAULT_STATE_DIR: &str = "/var/lib/iwd";
-
-const MAX_PROFILE_BYTES: u64 = 64 * 1024;
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     match run().await {
@@ -51,13 +40,9 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let subcommand = args.next().unwrap_or_default();
-    match (subcommand.as_str(), args.next(), args.next()) {
-        ("device-class", None, _) => set_device_class().await,
-        ("wifi-profile", Some(name), None) => write_profile(&name).await,
-        _ => bail!(
-            "usage: carjack-wireless-helper device-class | wifi-profile <name> (body on stdin)"
-        ),
+    match args.next().as_deref() {
+        Some("device-class") => set_device_class().await,
+        _ => bail!("usage: carjack-wireless-helper device-class"),
     }
 }
 
@@ -67,103 +52,6 @@ async fn set_device_class() -> Result<()> {
     let adapter_index = default_adapter_index().await?;
     send_mgmt_command(adapter_index, MGMT_OP_SET_DEV_CLASS, &CARPLAY_DEV_CLASS)
         .wrap_err("SET_DEV_CLASS failed")?;
-    Ok(())
-}
-
-/// Write one iwd provisioning file, body on stdin, into iwd's state directory.
-///
-/// `CAP_DAC_OVERRIDE` gets past the directory (root-owned 0700); `CAP_CHOWN` makes the result
-/// root's, which iwd needs since it runs uid 0 without `CAP_DAC_OVERRIDE`.
-///
-/// The directory comes from `Daemon.GetInfo`, not argv, so this can't be aimed elsewhere.
-async fn write_profile(name: &str) -> Result<()> {
-    check_profile_name(name)?;
-    let mut body = String::new();
-    std::io::stdin()
-        .take(MAX_PROFILE_BYTES)
-        .read_to_string(&mut body)
-        .wrap_err("reading the profile from stdin")?;
-    if body.is_empty() {
-        bail!("refusing to write an empty profile");
-    }
-    let path = state_directory().await.join(name);
-    write_atomically(&path, &body).wrap_err_with(|| format!("writing {}", path.display()))
-}
-
-/// `GetInfo`'s `StateDirectory` is optional, hence the fallback.
-async fn state_directory() -> PathBuf {
-    let reported = async {
-        let connection = zbus::Connection::system().await.ok()?;
-        let info = iwd_automata::DaemonProxy::new(&connection)
-            .await
-            .ok()?
-            .get_info()
-            .await
-            .ok()?;
-        info.state_directory
-    }
-    .await;
-    PathBuf::from(reported.unwrap_or_else(|| DEFAULT_STATE_DIR.to_owned()))
-}
-
-/// Only what iwd names a WPA-PSK profile. `/`, `.` and `..` are outside both alphabets, so a name
-/// that passes cannot leave the state directory - this is the security boundary of the capability.
-fn check_profile_name(name: &str) -> Result<()> {
-    let stem = name
-        .strip_suffix(".psk")
-        .ok_or_else(|| eyre!("{name:?} is not a .psk profile"))?;
-    if let Some(hex) = stem.strip_prefix('=') {
-        if hex.is_empty()
-            || hex.len() % 2 != 0
-            || !hex
-                .bytes()
-                .all(|b| b.is_ascii_digit() || b"abcdef".contains(&b))
-        {
-            bail!("{name:?} is not iwd's `=<lowercase hex>.psk` form");
-        }
-        return Ok(());
-    }
-    if stem.is_empty()
-        || stem.len() > 32
-        || !stem
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b' '))
-    {
-        bail!("{name:?} is not a literal iwd profile name");
-    }
-    Ok(())
-}
-
-/// Temp file then rename, so iwd's inotify watch never sees a partial file. Write and `fchown`
-/// both land before the rename, since iwd loads on that event.
-fn write_atomically(path: &Path, body: &str) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    // Dot-prefixed so iwd, which reads a file's security type after the first dot, ignores it.
-    let temp = dir.join(format!(".carjack-{}.tmp", std::process::id()));
-    let write = || -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600) // Not world-readable - holds the car's passphrase.
-            .open(&temp)?;
-        file.write_all(body.as_bytes())?;
-        file.sync_all()?;
-        give_to_root(&file)
-    };
-    if let Err(e) = write().and_then(|()| std::fs::rename(&temp, path)) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(e);
-    }
-    Ok(())
-}
-
-/// By descriptor rather than path, so it can't be redirected between the write and the chown.
-fn give_to_root(file: &std::fs::File) -> std::io::Result<()> {
-    // SAFETY: `file` owns a valid descriptor for the duration of the call.
-    if unsafe { libc::fchown(file.as_raw_fd(), 0, 0) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
     Ok(())
 }
 
@@ -266,48 +154,5 @@ fn hci_control_addr() -> SockAddr {
             channel: HCI_CHANNEL_CONTROL,
         };
         SockAddr::new(storage, size_of::<SockAddrHci>() as socklen_t)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    /// The name is the only part of the destination a caller controls.
-    #[test]
-    fn check_profile_name_refuses_anything_that_leaves_the_state_directory() {
-        for name in [
-            "../../etc/shadow.psk",
-            "..psk",
-            "/etc/passwd.psk",
-            "sub/dir.psk",
-            ".hidden.psk",
-            "car.plaý.psk", // a dot in the stem: iwd splits the suffix at the *first* one
-            "=6361722E706C6179.psk", // upper-case hex is not what iwd re-derives
-            "=636.psk",     // odd number of hex digits
-            "=.psk",
-            ".psk",
-            "carplay_wifi_36A7",      // no suffix
-            "carplay_wifi_36A7.open", // the wrong security type
-            "carjack.tmp",
-        ] {
-            assert!(
-                super::check_profile_name(name).is_err(),
-                "{name:?} must be refused"
-            );
-        }
-        assert!(super::check_profile_name(&format!("{}.psk", "a".repeat(33))).is_err());
-    }
-
-    /// And what `network_file_name` actually produces must survive the check.
-    #[test]
-    fn check_profile_name_accepts_what_iwd_names_a_psk_profile() {
-        for name in [
-            "carplay_wifi_36A7.psk",
-            "My Network-1.psk",
-            "=6361722e706c61c3bd.psk",
-            &format!("{}.psk", "a".repeat(32)),
-        ] {
-            super::check_profile_name(name)
-                .unwrap_or_else(|e| panic!("{name:?} must be accepted: {e}"));
-        }
     }
 }
