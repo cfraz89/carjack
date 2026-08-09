@@ -24,6 +24,7 @@ use crate::{
     wireless::{IapHost, wireless_carplay},
 };
 
+mod caps;
 mod libei;
 mod portal;
 mod usb;
@@ -89,8 +90,7 @@ impl Drop for DesktopApp {
     }
 }
 
-#[tokio::main()]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     color_eyre::install()?;
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -100,6 +100,22 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Before the real runtime exists - see `wireless::apply_device_class`. A current-thread
+    // runtime never leaves the calling thread, so this stays confined to it; the multi-threaded
+    // runtime `async_main` builds spawns its worker pool afterward, once nothing is left to leak to
+    // them - capabilities are per-thread in Linux, inherited at thread-creation time.
+    apply_device_class();
+
+    async_main()
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn apply_device_class() {
+    wireless::apply_device_class().await;
+}
+
+#[tokio::main]
+async fn async_main() -> Result<()> {
     spawn_sigint_watchdog()?;
 
     let config = Config::load(&Cli::parse())?;

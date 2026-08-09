@@ -11,3 +11,4 @@ logs/
 .claude/worktrees
 logs/
 Justfile.local
+.cargo/config.toml

@@ -5,16 +5,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use eyre::{Result, eyre};
 use futures::StreamExt;
 use nm_automata::{
-    ActivationStateFlags, ActiveConnectionState, ActiveProxy, AssignedMacAddress, ConnectionProfile,
-    ConnectionSetting, DeviceProxy, DeviceState, DeviceType,
-    Ipv4Method, Ipv4Setting, Ipv6Method, Ipv6Setting, MacAddress, NetworkManagerProxy, NonEmpty,
-    ProxyExt, Ssid, WirelessBand, WirelessMode, WirelessProxy, WirelessSecurityKeyMgmt,
-    WirelessSecuritySetting, WirelessSetting,
+    ActivationStateFlags, ActiveConnectionState, ActiveProxy, AssignedMacAddress,
+    ConnectionProfile, ConnectionSetting, DeviceProxy, DeviceState, DeviceType, Ipv4Method,
+    Ipv4Setting, Ipv6Method, Ipv6Setting, MacAddress, NetworkManagerProxy, NonEmpty, ProxyExt,
+    Ssid, WirelessProxy, WirelessSecurityKeyMgmt, WirelessSecuritySetting, WirelessSetting,
 };
 use std::net::IpAddr;
 use std::time::Duration;
+use tap::TapFallible;
 use tokio::sync::OnceCell;
-use zbus::zvariant::{OwnedValue, Value};
 
 /// How long to give NetworkManager to bring the car's connection all the way up before treating
 /// the attempt as failed and retrying it. Association plus DHCP is a couple of seconds when it
@@ -114,14 +113,10 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
             .map_err(|_| eyre!("Timed out bringing up the car's WiFi connection"))
             .and_then(|r| r)
         {
-            if let Err(e) = conn.delete().await {
-                tracing::debug!(?e, "Could not delete the profile of a failed attempt");
-            }
-            if !disable_he.swap(true, Ordering::Relaxed) {
-                tracing::info!(
-                    "Retrying with 802-11-wireless.disable-he, in case that's why"
-                );
-            }
+            conn.delete()
+                .await
+                .tap_err(|e| tracing::debug!(?e, "Could not delete the profile of a failed attempt"))
+                .ok();
             return Err(e);
         }
         // The whole point of pinning the profile's address is that the accessory sees the station
@@ -145,7 +140,12 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
     .retry(ConstantBuilder::new().with_delay(Duration::from_secs(2)))
     // Each attempt leaves another in-memory profile behind, so a silent retry looks like nothing
     // more than a duplicate "Connection created" line.
-    .notify(|e, _| tracing::warn!("Bringing up the car's WiFi failed ({e}); retrying"))
+    .notify(|e, _| {
+        if !disable_he.swap(true, Ordering::Relaxed) {
+            tracing::info!("Retrying with 802-11-wireless.disable-he, in case that's why");
+        }
+        tracing::warn!("Bringing up the car's WiFi failed ({e}); retrying")
+    })
     .await
 }
 
@@ -218,39 +218,21 @@ fn same_ap(existing: &ConnectionProfile, wanted: &ConnectionProfile) -> bool {
 
 /// The connection profile for the car's access point.
 ///
-/// `disable_he` goes through `WirelessSetting::other` rather than a typed field - this binding is
-/// generated from NetworkManager's own spec, and picking that up for real needs a patched
-/// NetworkManager plus a regenerated `nm-automata` (see `nm-disable-modes.patch`). The property
-/// name is exactly what that patch defines, so it forwards correctly once the daemon understands
-/// it, and is silently ignored as an unknown property otherwise.
+/// `disable_he` needs a patched NetworkManager (see `nm-disable-modes.patch`) plus an
+/// `nm-automata` regenerated against it — otherwise the daemon just drops it as an unknown
+/// property.
 fn car_profile(
     ssid: &str,
     passphrase: &str,
     announced_mac: AssignedMacAddress,
     disable_he: bool,
 ) -> ConnectionProfile {
-    let mut wireless = WirelessSetting::default()
+    let wireless = WirelessSetting::default()
         .ssid(ssid)
-        .mode(WirelessMode::Infrastructure)
-        .band(WirelessBand::A)
         .hidden(true)
-        // The accessory is told our station address over iAP2 before we associate, so the address
-        // it is told has to be the one it then sees. NetworkManager randomises per profile by
-        // default, and this profile is new every session - pin it to the address we
-        // announced in 0x4300, or the accessory waits for a station that never appears.
-        .assigned_mac_address(announced_mac);
-    if disable_he {
-        wireless.other.insert(
-            "disable-he".to_owned(),
-            OwnedValue::try_from(Value::from(true)).expect("a bool always converts"),
-        );
-    }
+        .assigned_mac_address(announced_mac)
+        .disable_he(disable_he);
     ConnectionProfile::new(ssid)
-        // Never let NetworkManager bring this up on its own. carjack activates it deliberately,
-        // once, with an address it has just announced over iAP2; an autoconnecting profile
-        // associates outside that sequence - possibly a stale one from an earlier session, with a
-        // different pinned address - and the accessory then sees a station it was never promised.
-        // A leftover autoconnecting profile has caused this before (see docs/status.md).
         .connection(ConnectionSetting::default().autoconnect(false))
         .wireless(wireless)
         .wireless_security(
@@ -259,23 +241,9 @@ fn car_profile(
                 .psk(passphrase),
         )
         .ipv4(Ipv4Setting::default().method(Ipv4Method::Auto))
-        // Link-local rather than `auto`: the car answers no router solicitation, so SLAAC would only
-        // ever time out, and the AirPlay address it hands us over iAP2 is link-local anyway. It also
-        // makes NetworkManager's `IP6_READY` mean exactly "the link-local address is usable".
         .ipv6(Ipv6Setting::default().method(Ipv6Method::LinkLocal))
 }
 
-/// Wait until the activation has both address families configured.
-///
-/// **Both flags, not just `Activated`**: NetworkManager reports a connection activated once one
-/// address family has succeeded, so waiting on the state alone hands back a connection whose
-/// `Ip4Config` is still `/`. carjack uses each of them - the DHCP address and gateway to reach
-/// AirPlay by route, the link-local as the source address that reaches it directly.
-///
-/// `IP6_READY` is what replaces watching duplicate-address detection by hand: with
-/// `ipv6.method=link-local` NetworkManager's IPv6 stage is precisely "bring the link-local address
-/// up", and it is not reported complete while that address is still tentative - which is what a
-/// link-local destination cannot be reached without.
 async fn wait_for_activation(active: &ActiveProxy<'_>) -> Result<()> {
     let configured = ActivationStateFlags::IP4_READY | ActivationStateFlags::IP6_READY;
     let mut flag_changes = active.receive_state_flags_changed().await;
@@ -520,25 +488,18 @@ mod tests {
         });
     }
 
-    /// `disable_he` has no typed field - see `car_profile` - so this is the only thing that would
-    /// catch a typo in the property name or a broken `other`-map round trip.
     #[test]
-    fn car_profile_forwards_disable_he_through_the_other_map() {
+    fn car_profile_sets_disable_he() {
         let profile = super::car_profile(
             "carjack-profile-check",
             "hunter2hunter2",
             AssignedMacAddress::Permanent,
             true,
         );
-        let wireless = profile.wireless.expect("no wireless setting");
-        let value: bool = wireless
-            .other
-            .get("disable-he")
-            .expect("disable-he missing from the other map")
-            .clone()
-            .try_into()
-            .expect("disable-he was not a bool");
-        assert!(value);
+        assert_eq!(
+            profile.wireless.expect("no wireless setting").disable_he,
+            Some(true)
+        );
 
         let profile = super::car_profile(
             "carjack-profile-check",
@@ -546,12 +507,9 @@ mod tests {
             AssignedMacAddress::Permanent,
             false,
         );
-        assert!(
-            !profile
-                .wireless
-                .expect("no wireless setting")
-                .other
-                .contains_key("disable-he")
+        assert_eq!(
+            profile.wireless.expect("no wireless setting").disable_he,
+            Some(false)
         );
     }
 }

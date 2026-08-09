@@ -2385,7 +2385,6 @@ dependencies = [
 [[package]]
 name = "nm-automata"
 version = "0.1.0"
-source = "git+ssh://git@github.com/cfraz89/nm-automata.git#dd9901c4725d7d2085103ef275c0dca2f85e4830"
 dependencies = [
  "bitflags",
  "futures-util",

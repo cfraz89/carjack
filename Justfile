@@ -1,14 +1,18 @@
 set dotenv-load
 mod armbian
 
+# For local `just run`/`just test-run` only - the real deployment gets cap_net_admin from
+# carjack.service's AmbientCapabilities= instead. Either way carjack drops the capability itself
+# right after the one startup call that needs it (see src/caps.rs) - relinking drops the file
+# capability too, hence this runs after every build.
 [script]
 setcap:
-    binary="$(which carjack-wireless-helper)"
+    binary="$(which carjack)"
     if [ -n "$binary" ]; then
         echo "Giving cap_net_admin to ${binary}"
         sudo setcap cap_net_admin+ep "$binary"
     else
-        echo "carjack-wireless-helper not found in PATH, aborting"
+        echo "carjack not found in PATH, aborting"
         exit 1
     fi
 
@@ -55,6 +59,17 @@ build +flags="":
 
 install +flags="": (build flags) && setcap
     {{toolbox_build}}cargo install --path . {{cuda_features}} {{flags}}
+
+# Install carjack as a system service, with cap_net_admin via AmbientCapabilities= instead of
+# `just setcap`. Not ~/.cargo/bin: SELinux denies system services executing user_home_t files (see
+# carjack.service) - /usr/local/bin gets bin_t, which is permitted.
+[script]
+install-carjack-service: build
+    sudo install -Dm755 target/debug/carjack /usr/local/bin/carjack
+    sudo install -Dm644 carjack.service /etc/systemd/system/carjack.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now carjack.service
+    systemctl status carjack.service --no-pager
 
 # Run cargo tests
 test +flags="":
