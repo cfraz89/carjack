@@ -39,9 +39,6 @@ const ADDRESS_POLL: Duration = Duration::from_millis(200);
 const POWER_UP_TIMEOUT: Duration = Duration::from_secs(10);
 const POWER_UP_POLL: Duration = Duration::from_millis(200);
 
-/// Where iwd keeps provisioning files if `Daemon.GetInfo` doesn't say.
-const DEFAULT_STATE_DIR: &str = "/var/lib/iwd";
-
 static IWD: OnceCell<zbus::Connection> = OnceCell::const_new();
 
 /// The system bus connection every iwd proxy is built on. Held for the process's life, since
@@ -61,6 +58,10 @@ pub(crate) struct IwdBackend;
 impl WifiBackend for IwdBackend {
     async fn get_wifi_mac(&self) -> Result<String> {
         get_wifi_mac().await
+    }
+
+    async fn check_ready(&self) -> Result<()> {
+        check_writable().await
     }
 
     async fn connect_to_car_wifi(
@@ -152,21 +153,43 @@ async fn provision(
              true in /etc/iwd/main.conf); proceeding anyway to see if DHCP is actually needed"
         );
     }
-    let dir = PathBuf::from(info.state_directory.as_deref().unwrap_or(DEFAULT_STATE_DIR));
+    let dir = state_directory(&info)?;
     let body = provisioning_file(passphrase, announced_mac, disable_he);
     let name = network_file_name(ssid);
     let path = dir.join(&name);
     check_profile_name(&name)?;
-    write_profile(&path, &body).await.map_err(|e| {
-        eyre!(
-            "Could not provision {}: {e}. carjack needs CAP_DAC_OVERRIDE to write iwd's state \
-             directory (root-owned, mode 0700) and CAP_CHOWN to leave the profile owned by \
-             root, which is the only way iwd can read it back - see carjack.service's \
-             AmbientCapabilities (only granted there, not to a plain `just run`)",
-            path.display()
-        )
-    })?;
+    write_profile(&path, &body)
+        .await
+        .map_err(|_| cannot_write(&dir))?;
     tracing::info!(path = %path.display(), "Provisioned the car's network for iwd");
+    Ok(())
+}
+
+fn state_directory(info: &iwd_automata::DaemonInfo) -> Result<PathBuf> {
+    info.state_directory
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            eyre!("iwd did not report a state directory (Daemon.GetInfo has no StateDirectory)")
+        })
+}
+
+fn cannot_write(dir: &std::path::Path) -> eyre::Report {
+    eyre!(
+        "Cannot write {}; iwd backend requires to run carjack through the systemd service, or as root",
+        dir.display()
+    )
+}
+
+/// Confirm carjack can provision iwd's state directory before anything tries to join the car.
+async fn check_writable() -> Result<()> {
+    let info = DaemonProxy::new(iwd().await).await?.get_info().await?;
+    let dir = state_directory(&info)?;
+    let probe = dir.join(format!(".carjack-probe-{}", std::process::id()));
+    write_profile(&probe, "")
+        .await
+        .map_err(|_| cannot_write(&dir))?;
+    tokio::fs::remove_file(&probe).await.ok();
     Ok(())
 }
 

@@ -120,6 +120,7 @@ async fn main() -> Result<()> {
     }
 
     let wifi: Arc<dyn WifiBackend> = wifi_connect::build(config.wifi.backend).into();
+    wifi.check_ready().await?;
 
     match config.source {
         Source::App => run_app(config, wifi).await,

@@ -28,6 +28,11 @@ pub trait WifiBackend: Send + Sync {
     /// The WiFi address carjack announces to the accessory over iAP2, and associates with.
     async fn get_wifi_mac(&self) -> Result<String>;
 
+    /// Fail fast if this backend can't do what `connect_to_car_wifi` will need later.
+    async fn check_ready(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Join the car's access point (or reuse an existing connection already on it). Retries with
     /// whatever this car is already known to need - see [`crate::accessory_settings`].
     async fn connect_to_car_wifi(
