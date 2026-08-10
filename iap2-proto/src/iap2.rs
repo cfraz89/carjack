@@ -33,7 +33,12 @@ impl Decoder for Iap2Codec {
             pos += 1;
         }
         if pos > 0 {
-            tracing::warn!("Skipping {} byte(s) before valid magic", pos);
+            let skipped = src[..pos]
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            tracing::warn!("Skipping {pos} byte(s) before valid magic: {skipped}");
             src.advance(pos);
         }
         if src.len() < 9 {

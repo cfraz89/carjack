@@ -11,6 +11,10 @@ StateDirectory=carjack
 Environment=HOME=/var/lib/carjack
 ExecStart=/usr/local/bin/carjack
 
+AmbientCapabilities=CAP_DAC_OVERRIDE CAP_CHOWN
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN
+NoNewPrivileges=yes
+
 Restart=on-failure
 RestartSec=5
 

@@ -20,7 +20,7 @@ use libcarjack::{
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use tokio_stream::StreamExt;
 
-use crate::wifi_connect::get_wifi_mac;
+use crate::wifi_connect::WifiBackend;
 
 const IAP_CHANNEL: u16 = 1;
 
@@ -107,7 +107,7 @@ impl IapHost {
     }
 
     /// Register everything once.
-    pub async fn start() -> Result<Self> {
+    pub async fn start(wifi: &dyn WifiBackend) -> Result<Self> {
         let session = Session::new().await?;
         let agent = session.register_agent(Agent::default()).await?;
         let adapter = session.default_adapter().await?;
@@ -115,7 +115,7 @@ impl IapHost {
         let identity = DeviceIdentity {
             name: String::from("carjack"),
             transport_identifier: transport_identifier(adapter.address().await?),
-            wifi_mac: get_wifi_mac().await?,
+            wifi_mac: wifi.get_wifi_mac().await?,
         };
 
         let iap_profile = Mutex::new(session.register_profile(device_profile()).await?);
@@ -245,15 +245,16 @@ pub async fn wireless_carplay(
     target: String,
     wifi_tx: mpsc::Sender<WifiCredentials>,
     ready_tx: oneshot::Sender<()>,
-    car_addr_tx: oneshot::Sender<String>,
+    car_addr_tx: tokio::sync::watch::Sender<Option<String>>,
 ) -> Result<()> {
     let adapter = &host.adapter;
     let identity = host.identity.clone();
 
     let device = find_target_device(adapter, &target).await?;
-    // Surface the car's MAC early so the caller can size the compositor / launch the app from its
-    // cached display before AirPlay reports the real one.
-    let _ = car_addr_tx.send(device.address().to_string());
+    // Surface the car's MAC early - so the caller can look up its accessory settings before WiFi
+    // connects, and size the compositor / launch the app from its cached display before AirPlay
+    // reports the real one. A `watch`, not a `oneshot`: both readers need the value independently.
+    let _ = car_addr_tx.send(Some(device.address().to_string()));
 
     // Gate on relinks: one at a time.
     let connect_attempt = Arc::new(tokio::sync::Semaphore::new(1));

@@ -5,6 +5,10 @@ mod armbian
 # carjack-hci-helper.service's AmbientCapabilities= instead (see carjack-hci-helper.service).
 # carjack itself never needs the capability; only the helper binary does. Relinking drops the file
 # capability, hence this runs after every build.
+#
+# The iwd `WifiBackend` (`[wifi] backend = "iwd"`) needs CAP_DAC_OVERRIDE/CAP_CHOWN too, but only
+# carjack.service grants those (see its own comment) - nothing setcaps the main binary here, so a
+# local `just run` with backend = "iwd" cannot write profiles.
 [script]
 setcap:
     binary="$(which carjack-hci-helper)"

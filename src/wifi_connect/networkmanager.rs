@@ -1,30 +1,32 @@
-use backon::{ConstantBuilder, Retryable};
-use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+//! Joining the car's access point, over NetworkManager.
 
+use std::str::FromStr;
+
+use async_trait::async_trait;
+use enclose::enclose;
 use eyre::{Result, eyre};
+
 use futures::StreamExt;
 use nm_automata::{
     ActivationStateFlags, ActiveConnectionState, ActiveProxy, AssignedMacAddress,
     ConnectionProfile, ConnectionSetting, DeviceProxy, DeviceState, DeviceType, Ipv4Method,
     Ipv4Setting, Ipv6Method, Ipv6Setting, MacAddress, NetworkManagerProxy, NonEmpty, ProxyExt,
-    Ssid, WirelessProxy, WirelessSecurityKeyMgmt, WirelessSecuritySetting, WirelessSetting,
+    SettingsConnectionProxy, SettingsProxy, Ssid, WirelessProxy, WirelessSecurityKeyMgmt,
+    WirelessSecuritySetting, WirelessSetting,
 };
-use std::net::IpAddr;
 use std::time::Duration;
 use tap::TapFallible;
 use tokio::sync::OnceCell;
 
-/// How long to give NetworkManager to bring the car's connection all the way up before treating
-/// the attempt as failed and retrying it. Association plus DHCP is a couple of seconds when it
-/// works at all, and the car walks away from a session that stops making progress.
+use super::{CarWifi, WifiBackend};
+
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 static NETWORK_MANAGER: OnceCell<NetworkManagerProxy<'static>> = OnceCell::const_new();
 
 /// The NetworkManager proxy, built once. Its D-Bus connection is what the car's profile binds its
 /// activation to, so it has to outlive every session.
-pub(crate) async fn get_network_manager() -> &'static NetworkManagerProxy<'static> {
+async fn get_network_manager() -> &'static NetworkManagerProxy<'static> {
     NETWORK_MANAGER
         .get_or_init(async || {
             let connection = zbus::Connection::system()
@@ -37,24 +39,31 @@ pub(crate) async fn get_network_manager() -> &'static NetworkManagerProxy<'stati
         .await
 }
 
-pub struct CarWifi {
-    #[allow(dead_code)]
-    pub ssid: Ssid,
-    #[allow(dead_code)]
-    pub ip: IpAddr,
-    pub iface: String,
+pub(crate) struct NetworkManagerBackend;
+
+#[async_trait]
+impl WifiBackend for NetworkManagerBackend {
+    async fn get_wifi_mac(&self) -> Result<String> {
+        get_wifi_mac().await
+    }
+
+    async fn connect_to_car_wifi(
+        &self,
+        ssid: &str,
+        passphrase: &str,
+        car_mac: Option<&str>,
+    ) -> Result<CarWifi> {
+        connect_to_car_wifi(ssid, passphrase, car_mac).await
+    }
 }
 
-pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<CarWifi> {
-    match live_connection(ssid).await {
-        Ok(Some(car_wifi)) => {
-            tracing::info!("Already connected to {ssid}; reusing the live connection");
-            return Ok(car_wifi);
-        }
-        Ok(None) => {}
-        Err(e) => {
-            tracing::warn!("Couldn't inspect the current connection ({e}); connecting anyway")
-        }
+async fn connect_to_car_wifi(
+    ssid: &str,
+    passphrase: &str,
+    car_mac: Option<&str>,
+) -> Result<CarWifi> {
+    if let Some(car_wifi) = super::reuse_if_live(ssid, live_connection(ssid).await) {
+        return Ok(car_wifi);
     }
 
     // The same address we announced over iAP2 - the accessory waits for exactly that station.
@@ -67,160 +76,112 @@ pub(crate) async fn connect_to_car_wifi(ssid: &str, passphrase: &str) -> Result<
         }
     };
 
-    let disable_he = AtomicBool::new(false);
+    super::connect_with_known_settings(
+        car_mac,
+        enclose!((announced_mac, announced) |disable_he| { async move {
+            let profile = car_profile(ssid, passphrase, announced_mac, disable_he);
+            let nm = get_network_manager().await;
+            let device = wifi_device().await?;
+            let (conn, active) = match existing_profile(nm, &profile).await {
+                Some(existing) => {
+                    tracing::info!(path = ?existing.object_path(), "Using existing wifi profile for accessory");
+                    let active = nm
+                        .activate_connection(
+                            &existing,
+                            &device,
+                            None,
+                        )
+                        .await?;
+                    (existing, active)
+                }
+                None => {
+                    let (conn, active) = nm
+                        .add_and_activate_connection(&profile, &device, None)
+                        .await?;
+                    tracing::info!(path = ?conn.object_path(), "Connection created");
+                    (conn, active)
+                }
+            };
 
-    (|| async {
-        let profile = car_profile(
-            ssid,
-            passphrase,
-            announced_mac.clone(),
-            disable_he.load(Ordering::Relaxed),
-        );
-        let nm = get_network_manager().await;
-        let device = wifi_device().await?;
-        let (conn, active) = match reusable_profile(nm, ssid, &profile).await {
-            Some(existing) => {
-                tracing::info!(path = ?existing.object_path(), "Using existing wifi profile for accessory");
-                let active = nm
-                    .activate_connection(
-                        &existing.object_path(),
-                        &device.object_path(),
-                        // No specific access point: let NetworkManager pick the BSS for the SSID.
-                        None,
-                    )
-                    .await?;
-                (existing, active)
-            }
-            None => {
-                let (conn, active) = nm
-                    .add_and_activate_connection(
-                        &profile,
-                        &device.object_path(),
-                        None,
-                    )
-                    .await?;
-                tracing::info!(path = ?conn.object_path(), "Connection created");
-                (conn, active)
-            }
-        };
-
-        // Tidy up after ourselves on failure. Each attempt otherwise leaves a live profile behind,
-        // and several profiles for one SSID is how an association ends up happening outside the
-        // announce-then-activate sequence - and it means a retry with DisableHE flipped would find
-        // and reuse the earlier, unflagged profile instead of building a fresh one.
-        if let Err(e) = tokio::time::timeout(ACTIVATION_TIMEOUT, wait_for_activation(&active))
-            .await
-            .map_err(|_| eyre!("Timed out bringing up the car's WiFi connection"))
-            .and_then(|r| r)
-        {
-            conn.delete()
+            if let Err(e) = tokio::time::timeout(ACTIVATION_TIMEOUT, wait_for_activation(&active))
                 .await
-                .tap_err(|e| tracing::debug!(?e, "Could not delete the profile of a failed attempt"))
-                .ok();
-            return Err(e);
-        }
-        // The whole point of pinning the profile's address is that the accessory sees the station
-        // it was promised. If NetworkManager did not apply it, the association is live but the
-        // accessory is waiting for a station that will never appear - a failure that otherwise
-        // shows up much later, as an AirPlay session that never starts.
-        match device.hw_address().await {
-            Ok(actual) if actual.eq_ignore_ascii_case(&announced) => {
-                tracing::debug!(%actual, "Associated as the announced address")
+                .map_err(|_| eyre!("Timed out bringing up the car's WiFi connection"))
+                .and_then(|r| r)
+            {
+                conn.delete()
+                    .await
+                    .tap_err(
+                        |e| tracing::debug!(?e, "Could not delete the profile of a failed attempt"),
+                    )
+                    .ok();
+                return Err(e);
             }
-            Ok(actual) => tracing::warn!(
-                %actual,
-                %announced,
-                "Associated address is not the one announced over iAP2; the accessory is \
-                 watching for a station that will not appear"
-            ),
-            Err(e) => tracing::debug!(?e, "Could not read back the associated address"),
-        }
-        car_wifi(&device, &active).await
-    })
-    .retry(ConstantBuilder::new().with_delay(Duration::from_secs(2)))
-    // Each attempt leaves another in-memory profile behind, so a silent retry looks like nothing
-    // more than a duplicate "Connection created" line.
-    .notify(|e, _| {
-        if !disable_he.swap(true, Ordering::Relaxed) {
-            tracing::info!("Retrying with 802-11-wireless.disable-he, in case that's why");
-        }
-        tracing::warn!("Bringing up the car's WiFi failed ({e}); retrying")
-    })
+            // The whole point of pinning the profile's address is that the accessory sees the
+            // station it was promised. If NetworkManager did not apply it, the association is
+            // live but the accessory is waiting for a station that will never appear - a failure
+            // that otherwise shows up much later, as an AirPlay session that never starts.
+            match device.hw_address().await {
+                Ok(actual) if actual.eq_ignore_ascii_case(&announced) => {
+                    tracing::debug!(%actual, "Associated as the announced address")
+                }
+                Ok(actual) => tracing::warn!(
+                    %actual,
+                    %announced,
+                    "Associated address is not the one announced over iAP2; the accessory is \
+                     watching for a station that will not appear"
+                ),
+                Err(e) => tracing::debug!(?e, "Could not read back the associated address"),
+            }
+            car_wifi(&device, &active).await
+        } }),
+    )
     .await
 }
 
-/// Find a profile we can reuse for this AP, deleting every other one for the same SSID.
-///
-/// One profile per accessory, kept on disk: the SSID, passphrase and our pinned address are all
-/// stable for a given car, so recreating it every session only costs time. Duplicates are the
-/// thing to avoid, not persistence - one accrued per run when this was in-memory, 74 of them after
-/// a day of testing, and any of them can bring the link up outside the announce-then-activate
-/// sequence with a stale pinned address the accessory was never told about.
-///
-/// A profile only qualifies if its SSID, passphrase *and* pinned address all still match: a car
-/// that rotates its passphrase, or a machine whose derived address changed, must not reuse a
-/// profile that would associate wrongly.
-async fn reusable_profile(
+/// Find an existing profile that matches the one we want by ssid an assigned mac, and delete any others for the same SSID
+async fn existing_profile(
     nm: &NetworkManagerProxy<'_>,
-    ssid: &str,
     profile: &ConnectionProfile,
-) -> Option<nm_automata::proxies::settings_connection::ConnectionProxy<'static>> {
-    let settings = nm_automata::SettingsProxy::new(nm.inner().connection())
-        .await
-        .ok()?;
+) -> Option<SettingsConnectionProxy<'static>> {
+    let settings = SettingsProxy::new(nm.inner().connection()).await.ok()?;
     let connections = settings.connections().await.ok()?;
-    let mut keep: Option<nm_automata::proxies::settings_connection::ConnectionProxy<'static>> =
-        None;
-    let mut removed = 0usize;
+    let mut keep: Option<SettingsConnectionProxy<'static>> = None;
+    let profile_wireless = profile
+        .wireless
+        .as_ref()
+        .expect("Existing profile wireless should not be none");
+    let profile_ssid = profile_wireless
+        .ssid
+        .as_ref()
+        .expect("Existing profile ssid should not be none");
     for conn in connections {
-        let Ok(existing) = conn.get_settings().await else {
-            continue;
+        if let Ok(ConnectionProfile {
+            wireless:
+                Some(WirelessSetting {
+                    ssid: Some(ssid),
+                    assigned_mac_address,
+                    ..
+                }),
+            ..
+        }) = conn.get_settings().await
+            && &ssid == profile_ssid
+        {
+            if keep.is_none() && assigned_mac_address == profile_wireless.assigned_mac_address {
+                keep = Some(conn);
+            } else {
+                let _ = conn
+                    .delete()
+                    .await
+                    .tap_err(|e| tracing::warn!(?e, ?conn, "Error deleting connection"));
+            }
         };
-        // Match on the SSID the profile actually joins, not its name: NetworkManager renames a
-        // colliding profile to "<ssid> 1", "<ssid> 2" and so on, and those escape a name check
-        // while still being able to associate.
-        let joins_this_ap = existing
-            .wireless
-            .as_ref()
-            .and_then(|w| w.ssid.as_ref())
-            .is_some_and(|s| s.as_bytes() == ssid.as_bytes());
-        if !joins_this_ap {
-            continue;
-        }
-        let matches = keep.is_none() && same_ap(&existing, profile);
-        if matches {
-            keep = Some(conn);
-        } else if conn.delete().await.is_ok() {
-            removed += 1;
-        }
-    }
-    if removed > 0 {
-        tracing::info!(removed, %ssid, "Removed duplicate profiles for the car's AP");
     }
     keep
 }
 
-/// Whether an existing profile would associate exactly as the one we just built.
-///
-/// Compares the pinned address, not the passphrase: NetworkManager omits secrets from
-/// `GetSettings`, so a stored profile's PSK always reads as absent and comparing it would reject
-/// every profile - which is how the first version of this silently recreated the profile each run.
-/// A car that rotates its passphrase is handled by activation failing, which deletes the profile
-/// and lets the retry build a fresh one.
-fn same_ap(existing: &ConnectionProfile, wanted: &ConnectionProfile) -> bool {
-    let mac = |p: &ConnectionProfile| {
-        p.wireless
-            .as_ref()
-            .and_then(|w| w.assigned_mac_address.clone())
-    };
-    mac(existing) == mac(wanted)
-}
-
 /// The connection profile for the car's access point.
 ///
-/// `disable_he` needs a patched NetworkManager (see `nm-disable-modes.patch`) plus an
-/// `nm-automata` regenerated against it — otherwise the daemon just drops it as an unknown
-/// property.
+/// `disable_he` currently requires patched iwd, or wpa_supplicant with config_disable_he and patched NetworkManager.
 fn car_profile(
     ssid: &str,
     passphrase: &str,
@@ -313,20 +274,11 @@ async fn current_ssid(device: &DeviceProxy<'_>) -> Result<Option<Ssid>> {
 async fn car_wifi(device: &DeviceProxy<'_>, active: &ActiveProxy<'_>) -> Result<CarWifi> {
     // Absent until NetworkManager has finished the IPv4 stage, which is what `wait_for_activation`
     // gates on - so reaching here without one means the activation is still in flight.
-    let ip4 = active
+    active
         .ip4_config()
         .await?
         .ok_or(eyre!("The car's connection has no IPv4 configuration yet"))?;
-    let ip: IpAddr = ip4
-        .address_data()
-        .await?
-        .into_iter()
-        .find_map(|address| address.address)
-        .ok_or(eyre!("No address on the car's connection"))?
-        .parse()?;
     Ok(CarWifi {
-        ssid: current_ssid(device).await?.unwrap_or_default(),
-        ip,
         iface: device.interface().await?,
     })
 }
@@ -350,47 +302,16 @@ async fn wifi_device() -> Result<DeviceProxy<'static>> {
         .ok_or(eyre!("No wifi devices on system"))
 }
 
-/// The WiFi address carjack announces to the accessory, and associates with.
-///
-/// **Not the permanent hardware address.** The bike answers `0x4300` for `FE:B2:9F:ED:EA:72` and
-/// for an invented `FE:B2:9F:ED:EA:99`, and refuses to answer at all for this machine's permanent
-/// `4c:79:6e:da:29:47` - which differs from the adapter's *Bluetooth* address only in the last
-/// byte, so it most likely collides with us in the unit's device table. An iPhone's globally
-/// administered address is answered fine, so it is the collision that matters, not the bit.
-///
-/// Derived from the permanent address so it is stable for a machine - a unit that remembers us by
-/// this address keeps recognising us - and locally administered so it cannot collide with real
-/// hardware. `CARJACK_WIFI_MAC` overrides it for testing.
-fn announced_wifi_mac(permanent: &str) -> String {
-    if let Ok(mac) = std::env::var("CARJACK_WIFI_MAC") {
-        tracing::warn!(%mac, "Announcing an overridden WiFi MAC");
-        return mac;
-    }
-    // FNV-1a over the permanent address: stable, no dependency, and good enough to scatter the
-    // low bytes away from the hardware address.
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in permanent.to_ascii_lowercase().as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    let d = h.to_be_bytes();
-    // `0xFE` is unicast and locally administered, and is the prefix both known-good addresses used.
-    format!(
-        "FE:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-        d[0], d[1], d[2], d[3], d[4]
-    )
-}
-
-pub(crate) async fn get_wifi_mac() -> Result<String> {
+async fn get_wifi_mac() -> Result<String> {
     let device = wifi_device().await?;
     let wifi: WirelessProxy = device.cast().await?;
-    // Derived from the permanent address rather than being it - see `announced_wifi_mac`. The
-    // car's profile pins itself to the same value, so what we announce is what associates.
+    // Derived from the permanent address rather than being it - see `super::announced_wifi_mac`.
+    // The car's profile pins itself to the same value, so what we announce is what associates.
     let permanent = match wifi.perm_hw_address().await?.non_empty() {
         Some(permanent) => permanent,
         None => device.hw_address().await?,
     };
-    Ok(announced_wifi_mac(&permanent))
+    Ok(super::announced_wifi_mac(&permanent))
 }
 
 #[cfg(test)]
@@ -425,7 +346,6 @@ mod tests {
                 .await
                 .expect("querying the current connection failed")
                 .expect("the SSID we are on should match");
-            assert_eq!(found.ssid, Ssid::from(ssid.as_str()));
             assert!(!found.iface.is_empty());
 
             assert!(

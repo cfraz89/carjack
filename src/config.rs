@@ -14,6 +14,7 @@ pub struct Config {
     pub display: Display,
     pub app: App,
     pub bluetooth: Bluetooth,
+    pub wifi: Wifi,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -21,6 +22,35 @@ pub struct Config {
 /// Which head unit to connect to.
 pub struct Bluetooth {
     pub device: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+/// Which WiFi daemon joins the car's access point.
+pub struct Wifi {
+    pub backend: WifiBackendKind,
+}
+
+/// A WiFi daemon carjack can drive - see `wifi_connect::WifiBackend`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WifiBackendKind {
+    /// Connection profiles over NetworkManager's D-Bus API (default).
+    #[default]
+    NetworkManager,
+    /// Provisioning files + `Network.Connect()` over iwd's D-Bus API. Needs the
+    /// `carjack-wireless-helper` sidecar (`cap_dac_override`/`cap_chown`) to write them.
+    Iwd,
+}
+
+impl WifiBackendKind {
+    fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "networkmanager" | "nm" => Ok(Self::NetworkManager),
+            "iwd" => Ok(Self::Iwd),
+            other => Err(eyre!("invalid wifi backend '{other}' (expected networkmanager/iwd)")),
+        }
+    }
 }
 
 /// Video source: run our own app, or capture the existing desktop via the portal.
@@ -199,6 +229,10 @@ pub struct Cli {
     /// Override [bluetooth] device: the head unit's MAC or advertised name.
     #[arg(long, value_name = "MAC|NAME")]
     pub bt_device: Option<String>,
+
+    /// Override [wifi] backend: networkmanager | iwd.
+    #[arg(long, value_name = "BACKEND")]
+    pub wifi_backend: Option<String>,
 }
 
 impl Config {
@@ -263,6 +297,9 @@ impl Config {
         }
         if let Some(v) = &cli.bt_device {
             cfg.bluetooth.device = v.clone();
+        }
+        if let Some(v) = &cli.wifi_backend {
+            cfg.wifi.backend = WifiBackendKind::parse(v)?;
         }
         if cfg.graphics.bitrate == 0 {
             return Err(eyre!("[graphics] bitrate must be greater than 0 (kbit/s)"));

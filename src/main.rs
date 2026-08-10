@@ -20,10 +20,11 @@ use carjack::encode::{self, Bitrate, EncodeBackend};
 use clap::Parser;
 
 use crate::{
-    wifi_connect::{CarWifi, connect_to_car_wifi},
+    wifi_connect::{CarWifi, WifiBackend},
     wireless::{IapHost, wireless_carplay},
 };
 
+mod accessory_settings;
 mod libei;
 mod portal;
 mod usb;
@@ -118,9 +119,11 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!("No HomeKit storage path ({e}); pairing from scratch every run"),
     }
 
+    let wifi: Arc<dyn WifiBackend> = wifi_connect::build(config.wifi.backend).into();
+
     match config.source {
-        Source::App => run_app(config).await,
-        Source::Desktop => run_desktop(config).await,
+        Source::App => run_app(config, wifi).await,
+        Source::Desktop => run_desktop(config, wifi).await,
     }
 }
 
@@ -153,7 +156,7 @@ async fn backoff_or_ctrl_c() -> bool {
 }
 
 /// `source = app`: run `[app] command` in carjack's own headless compositor and stream that.
-async fn run_app(config: Config) -> Result<()> {
+async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
     let render_node = carjack::config::resolve_render_node(&config.graphics.drm_device)?;
     let backend = encode::resolve_backend(config.graphics.zerocopy, &render_node)?;
     tracing::info!(
@@ -161,7 +164,7 @@ async fn run_app(config: Config) -> Result<()> {
         backend.describe()
     );
 
-    let host = Arc::new(IapHost::start().await?);
+    let host = Arc::new(IapHost::start(wifi.as_ref()).await?);
 
     // Size the compositor from the last car's cached display, if any, so even a non-resizable app
     // can boot at the right size during the BT/WiFi/AirPlay setup rather than after.
@@ -201,7 +204,7 @@ async fn run_app(config: Config) -> Result<()> {
                 tracing::info!("Ctrl-C received, shutting down");
                 break Ok(());
             }
-            result = run_session(&host, &compositor, &backend, &config, &mut app, &mut cache) => {
+            result = run_session(&host, &compositor, &backend, &config, &mut app, &mut cache, &wifi) => {
                 match result {
                     Ok(()) => {
                         tracing::info!("Session ended cleanly, exiting");
@@ -225,7 +228,7 @@ async fn run_app(config: Config) -> Result<()> {
 
 /// `source = desktop`: stream the user's existing desktop via xdg-desktop-portal, with touch
 /// injected back over libei (see [`libei`]).
-async fn run_desktop(config: Config) -> Result<()> {
+async fn run_desktop(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
     // Makes the gst `va` plugin register VA-API elements for every GPU on a multi-GPU box, not
     // just the first - needed to reach an integrated GPU that isn't the primary one. Must be set
     // before gst initializes.
@@ -239,7 +242,7 @@ async fn run_desktop(config: Config) -> Result<()> {
         .await
         .map_err(|e| eyre!("gstreamer init task panicked: {e}"))??;
 
-    let host = Arc::new(IapHost::start().await?);
+    let host = Arc::new(IapHost::start(wifi.as_ref()).await?);
 
     // ScreenCast + RemoteDesktop access, asked for once - a consent dialog appears on first run
     // (`PersistMode::Application` remembers it after). Persists across CarPlay reconnects.
@@ -255,7 +258,7 @@ async fn run_desktop(config: Config) -> Result<()> {
                 tracing::info!("Ctrl-C received, shutting down");
                 break Ok(());
             }
-            result = run_desktop_session(&host, &rd, zerocopy, bitrate, &bt_device) => {
+            result = run_desktop_session(&host, &rd, zerocopy, bitrate, &bt_device, &wifi) => {
                 // Lift anything still held: the input session outlives car sessions.
                 rd.end_session();
                 match result {
@@ -285,8 +288,10 @@ struct Established {
     touch_tx: mpsc::Sender<TouchEvent>,
     /// Read in the session loop and injected into the compositor or the portal.
     touch_rx: mpsc::Receiver<TouchEvent>,
-    /// The car's Bluetooth MAC (for the display cache); resolves during the handshake.
-    car_addr_rx: tokio::sync::oneshot::Receiver<String>,
+    /// The car's Bluetooth MAC (for the display cache and accessory settings); resolves during
+    /// the handshake. A `watch`, not a `oneshot`: `establish_carplay` reads it early (to look up
+    /// accessory settings before WiFi connects) and the caller reads it again afterward.
+    car_addr_rx: tokio::sync::watch::Receiver<Option<String>>,
 }
 
 /// Bind an IPv6 link-local address to the interface it has to be used on - link-local is
@@ -347,11 +352,15 @@ async fn connect_airplay_endpoint(
 
 /// Run the Bluetooth -> WiFi -> AirPlay flow and return once AirPlay is connected. Shared by both
 /// source modes.
-async fn establish_carplay(host: Arc<IapHost>, bt_device: &str) -> Result<Established> {
+async fn establish_carplay(
+    host: Arc<IapHost>,
+    bt_device: &str,
+    wifi: &Arc<dyn WifiBackend>,
+) -> Result<Established> {
     let (touch_tx, touch_rx) = mpsc::channel::<TouchEvent>(64);
     let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCredentials>(4);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
-    let (car_addr_tx, car_addr_rx) = tokio::sync::oneshot::channel::<String>();
+    let (car_addr_tx, car_addr_rx) = tokio::sync::watch::channel::<Option<String>>(None);
 
     tracing::info!("Starting CarPlay session");
 
@@ -387,8 +396,15 @@ async fn establish_carplay(host: Arc<IapHost>, bt_device: &str) -> Result<Establ
                 airplay_hint = airplay_hint.or(creds.airplay.map(|a| (a, creds.pairing_id)));
                 if wifi_handle.is_none() {
                     tracing::info!("Got WiFi creds, connecting");
+                    let car_mac = car_addr_rx.borrow().clone();
+                    let wifi = wifi.clone();
                     let handle = tokio::spawn(async move {
-                        connect_to_car_wifi(&creds.ssid, creds.passphrase.as_deref().unwrap_or("")).await
+                        wifi.connect_to_car_wifi(
+                            &creds.ssid,
+                            creds.passphrase.as_deref().unwrap_or(""),
+                            car_mac.as_deref(),
+                        )
+                        .await
                     });
                     wifi_handle = Some(handle);
                 }
@@ -405,7 +421,13 @@ async fn establish_carplay(host: Arc<IapHost>, bt_device: &str) -> Result<Establ
         handle.await.map_err(|e| eyre!("WiFi task panicked: {e}"))?
     } else if let Some(creds) = wifi_rx.recv().await {
         airplay_hint = airplay_hint.or(creds.airplay.map(|a| (a, creds.pairing_id)));
-        connect_to_car_wifi(&creds.ssid, creds.passphrase.as_deref().unwrap_or("")).await
+        let car_mac = car_addr_rx.borrow().clone();
+        wifi.connect_to_car_wifi(
+            &creds.ssid,
+            creds.passphrase.as_deref().unwrap_or(""),
+            car_mac.as_deref(),
+        )
+        .await
     } else {
         return Err(eyre!("No WiFi credentials received from car"));
     };
@@ -436,7 +458,7 @@ async fn establish_carplay(host: Arc<IapHost>, bt_device: &str) -> Result<Establ
     // Either source's address comes from the car itself, so it can be link-local.
     let endpoint = with_scope_id(endpoint, &car_wifi.iface);
 
-    let mac_address = crate::wifi_connect::get_wifi_mac().await?;
+    let mac_address = wifi.get_wifi_mac().await?;
     let conn =
         connect_airplay_endpoint(endpoint, remote_homekit_id, bluetooth_id, mac_address).await?;
     Ok(Established {
@@ -457,6 +479,7 @@ async fn run_session(
     config: &Config,
     app: &mut DesktopApp,
     cache: &mut DisplayCache,
+    wifi: &Arc<dyn WifiBackend>,
 ) -> Result<()> {
     let Established {
         conn,
@@ -464,7 +487,8 @@ async fn run_session(
         touch_tx,
         mut touch_rx,
         car_addr_rx,
-    } = establish_carplay(host.clone(), config.bluetooth_device().unwrap_or_default()).await?;
+    } = establish_carplay(host.clone(), config.bluetooth_device().unwrap_or_default(), wifi)
+        .await?;
 
     // Reconfigure the already-running compositor to exactly match the car's size and rate.
     let resized = compositor.reconfigure(conn.width, conn.height, conn.max_fps)?;
@@ -472,7 +496,7 @@ async fn run_session(
     // Remember this car's display so next startup can size everything up front. Normalize a
     // missing fps to 30 so the cached value is directly usable to start the compositor.
     if conn.width > 0 && conn.height > 0 {
-        if let Ok(car_mac) = car_addr_rx.await {
+        if let Some(car_mac) = car_addr_rx.borrow().clone() {
             cache.remember(
                 &car_mac,
                 DisplayProps {
@@ -554,6 +578,7 @@ async fn run_desktop_session(
     zerocopy: carjack::config::ZeroCopyMode,
     bitrate: Bitrate,
     bt_device: &str,
+    wifi: &Arc<dyn WifiBackend>,
 ) -> Result<()> {
     let Established {
         conn,
@@ -561,7 +586,7 @@ async fn run_desktop_session(
         touch_tx,
         mut touch_rx,
         car_addr_rx: _,
-    } = establish_carplay(host.clone(), bt_device).await?;
+    } = establish_carplay(host.clone(), bt_device, wifi).await?;
     let (width, height) = (conn.width, conn.height);
     tracing::info!("Streaming desktop to car at {width}x{height}");
 
