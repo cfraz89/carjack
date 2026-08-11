@@ -119,8 +119,16 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!("No HomeKit storage path ({e}); pairing from scratch every run"),
     }
 
-    let wifi: Arc<dyn WifiBackend> = wifi_connect::build(config.wifi.backend).into();
+    let wifi_backend = match config.wifi.backend {
+        Some(b) => b,
+        None => wifi_connect::detect_backend().await,
+    };
+    let wifi: Arc<dyn WifiBackend> = wifi_connect::build(wifi_backend).into();
     wifi.check_ready().await?;
+
+    if config.source == Source::Desktop {
+        portal::check_available().await?;
+    }
 
     match config.source {
         Source::App => run_app(config, wifi).await,

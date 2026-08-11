@@ -73,6 +73,8 @@ fn carplay_profile() -> rfcomm::Profile {
         uuid: CARPLAY_DEVICE_UUID,
         name: Some(String::from("CarPlay")),
         role: Some(Role::Server),
+        //Need this until bluer fixes None sending no channel, when it should send 0 == auto to bluez
+        channel: Some(0),
         require_authentication: Some(true),
         require_authorization: Some(false),
         ..Default::default()

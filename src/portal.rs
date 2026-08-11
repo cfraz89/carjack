@@ -490,6 +490,18 @@ mod tests {
     }
 }
 
+/// Fail fast if xdg-desktop-portal isn't reachable, rather than deep into `run_desktop`. The
+/// portal lives on the D-Bus session bus, which the systemd system service has none of.
+pub async fn check_available() -> Result<()> {
+    zbus::Connection::session().await.map(|_| ()).map_err(|e| {
+        eyre!(
+            "Could not reach a D-Bus session bus ({e}); desktop sharing needs a logged-in user \
+             session, so `source = desktop` only works when run as a user, not as the systemd \
+             service"
+        )
+    })
+}
+
 pub async fn start_remote_desktop() -> Result<RemoteDesktopStream> {
     let remote_desktop = RemoteDesktop::new().await?;
     let session = remote_desktop.create_session(Default::default()).await?;

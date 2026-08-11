@@ -28,18 +28,17 @@ pub struct Bluetooth {
 #[serde(default)]
 /// Which WiFi daemon joins the car's access point.
 pub struct Wifi {
-    pub backend: WifiBackendKind,
+    /// `None` if unset - probed from D-Bus at startup instead. See `wifi_connect::detect_backend`.
+    pub backend: Option<WifiBackendKind>,
 }
 
 /// A WiFi daemon carjack can drive - see `wifi_connect::WifiBackend`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WifiBackendKind {
-    /// Connection profiles over NetworkManager's D-Bus API (default).
-    #[default]
+    /// Connection profiles over NetworkManager's D-Bus API.
     NetworkManager,
-    /// Provisioning files + `Network.Connect()` over iwd's D-Bus API. Needs the
-    /// `carjack-wireless-helper` sidecar (`cap_dac_override`/`cap_chown`) to write them.
+    /// Provisioning files + `Network.Connect()` over iwd's D-Bus API. Needs systemd service or root
     Iwd,
 }
 
@@ -48,7 +47,9 @@ impl WifiBackendKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "networkmanager" | "nm" => Ok(Self::NetworkManager),
             "iwd" => Ok(Self::Iwd),
-            other => Err(eyre!("invalid wifi backend '{other}' (expected networkmanager/iwd)")),
+            other => Err(eyre!(
+                "invalid wifi backend '{other}' (expected networkmanager/iwd)"
+            )),
         }
     }
 }
@@ -190,7 +191,8 @@ impl Default for App {
 #[derive(Debug, Clone, clap::Parser)]
 #[command(about = "Wireless CarPlay bridge - streams a Wayland desktop to a car head unit")]
 pub struct Cli {
-    /// Config file to load (default: ~/.config/carjack/config.toml if present).
+    /// Config file to load (default: ~/.config/carjack/config.toml, falling back to
+    /// /etc/carjack/config.toml under the systemd service).
     #[arg(short = 'c', long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
@@ -230,14 +232,15 @@ pub struct Cli {
     #[arg(long, value_name = "MAC|NAME")]
     pub bt_device: Option<String>,
 
-    /// Override [wifi] backend: networkmanager | iwd.
+    /// Override [wifi] backend: networkmanager | iwd (default: probed from D-Bus).
     #[arg(long, value_name = "BACKEND")]
     pub wifi_backend: Option<String>,
 }
 
 impl Config {
-    /// Load config from `--config` (or the XDG default `~/.config/carjack/config.toml` if it
-    /// exists, else all-defaults), then apply overrides: environment variables, then CLI flags
+    /// Load config from `--config` (or `~/.config/carjack/config.toml` if present, else
+    /// `/etc/carjack/config.toml` - the systemd service's `HOME` has no `.config`, so it lands
+    /// there - else all-defaults), then apply overrides: environment variables, then CLI flags
     /// (highest precedence).
     pub fn load(cli: &Cli) -> Result<Config> {
         let path = match &cli.config {
@@ -247,7 +250,14 @@ impl Config {
                 }
                 Some(p.clone())
             }
-            None => xdg::BaseDirectories::with_prefix("carjack").find_config_file("config.toml"),
+            None => xdg::BaseDirectories::with_prefix("carjack")
+                .get_config_home()
+                .map(|home| home.join("config.toml"))
+                .filter(|p| p.exists())
+                .or_else(|| {
+                    let etc = PathBuf::from("/etc/carjack/config.toml");
+                    etc.exists().then_some(etc)
+                }),
         };
 
         let mut builder = config::Config::builder();
@@ -299,7 +309,7 @@ impl Config {
             cfg.bluetooth.device = v.clone();
         }
         if let Some(v) = &cli.wifi_backend {
-            cfg.wifi.backend = WifiBackendKind::parse(v)?;
+            cfg.wifi.backend = Some(WifiBackendKind::parse(v)?);
         }
         if cfg.graphics.bitrate == 0 {
             return Err(eyre!("[graphics] bitrate must be greater than 0 (kbit/s)"));

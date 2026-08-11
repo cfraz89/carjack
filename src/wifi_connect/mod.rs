@@ -43,6 +43,38 @@ pub trait WifiBackend: Send + Sync {
     ) -> Result<CarWifi>;
 }
 
+/// Which WiFi daemon owns its D-Bus name, used when `[wifi] backend` isn't set explicitly.
+/// NetworkManager wins if both are running; falls back to NetworkManager if the bus can't be
+/// probed at all, so callers always get a concrete choice.
+pub(crate) async fn detect_backend() -> WifiBackendKind {
+    match probe_backend().await {
+        Ok(kind) => kind,
+        Err(e) => {
+            tracing::warn!(
+                "Could not probe D-Bus for a WiFi daemon ({e}); defaulting to NetworkManager"
+            );
+            WifiBackendKind::NetworkManager
+        }
+    }
+}
+
+async fn owns_bus_name(dbus: &zbus::fdo::DBusProxy<'_>, name: &'static str) -> Result<bool> {
+    let name = zbus::names::BusName::from_static_str(name).expect("valid bus name literal");
+    Ok(dbus.name_has_owner(name).await?)
+}
+
+async fn probe_backend() -> Result<WifiBackendKind> {
+    let conn = zbus::Connection::system().await?;
+    let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
+    let nm = owns_bus_name(&dbus, "org.freedesktop.NetworkManager").await?;
+    let iwd = owns_bus_name(&dbus, "net.connman.iwd").await?;
+    Ok(if iwd && !nm {
+        WifiBackendKind::Iwd
+    } else {
+        WifiBackendKind::NetworkManager
+    })
+}
+
 /// Build the backend selected by config.
 pub(crate) fn build(kind: WifiBackendKind) -> Box<dyn WifiBackend> {
     match kind {

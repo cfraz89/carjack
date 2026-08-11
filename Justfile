@@ -1,6 +1,8 @@
 set dotenv-load
 mod armbian
 
+test_timeout := "60"
+
 # For local `just run`/`just test-run` only - the real deployment gets cap_net_admin via
 # carjack-hci-helper.service's AmbientCapabilities= instead (see carjack-hci-helper.service).
 # carjack itself never needs the capability; only the helper binary does. Relinking drops the file
@@ -36,7 +38,7 @@ run +flags="": (install flags)
 
 #Run the app until timeout, then kill it and restore the original wifi connection
 [script('bash')]
-test-run timeout="60" +flags="": (install flags)
+test-run +flags="": (install flags)
     set -uo pipefail
     original=""
     cleanup() {
@@ -58,7 +60,7 @@ test-run timeout="60" +flags="": (install flags)
 
     waydroid session stop || true
     carjack-hci-helper || true
-    timeout --foreground --kill-after=5s "{{timeout}}s" cargo run {{cuda_features}} {{flags}} < /dev/null || true
+    timeout --foreground --kill-after=5s "{{test_timeout}}s" cargo run {{cuda_features}} {{flags}} < /dev/null || true
 
 build +flags="":
     {{toolbox_build}}cargo build {{cuda_features}} {{flags}}
