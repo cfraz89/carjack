@@ -3,6 +3,37 @@ use std::io::{Cursor, Read};
 use deku::ctx::Endian;
 use deku::prelude::*;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Frame {
+    Detect(Detect),
+    Iap2(Packet),
+}
+
+impl Frame {
+    pub fn read(input: &[u8]) -> Result<(Self, usize), DekuError> {
+        match Detect::from_bytes((input, 0)) {
+            Ok((rest, detect)) => return Ok((Frame::Detect(detect), input.len() - rest.0.len())),
+            Err(e @ DekuError::Incomplete(_)) => return Err(e),
+            Err(_) => {}
+        }
+        let (rest, packet) = Packet::from_bytes((input, 0))?;
+        Ok((Frame::Iap2(packet), input.len() - rest.0.len()))
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DekuError> {
+        match self {
+            Frame::Detect(detect) => detect.to_bytes(),
+            Frame::Iap2(packet) => packet.to_bytes(),
+        }
+    }
+}
+
+/// The iAP1 protocol-switch request. Not iAP2 at all: it is the accessory asking the transport to
+/// change protocol, and it is nothing but these six bytes.
+#[derive(DekuRead, DekuWrite, Debug, Clone, Copy, PartialEq)]
+#[deku(magic = b"\xFF\x55\x02\x00\xEE\x10")]
+pub struct Detect;
+
 /// (De)serializable iAP2 packet
 #[derive(DekuRead, DekuWrite, Debug, Clone, PartialEq)]
 #[deku(endian = "big")]
@@ -27,19 +58,6 @@ pub struct Packet {
 }
 
 impl Packet {
-    /// How many bytes a packet carrying `payload_len` bytes of payload occupies on the wire.
-    ///
-    /// This counts the *whole* packet: the 8-byte header, its checksum, the payload, and - only
-    /// when there is a payload - the payload checksum. The empty case is the one worth spelling
-    /// out: an empty packet is 9 bytes, not 10, because there is no payload checksum to carry.
-    /// That is not a cosmetic off-by-one. The accessory trusts `length` to know how many bytes
-    /// this packet occupies, so a keepalive claiming 10 while writing 9 makes it take the first
-    /// byte of the *next* packet as the missing one and lose framing for the rest of the session
-    /// - it then stops acknowledging anything, retransmits its last message until it gives up,
-    /// and drops the link (`cfmoto_8.pcapng`, t=30.068 onwards).
-    ///
-    /// Exposed separately from `new` so the negotiated `max_length` can be checked against a
-    /// payload before a packet is built for it.
     pub fn wire_len(payload_len: usize) -> usize {
         HEADER_SIZE + 1 + payload_len + usize::from(payload_len > 0)
     }
@@ -175,11 +193,32 @@ mod tests {
     fn packets_round_trip() {
         for payload in [Vec::new(), vec![0x40, 0x40, 0x00, 0x06, 0xaa, 0x05]] {
             let packet = Packet::new(ControlByte::with_ack(), 0x11, 0x22, 0x02, payload);
-            let bytes = packet.to_bytes().unwrap();
+            let frame = Frame::Iap2(packet.clone());
+            let bytes = frame.to_bytes().unwrap();
             assert_eq!(bytes.len(), packet.header.length as usize);
-            let (rest, decoded) = Packet::from_bytes((&bytes, 0)).unwrap();
-            assert_eq!(rest.0.len(), 0, "decoder left bytes unconsumed");
-            assert_eq!(decoded, packet);
+            let (decoded, consumed) = Frame::read(&bytes).expect("a whole frame");
+            assert_eq!(consumed, bytes.len(), "decoder left bytes unconsumed");
+            assert_eq!(decoded, frame);
         }
+    }
+
+    /// The exact six bytes the CFMOTO head unit repeats once a second - over RFCOMM at the start
+    /// of a link, and over the AirPlay tunnel at the handover (`logs/cfmoto-11-08-1855.pcapng`,
+    /// event channel t=26.899 onwards). Reading them as a frame is what lets us answer.
+    #[test]
+    fn detect_round_trips() {
+        let bytes = vec![0xFF, 0x55, 0x02, 0x00, 0xEE, 0x10];
+        let (frame, consumed) = Frame::read(&bytes).expect("a whole frame");
+        assert_eq!(consumed, bytes.len(), "decoder left bytes unconsumed");
+        assert_eq!(frame, Frame::Detect(Detect));
+        assert_eq!(frame.to_bytes().unwrap(), bytes);
+    }
+
+    /// A detect and a packet share their first byte, so only the second tells them apart.
+    #[test]
+    fn a_detect_is_not_mistaken_for_a_packet() {
+        let packet = Packet::new(ControlByte::with_ack(), 0x11, 0x22, 0x02, Vec::new());
+        assert_ne!(Frame::Iap2(packet), Frame::Detect(Detect));
+        assert!(Frame::read(&[0xFF, 0x56, 0x02, 0x00, 0xEE, 0x10]).is_err());
     }
 }

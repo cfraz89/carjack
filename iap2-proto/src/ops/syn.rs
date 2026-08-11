@@ -25,6 +25,10 @@ impl<S: Stream> Syn<'_, S> {
                 .with_delay(Duration::from_secs(1))
                 .with_max_times(5),
         )
+        // A handshake that started and stalled is worth another go - the accessory re-sends its
+        // SYN. A transport that has produced nothing at all never will, and retrying it holds up
+        // the next RFCOMM channel for half a minute while the head unit walks away.
+        .when(|_| self.0.heard_from_peer())
         .await
     }
 

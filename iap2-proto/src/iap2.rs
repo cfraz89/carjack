@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use bytes::{Buf, BytesMut};
-use deku::{DekuContainerRead, DekuContainerWrite};
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -12,22 +11,22 @@ use std::collections::VecDeque;
 
 use crate::error::Iap2Error;
 use crate::link::{LinkAction, LinkState};
-use crate::ops::{switch::perform_switch, syn::Syn};
-use crate::packet::{ControlByte, Packet};
+use crate::ops::syn::Syn;
+use crate::packet::{ControlByte, Frame, Packet};
 use crate::stream::{SessionTable, SessionType};
 
 #[derive(Debug)]
 pub struct Iap2Codec;
 
 impl Decoder for Iap2Codec {
-    type Item = Packet;
+    type Item = Frame;
     type Error = Iap2Error;
 
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Packet>, Iap2Error> {
-        // Walk bytes one at a time looking for iAP2 magic (FF 5A)
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Frame>, Iap2Error> {
+        // Walk bytes one at a time looking for the magic of either frame kind.
         let mut pos = 0;
         while pos + 2 <= src.len() {
-            if src[pos] == 0xFF && src[pos + 1] == 0x5A {
+            if src[pos] == 0xFF && (src[pos + 1] == 0x5A || src[pos + 1] == 0x55) {
                 break;
             }
             pos += 1;
@@ -41,14 +40,10 @@ impl Decoder for Iap2Codec {
             tracing::warn!("Skipping {pos} byte(s) before valid magic: {skipped}");
             src.advance(pos);
         }
-        if src.len() < 9 {
-            return Ok(None);
-        }
-        match Packet::from_bytes((&src[..], 0)) {
-            Ok((rest, packet)) => {
-                let consumed = src.len() - rest.0.len();
+        match Frame::read(&src[..]) {
+            Ok((frame, consumed)) => {
                 src.advance(consumed);
-                Ok(Some(packet))
+                Ok(Some(frame))
             }
             Err(deku::DekuError::Incomplete(_)) => Ok(None),
             Err(e) => Err(Iap2Error::PacketDecoding(src.clone().freeze(), e)),
@@ -56,13 +51,13 @@ impl Decoder for Iap2Codec {
     }
 }
 
-impl Encoder<Packet> for Iap2Codec {
+impl Encoder<Frame> for Iap2Codec {
     type Error = Iap2Error;
 
-    fn encode(&mut self, packet: Packet, dst: &mut BytesMut) -> Result<(), Iap2Error> {
-        let bytes = packet
+    fn encode(&mut self, frame: Frame, dst: &mut BytesMut) -> Result<(), Iap2Error> {
+        let bytes = frame
             .to_bytes()
-            .map_err(|err| Iap2Error::PacketEncoding(packet, err))?;
+            .map_err(|err| Iap2Error::FrameEncoding(frame, err))?;
         dst.extend_from_slice(&bytes);
         Ok(())
     }
@@ -81,8 +76,10 @@ pub struct Iap2<T> {
     // spends nearly all its time blocked waiting for the accessory's next byte) never
     // blocks a concurrent send_packet() - needed for link-layer keep-alives to actually
     // go out while otherwise idle.
-    sink: Mutex<SplitSink<Framed<T, Iap2Codec>, Packet>>,
+    sink: Mutex<SplitSink<Framed<T, Iap2Codec>, Frame>>,
     stream: Mutex<SplitStream<Framed<T, Iap2Codec>>>,
+    /// Whether anything at all has arrived on this transport - see [`Iap2::heard_from_peer`].
+    heard_from_peer: std::sync::atomic::AtomicBool,
     seq: AtomicU8,
     /// Negotiated parameters plus the send window, retransmit queue and cumulative-ack timers.
     pub link: Mutex<LinkState>,
@@ -116,13 +113,14 @@ impl<S: Stream> Iap2<S> {
             ))
     }
 
-    /// Wrap a stream in the codec without performing the iAP1 switch or the SYN handshake.
+    /// Wrap a stream in the codec without performing the SYN handshake.
     fn wrap(stream: S) -> Self {
         let framed = Framed::new(stream, Iap2Codec);
         let (sink, stream) = framed.split();
         Iap2 {
             sink: Mutex::new(sink),
             stream: Mutex::new(stream),
+            heard_from_peer: std::sync::atomic::AtomicBool::new(false),
             seq: AtomicU8::new(INITIAL_SEQ),
             link: Mutex::new(LinkState::new()),
             tx_queue: Mutex::new(VecDeque::new()),
@@ -130,25 +128,21 @@ impl<S: Stream> Iap2<S> {
         }
     }
 
-    /// Bring the link up on a transport that is already established, skipping the iAP1 switch.
+    /// Bring the link up on a transport the accessory has just opened.
     ///
-    /// The switch (`FF 55 02 00 EE 10`) is an artefact of the RFCOMM channel: it is how an
-    /// accessory asks a serial link to change protocol. The AirPlay tunnel carries iAP2 frames
-    /// directly, so there is nothing to switch - the link starts at the SYN.
-    pub async fn start_established(stream: S) -> Result<Self, Iap2Error> {
+    /// The same for every transport: an accessory may open with the iAP1 detect, which
+    /// [`Iap2::receive_raw`] answers wherever it appears, and the link itself starts at the SYN.
+    pub async fn start(stream: S) -> Result<Self, Iap2Error> {
         let iap2 = Iap2::wrap(stream);
         let table = Syn(&iap2).perform().await?;
         *iap2.session_table.lock().await = table;
         Ok(iap2)
     }
 
-    pub async fn start(mut stream: S) -> Result<Self, Iap2Error> {
-        perform_switch(&mut stream).await?;
-
-        let iap2 = Iap2::wrap(stream);
-        let table = Syn(&iap2).perform().await?;
-        *iap2.session_table.lock().await = table;
-        Ok(iap2)
+    /// Whether the accessory has sent anything at all here. A transport that stays silent is the
+    /// wrong one - one of the channels BlueZ offered with no iAP session behind it.
+    pub(crate) fn heard_from_peer(&self) -> bool {
+        self.heard_from_peer.load(Ordering::Relaxed)
     }
 
     pub async fn make_packet(
@@ -241,7 +235,7 @@ impl<S: Stream> Iap2<S> {
         let packet = self.make_packet_with_ack(control, session_id, payload.clone(), ack);
         {
             let mut sink = self.sink.lock().await;
-            sink.send(packet.clone()).await?;
+            sink.send(Frame::Iap2(packet.clone())).await?;
         }
         if consumes_seq {
             self.seq.fetch_add(1, Ordering::Relaxed);
@@ -336,7 +330,7 @@ impl<S: Stream> Iap2<S> {
                     unacked.session_id,
                     unacked.payload.clone(),
                 );
-                self.sink.lock().await.send(packet).await?;
+                self.sink.lock().await.send(Frame::Iap2(packet)).await?;
                 self.link.lock().await.record_retransmit(unacked.seq);
                 Ok(())
             }
@@ -360,9 +354,21 @@ impl<S: Stream> Iap2<S> {
     /// Returns the packet and whether it was new (`false` = a retransmission of a sequence
     /// number we have already taken).
     pub(crate) async fn receive_raw(&self) -> Result<(Packet, bool), Iap2Error> {
-        let packet = {
-            let mut stream = self.stream.lock().await;
-            stream.next().await.ok_or(Iap2Error::NoPacket)??
+        let packet = loop {
+            let frame = {
+                let mut stream = self.stream.lock().await;
+                stream.next().await.ok_or(Iap2Error::NoPacket)??
+            };
+            self.heard_from_peer.store(true, Ordering::Relaxed);
+            match frame {
+                Frame::Iap2(packet) => break packet,
+                // Answered here, not at bring-up: the accessory detects at the start of an RFCOMM
+                // channel and again on the AirPlay tunnel when the session moves there.
+                Frame::Detect(detect) => {
+                    tracing::debug!("Echoing iAP1 detect");
+                    self.sink.lock().await.send(Frame::Detect(detect)).await?;
+                }
+            }
         };
         let control = packet.header.control;
 
@@ -447,6 +453,7 @@ impl<S: Stream> Iap2<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BufMut;
     use tokio::io::AsyncReadExt;
 
     fn control_payload() -> Vec<u8> {
@@ -463,9 +470,11 @@ mod tests {
         let mut packets = Vec::new();
         let mut rest = buf.as_slice();
         while !rest.is_empty() {
-            let ((tail, _), packet) = Packet::from_bytes((rest, 0)).unwrap();
-            packets.push((packet.header.seq, packet.payload.len()));
-            rest = tail;
+            let (frame, consumed) = Frame::read(rest).expect("a whole frame");
+            if let Frame::Iap2(packet) = frame {
+                packets.push((packet.header.seq, packet.payload.len()));
+            }
+            rest = &rest[consumed..];
         }
         packets
     }
@@ -507,7 +516,9 @@ mod tests {
     /// Write a packet into the peer's end of the duplex, as the accessory would.
     async fn peer_sends(peer: &mut tokio::io::DuplexStream, packet: Packet) {
         use tokio::io::AsyncWriteExt;
-        peer.write_all(&packet.to_bytes().unwrap()).await.unwrap();
+        peer.write_all(&Frame::Iap2(packet).to_bytes().unwrap())
+            .await
+            .unwrap();
     }
 
     /// Let `receive_packet` consume whatever is buffered. It swallows link-layer traffic and
@@ -549,7 +560,9 @@ mod tests {
         let peer = tokio::spawn(async move {
             let mut buf = [0u8; 128];
             let n = theirs.read(&mut buf).await.unwrap();
-            let (_, reply) = Packet::from_bytes((&buf[..n], 0)).unwrap();
+            let (Frame::Iap2(reply), _) = Frame::read(&buf[..n]).unwrap() else {
+                panic!("expected an iAP2 packet");
+            };
             // The third leg: a bare acknowledgement of whatever the SYN+ACK was numbered.
             let ack = Packet::new(
                 ControlByte::with_ack(),
@@ -558,7 +571,10 @@ mod tests {
                 0,
                 Vec::new(),
             );
-            theirs.write_all(&ack.to_bytes().unwrap()).await.unwrap();
+            theirs
+                .write_all(&Frame::Iap2(ack).to_bytes().unwrap())
+                .await
+                .unwrap();
             reply
         });
 
@@ -698,23 +714,49 @@ mod tests {
         );
     }
 
+    /// A transport hands us whatever arrived, which is not whole frames - one `iAPSendMessage`
+    /// carries six bytes and an RFCOMM read splits wherever it likes. A short buffer has to be
+    /// "not yet", never an error: erroring would tear down a link over a split read.
+    #[test]
+    fn a_partial_frame_is_not_an_error() {
+        for wire in [hex(DETECT), hex(BENCH_SYN)] {
+            let mut buf = BytesMut::new();
+            for byte in &wire[..wire.len() - 1] {
+                buf.put_u8(*byte);
+                assert!(
+                    matches!(Iap2Codec.decode(&mut buf), Ok(None)),
+                    "decoded early at {} of {} bytes",
+                    buf.len(),
+                    wire.len()
+                );
+            }
+            buf.put_u8(wire[wire.len() - 1]);
+            assert!(matches!(Iap2Codec.decode(&mut buf), Ok(Some(_))));
+            assert!(buf.is_empty(), "decoder left bytes behind");
+        }
+    }
+
     /// A real accessory SYN, used by the `start` tests below.
     const BENCH_SYN: &str = "ff5a001780a8000068017fffff07d003e81e0601000299";
 
-    /// `Iap2::start` end to end: switch echoed on the raw stream, then the SYN handshake.
+    /// The iAP1 detect, as the CFMOTO head unit sends it.
+    const DETECT: &str = "ff550200ee10";
+
+    /// `Iap2::start` end to end: the detect echoed, then the SYN handshake.
     #[tokio::test]
-    async fn start_echoes_the_switch_for_an_iap1_accessory() {
+    async fn start_echoes_the_detect_for_an_iap1_accessory() {
         let (ours, mut theirs) = tokio::io::duplex(1024);
-        theirs.write_all(&hex("ff550200ee10")).await.unwrap();
+        theirs.write_all(&hex(DETECT)).await.unwrap();
 
         let peer = tokio::spawn(async move {
-            // The echo comes first, on its own, before the codec is in play.
             let mut echo = [0u8; 6];
             theirs.read_exact(&mut echo).await.unwrap();
             theirs.write_all(&hex(BENCH_SYN)).await.unwrap();
             let mut buf = [0u8; 128];
             let n = theirs.read(&mut buf).await.unwrap();
-            let (_, reply) = Packet::from_bytes((&buf[..n], 0)).unwrap();
+            let (Frame::Iap2(reply), _) = Frame::read(&buf[..n]).unwrap() else {
+                panic!("expected an iAP2 packet");
+            };
             let ack = Packet::new(
                 ControlByte::with_ack(),
                 0xa8,
@@ -722,29 +764,108 @@ mod tests {
                 0,
                 Vec::new(),
             );
-            theirs.write_all(&ack.to_bytes().unwrap()).await.unwrap();
+            theirs
+                .write_all(&Frame::Iap2(ack).to_bytes().unwrap())
+                .await
+                .unwrap();
             echo
         });
 
         Iap2::start(ours).await.expect("handshake should complete");
-        assert_eq!(peer.await.unwrap(), hex("ff550200ee10").as_slice());
+        assert_eq!(peer.await.unwrap(), hex(DETECT).as_slice());
     }
 
-    /// A silent channel must be abandoned quickly rather than re-read.
-    #[tokio::test(start_paused = true)]
-    async fn a_silent_channel_is_abandoned_quickly() {
-        use crate::ops::switch::perform_switch;
+    /// The accessory does not always detect at the start: over the AirPlay tunnel it moves an
+    /// established session across and detects there, once a second, until it is answered
+    /// (`logs/cfmoto-11-08-1855.pcapng`). Answering only at bring-up left it detecting for ever.
+    #[tokio::test]
+    async fn a_detect_is_echoed_wherever_it_arrives() {
+        let (ours, mut theirs) = tokio::io::duplex(1024);
+        let iap2 = Iap2::wrap(ours);
 
-        let (mut ours, _theirs) = tokio::io::duplex(1024);
+        // A detect between two session messages: only the messages reach the session, and the
+        // echo goes out in between.
+        let data = Packet::new(ControlByte::with_ack(), 0x2a, 0, 2, control_payload());
+        peer_sends(&mut theirs, data).await;
+        theirs.write_all(&hex(DETECT)).await.unwrap();
+        peer_sends(
+            &mut theirs,
+            Packet::new(ControlByte::with_ack(), 0x2b, 0, 2, control_payload()),
+        )
+        .await;
+
+        assert_eq!(iap2.receive_packet().await.unwrap().header.seq, 0x2a);
+        assert_eq!(iap2.receive_packet().await.unwrap().header.seq, 0x2b);
+
+        let mut buf = [0u8; 64];
+        let n = theirs.read(&mut buf).await.unwrap();
+        assert!(
+            buf[..n].windows(6).any(|w| w == hex(DETECT).as_slice()),
+            "the detect was never echoed: {:02x?}",
+            &buf[..n]
+        );
+    }
+
+    /// The tunnel's shape: the accessory detects, and only some seconds after it is answered does
+    /// it SYN - by which time the first attempt has timed out. A transport that has said something
+    /// must therefore still be retried, which is what separates it from a silent one.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_syn_is_still_picked_up() {
+        use crate::ops::syn::Syn;
+
+        let (ours, mut theirs) = tokio::io::duplex(1024);
+        theirs.write_all(&hex(DETECT)).await.unwrap();
+        let iap2 = Iap2::wrap(ours);
+
+        tokio::spawn(async move {
+            let mut echo = [0u8; 6];
+            theirs.read_exact(&mut echo).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+            theirs.write_all(&hex(BENCH_SYN)).await.unwrap();
+
+            let mut buf = [0u8; 128];
+            let n = theirs.read(&mut buf).await.unwrap();
+            let (Frame::Iap2(reply), _) = Frame::read(&buf[..n]).unwrap() else {
+                panic!("expected an iAP2 packet");
+            };
+            let ack = Packet::new(
+                ControlByte::with_ack(),
+                0xa8,
+                reply.header.seq,
+                0,
+                Vec::new(),
+            );
+            theirs
+                .write_all(&Frame::Iap2(ack).to_bytes().unwrap())
+                .await
+                .unwrap();
+        });
+
+        Syn(&iap2)
+            .perform()
+            .await
+            .expect("a late SYN should still complete the handshake");
+    }
+
+    /// A silent channel must be abandoned rather than retried - on RFCOMM it is simply the wrong
+    /// one of the channels BlueZ offered, and the head unit walks away while we re-read it.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_channel_is_abandoned_without_retrying() {
+        use crate::ops::syn::Syn;
+
+        let (ours, _theirs) = tokio::io::duplex(1024);
+        let iap2 = Iap2::wrap(ours);
         let started = tokio::time::Instant::now();
-        let err = perform_switch(&mut ours)
+
+        let err = Syn(&iap2)
+            .perform()
             .await
             .expect_err("a silent channel must not hang");
 
         assert!(matches!(err, Iap2Error::Timeout(_)), "got {err:?}");
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
-            "gave up after {:?}; the head unit walks away in about two seconds",
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "gave up after {:?}; that is a retry loop, not a single attempt",
             started.elapsed()
         );
     }

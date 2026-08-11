@@ -1,16 +1,6 @@
 set dotenv-load
 mod armbian
 
-test_timeout := "60"
-
-# For local `just run`/`just test-run` only - the real deployment gets cap_net_admin via
-# carjack-hci-helper.service's AmbientCapabilities= instead (see carjack-hci-helper.service).
-# carjack itself never needs the capability; only the helper binary does. Relinking drops the file
-# capability, hence this runs after every build.
-#
-# The iwd `WifiBackend` (`[wifi] backend = "iwd"`) needs CAP_DAC_OVERRIDE/CAP_CHOWN too, but only
-# carjack.service grants those (see its own comment) - nothing setcaps the main binary here, so a
-# local `just run` with backend = "iwd" cannot write profiles.
 [script]
 setcap:
     binary="$(which carjack-hci-helper)"
@@ -24,21 +14,21 @@ setcap:
 
 toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }
 
-# NVIDIA zero-copy encode is an opt-in cargo feature (`cuda`, off by default) so the project builds
-# on non-NVIDIA machines without linking libcuda/libgstcuda. Pass `cuda=true` (or
-# `CARJACK_CUDA=true`) to enable it locally. Just ends up appending `--features cuda`.
-# `cuda=true`/`CARJACK_CUDA=true` enables the opt-in NVIDIA zero-copy feature.
-cuda := env('CARJACK_CUDA', 'false')
+#Needed for nvidia zero-copy support, but also needs some extra deps
+cuda := "false"
 cuda_features := if cuda == 'true' { '--features cuda' } else { '' }
 
-# setcap follows build because relinking drops the capabilities. carjack-hci-helper runs first
-# (best-effort - see its own doc comment) since carjack no longer sets the Class of Device itself.
-run +flags="": (install flags)
-    waydroid session stop && carjack-hci-helper; cargo run {{cuda_features}} {{flags}} < /dev/null
+#lets try without hci-helper for now
+# run +flags="": (install flags)
+# waydroid session stop && carjack-hci-helper; cargo run {{cuda_features}} {{flags}} < /dev/null
+run *flags: (build flags)
+    waydroid session stop
+    cargo run {{cuda_features}} {{flags}}
 
 #Run the app until timeout, then kill it and restore the original wifi connection
 [script('bash')]
-test-run +flags="": (install flags)
+[arg("timeout", short="t", long)]
+test-run timeout="60" *flags: (build flags)
     set -uo pipefail
     original=""
     cleanup() {
@@ -59,8 +49,7 @@ test-run +flags="": (install flags)
     echo "Active connection before test: ${original:-none}" >&2
 
     waydroid session stop || true
-    carjack-hci-helper || true
-    timeout --foreground --kill-after=5s "{{test_timeout}}s" cargo run {{cuda_features}} {{flags}} < /dev/null || true
+    timeout --foreground --kill-after=5s "{{timeout}}s" cargo run {{cuda_features}} {{flags}} < /dev/null || true
 
 build +flags="":
     {{toolbox_build}}cargo build {{cuda_features}} {{flags}}
@@ -68,15 +57,6 @@ build +flags="":
 install +flags="": (build flags) && setcap
     {{toolbox_build}}cargo install --path . {{cuda_features}} {{flags}}
 
-# Install carjack as a system service, running as its own ephemeral `carjack` account (DynamicUser=,
-# not root, not the interactive user - see carjack.service). Setting the adapter's Class of Device
-# needs cap_net_admin; that lives entirely in carjack-hci-helper.service, a oneshot unit that runs
-# before carjack.service starts (see carjack-hci-helper.service) - carjack itself never holds the
-# capability. Not ~/.cargo/bin: SELinux denies system services executing user_home_t files (see
-# carjack.service) - /usr/local/bin gets bin_t, which is permitted. The polkit rule is required -
-# see carjack-polkit.rules for why. Desktop mode (source=desktop) needs a real logged-in user's
-# session and doesn't fit this account; run it as yourself instead (`just run`), not as this
-# service.
 [script]
 install-carjack-service: build
     sudo install -Dm755 target/debug/carjack /usr/local/bin/carjack
@@ -108,10 +88,6 @@ test-proto +flags="":
 test-lib +flags="":
     {{toolbox_build}}cargo test -p libcarjack --lib {{flags}} < /dev/null
 
-# Install -devel packages that cuda-dmabuf links against (libEGL, libgbm, libgstcuda).
-# Only needed when building with the opt-in `cuda` feature (`just cuda=true build`).
-# libcuda comes from the host NVIDIA driver — ensure /usr/lib64/libcuda.so exists in
-# the toolbox (create a symlink or bind-mount the host path).
 install-cuda-dmabuf-deps:
     {{toolbox_build}}sudo dnf install -y libEGL-devel libgbm-devel gstreamer1-plugins-bad-free-devel
 

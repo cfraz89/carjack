@@ -2,18 +2,16 @@ use bytes::Bytes;
 use deku::DekuError;
 use thiserror::Error;
 
-use crate::packet::Packet;
+use crate::packet::{Frame, Packet};
 
 #[derive(Error, Debug)]
 pub enum Iap2Error {
-    #[error("Unexpected bytes: {0} {0:?}")]
-    UnexpectedBytes(String, Bytes),
     #[error("Unexpected packet: {0} {0:?}")]
     UnexpectedPacket(String, Packet),
     #[error("Error with packet decoding. Bytes: {0:?}, error: {1}")]
     PacketDecoding(Bytes, DekuError),
-    #[error("Error with packet encoding. Packet: {0:?}, error: {1}")]
-    PacketEncoding(Packet, DekuError),
+    #[error("Error with frame encoding. Frame: {0:?}, error: {1}")]
+    FrameEncoding(Frame, DekuError),
     #[error("No packet received")]
     NoPacket,
     #[error("Control session error: {0}")]

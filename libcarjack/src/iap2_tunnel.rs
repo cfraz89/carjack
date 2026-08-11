@@ -8,7 +8,8 @@
 //!
 //! This is a byte pipe, not a protocol: `Iap2` still owns framing, sequencing and acknowledgement.
 //! One `iAPSendMessage` is not guaranteed to be one iAP2 frame, so the pipe is a stream and the
-//! link layer re-frames it exactly as it does over RFCOMM.
+//! link layer re-frames it exactly as it does over RFCOMM - down to the iAP1 detect the accessory
+//! opens with here too (`logs/cfmoto-11-08-1855.pcapng`).
 
 use catplay_carplay::carplay_tx::{AirPlayTransmitter, AirPlayTransmitterProxyRef};
 use catplay_carplay::msg::{Command, CommandIApSendMessage};
@@ -117,16 +118,17 @@ async fn pump(
 
 /// Bring an iAP2 link up over the tunnel.
 ///
-/// No iAP1 switch: that is an RFCOMM artefact, and the tunnel carries frames directly. Which side
-/// sends the SYN over AirPlay is not established from a capture yet, so this waits for the
-/// accessory's exactly as the Bluetooth path does.
+/// Identical to the Bluetooth path, and for the same reason: the accessory opens here with the
+/// iAP1 detect (`FF 55 02 00 EE 10`, once a second until it is echoed) before it will send a SYN,
+/// exactly as it does on RFCOMM. The link layer answers it, so there is nothing transport-specific
+/// left to do here.
 pub async fn start_session(
     stream: TunnelStream,
     used: Arc<Notify>,
 ) -> eyre::Result<Iap2<TunnelStream>> {
     used.notified().await;
     tracing::info!("Accessory used the iAP tunnel; bringing iAP2 up over it");
-    let iap2 = Iap2::start_established(stream).await?;
+    let iap2 = Iap2::start(stream).await?;
     tracing::info!("iAP2 tunnel link established");
     Ok(iap2)
 }
