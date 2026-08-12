@@ -1,8 +1,189 @@
 # Where things stand
 
-**Last updated: 2026-08-09.** This is the living document - if it disagrees with
+**Last updated: 2026-08-12.** This is the living document - if it disagrees with
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
+
+## Bench regression after the HEVC switch (2026-08-12): no regression on the wire
+
+`logs/bench-hevc-regression.log`, AUTO BOX, 100 s to the `test-run` timeout. The whole flow held
+with HEVC in place of H264: iAP2 identification (`AUTO BOX`), EA session, WiFi, **Bonjour discovery**
+(the bench path the bike never uses), AirPlay bootstrap, 1080x600 @ 30 fps, first keyframe 7 ms
+after the encoder started, then 86 keyframes and a steady 30.0 fps with **zero dropped frames and no
+teardown**. The bench declares no HEVC support (`hevc_declared=false`, like every unit) and takes it
+anyway. VBR shows too - 2-3 KB frames where CBR sent 12500 every time. Sending no view rect on a
+unit with no `displayPanels` is correctly a no-op.
+
+**What this does not prove is that the bench displays a picture** - exactly the trap the bike set.
+Nothing in a log distinguishes a decoded stream from an ignored one; only eyes on the unit do.
+
+### The Bluetooth teardown: do what the phone does, and stop calling it an error
+
+Three attempts at closing the link ourselves, and the answer was not to. An iPhone does **not**
+disconnect at the handover: its iAP2 traffic ends at `4300`/`4301`, but it keeps acknowledging and
+lets the accessory drop the link. So carjack does the same, and the `os error 104` that has been in
+every log since the beginning is simply reported as what it is.
+
+A `handover` token (fired when the accessory's WiFi associates, or on `disableBluetooth`) marks the
+point after which losing the link is the expected ending. Past it, a link error ends the session
+`Ok`, at info, and no goodbye reset is sent - a phone would not have sent one and the socket is gone
+anyway. Before it, everything behaves exactly as before.
+
+Bench, `logs/bench-swallow-104.log`: `Handover complete` at `52.962`, the accessory drops the
+channel 215 ms later, `Accessory closed the iAP2 link after the handover (IO Error: Connection reset
+by peer)` at **info**, `CarPlay (Bluetooth) session ended` with no error suffix, streaming
+unaffected. No `WARN carjack:` in the run at all.
+
+Recorded so the earlier attempts are not repeated: triggering on the **iAP2 tunnel** only ever fires
+on the bike, since the AUTO BOX never opens one; triggering on **AirPlay connecting** is too late,
+because the AUTO BOX resets the channel 254-444us after that, before `cancel()` even runs on the
+main task.
+
+### There is no codec negotiation to inspect, and nothing inbound is being dropped
+
+There is no SDP in CarPlay: the session is `GET /info`, `SETUP /setup`, `SETUP /` (screen),
+`RECORD /`, `POST /command`, `POST /feedback`. catplay's `Announce` is an unused RTSP enum entry and
+`force_announce` is Bonjour, not SDP. The screen SETUP response carries `data_port` and
+`stream_type` and nothing else. `/info`'s plist is the only capability channel; carjack reads it
+(`hevcInfo`, `features` bit 42 `SUPPORTS_SCREEN_MULTI_CODEC`, `displays`, `displayPanels`) and logs
+`Accessory codec declaration` - both units answer nothing at all for codecs.
+
+That the accessory might be *sending* something we quietly drop was checked separately, since "we
+never logged one" is not the same claim. All four inbound paths:
+
+- **Event channel** - every request is logged before dispatch (non-`/command` is logged *then*
+  404'd). Only `POST /command`, across three runs and both units.
+- **Control connection** - we are the client; an inbound request is `ProtocolViolationGeneric`, a
+  hard error. Zero in any run.
+- **Screen socket** - same strictness, and the bike capture has zero bytes car->us on it.
+- **carplay-ctrl** (bench only; the bike never invites) - logs every frame, but at `debug`, which
+  `catplay_carplay=info` hides. Re-run at debug (`logs/bench-ctrl-debug.log`): exactly one frame,
+  `GET /ctrl-int/1/connect`, and no `Rejected invalid CarPlay-Ctrl request`.
+
+At the network level on the bike: **zero car-initiated TCP connections**, zero RSTs from us, zero
+ICMPv6 unreachables - so nothing was sent to a port we were not listening on either.
+
+## The run that ruled out the source, and the config-frame diff (2026-08-12, later)
+
+`logs/cfmoto-12-08-0456.*`: HEVC on the wire, view rect declared, VBR working - and still black.
+Two things it settled and one lead it produced.
+
+**Waydroid was rendering.** VBR made this answerable for the first time: 1259 video frames, 39 of
+them **over 20 KB** and one at **187 KB**, against a median of 67 B. Filler would have flattened all
+of that to 12500. So a real picture was encoded and sent; the black screen is not a black source.
+
+**The car is now engaging with the stream.** It sent a `ForceKeyFrame` 21 ms after RECORD - the
+first time it has ever asked us for anything on the video path - and forwarded 33 touch reports, so
+it is in CarPlay mode with our stream as its screen.
+
+**What is still different from the iPhone is the config frame**, byte for byte:
+
+```
+                    iPhone              carjack (before)
+small_param         00 1e 01            00 0e 00
+compressorname      04 "HEVC"           06 "'1cva'"      <- the AVC name, in an hvc1 entry
+after hvcC          colr (nclc 1/13/1)  absent
+first video frame   small_param[0]=0x10 0x00
+```
+
+The flags line is the substantive one. `ScreenFlag` was a `u8` over `small_param[1]`, with
+`// const NoDisplaySleep = 1 << 8;` commented out in catplay - a bit that cannot fit a `u8`. Read
+as a **16-bit little-endian field across `small_param[1]` and `[2]`**, the iPhone's `1e 01` is
+`0x011e`: the flags we already sent, plus bit 4 and **`NoDisplaySleep`**. A receiver that was never
+told to keep its panel awake is a plausible black screen with every other layer healthy.
+
+Fixed in the fork (`821c412`, branch `feat/hevc-and-view-rect`): flags are 16-bit and carry
+`NoDisplaySleep` and bit 4; an `hvc1` entry names `HEVC`; the `colr` atom (BT.709 / sRGB) is
+appended. A test pins the result against the captured reference bytes. The first-frame `0x10`
+marker is **not** done - it needs per-session state in the screen transmitter.
+
+**Untested on the bike.** If it is still black, the remaining deltas are that marker byte, the
+`dataRefIndex`/quality fields in the sample entry (`ffff`/`0x200` vs `00ff`/`0`), and the
+one-pixel view origin difference.
+
+## Built: HEVC, VBR and the view rect (2026-08-12)
+
+All three of the differences from the iPhone below are now closed, verified locally through the
+real encode chain (`tests/encode_dump.rs`, decoded with ffmpeg) but **not yet against the bike**.
+
+- **HEVC.** `[graphics] codec` takes `auto` (the default), `hevc` or `h264`; `auto` means HEVC.
+  Nothing to negotiate against - the bike advertises neither `hevcInfo` nor
+  `SUPPORTS_SCREEN_MULTI_CODEC` (its feature bits are 7, 9, 18, 26, 32, 37, 38) and takes HEVC from
+  a phone anyway - so the declaration is logged as confirmation and never as a veto, and `auto`
+  falls back to H264 only when no HEVC encoder is installed. `vah265enc`/`nvh265enc`/`v4l2h265enc`
+  are in the backend table, and `extract_codec_config` now collects VPS/SPS/PPS (NAL 32/33/34)
+  as well as H264's SPS/PPS.
+- **One trap worth knowing:** left to negotiate freely `vah265enc` takes `vapostproc`'s YUY2 and
+  encodes **4:2:2** (`main-422-10`, which decodes as Range Extensions) - no car decodes that. The
+  fix is the new `encoder_input` column pinning NV12 *with its memory feature named*; constraining
+  the encoder's output profile instead looks equivalent and isn't, because it pushes the upstream
+  negotiation onto DMABuf and dies with "DMABuf caps negotiated without the mandatory support of
+  VideoMeta". Output is now HEVC Main / yuv420p / 800x1280, matching the phone.
+- **VBR, both codecs.** `rate-control=vbr` (and `video_bitrate_mode=0` for v4l2, `pass=qual` for
+  x264enc), so `bitrate` is a ceiling rather than a floor of filler. Measured over the same 600
+  frames of Waydroid: **7.13 MB H264/CBR -> 1.70 MB H264/VBR -> 1.36 MB HEVC/VBR.**
+- **The view rect.** `params[3..6]` of the config frame now carry origin and size from `/info`'s
+  `displayPanels` (fork branch `feat/hevc-and-view-rect`, which also parses `displayPanels` at
+  all). For the bike that is origin `(0, 224)`, size `800x1056`. The iPhone sends `223`, one less
+  than the panel declares, for reasons unknown - the declared value is used.
+
+## The iPhone reference settles it: we send the wrong codec (2026-08-12)
+
+`logs/cfmoto-iphone.pcapng` - a working iPhone session against this same bike - was re-parsed frame
+by frame (screen frame headers are plaintext). It differs from what carjack sends in four ways, and
+the first is almost certainly the black screen:
+
+- **The iPhone streams HEVC, not H264.** Its `VideoConfig` is a `hvc1` sample entry (compressorname
+  "HEVC", coded 800x1280) with `UseFormatDescription` set - `small_param[1] = 0x1e` against our
+  `0x06`. carjack sends H264 through `vah264enc` and hardcodes `hevc: false`. The bike takes it,
+  ACKs it, asks for nothing, and displays nothing. catplay already has the send path
+  (`hevc: true` -> `hvcc_config_serialize` -> `hvc1`/`hvcC` atom); what is missing on our side is an
+  HEVC encoder and NAL parsing for VPS/SPS/PPS (32/33/34) in `extract_avcc_config`.
+- **It declares the video's view rect.** `params[3..6]` carry origin `(0, 223)` and size
+  `(800, 1056)` - matching `/info`'s `displayPanels.initialVideoStreams.originYPixels = 224` under a
+  1280-tall panel. carjack sets only `params[1]` (the 800x1280 display size); catplay's decode path
+  has the view params commented out.
+- **It sends frames only when the screen changes.** 77 video frames in 6.6 s (~11 fps average),
+  arriving in bursts with idle gaps of 0.5 s, 1.0 s, 1.0 s and **4.0 s**, filled by
+  `KeepAliveWithBody`. Sizes run 376 B to 63 KB (median 11 KB) - VBR, no filler - averaging
+  1.66 Mbit/s while active and nothing while idle. carjack renders on a fixed 30 fps timer by
+  design and pads every frame to the CBR target, so it transmits a flat 3.0 Mbit/s forever.
+- **Its frame PTS omits the NTP epoch offset**, which its time sync packets carry: `t3` read
+  `2209933588.87` and the PTS on frames 0.5 s later read `944789.37`, exactly one epoch apart. See
+  the correction below.
+
+## Corrected: the frame PTS was never wrong (2026-08-12)
+
+An earlier entry here called the 70-year gap between catplay's time sync domain and its frame PTS a
+bug, "fixed" it in the fork on `fix/media-clock-ntp-domain`, and predicted the bike would then show
+a picture. **Both halves were wrong.** The iPhone capture above shows a real sender doing exactly
+what catplay already did - sync packets in NTP, PTS in bare monotonic - and the bike stayed black
+after the change, which should have been the first clue.
+
+Reverted: the change is gone from every branch the build uses. The only thing kept is a doc comment
+and a test on `NTP_UNIX_EPOCH_OFFSET_NS` (fork commit `283adaf`, on `fix/airplay-device-identity`
+and inherited by `feat/hevc-and-view-rect`) pinning the split, so it does not get "fixed" a second
+time. The `fix/media-clock-ntp-domain` branch is left on the fork, unused.
+
+## Also settled on 2026-08-12
+
+- **The encode path is correct.** `tests/encode_dump.rs` writes what the encoder would send to a
+  file, through the backend `main` actually picks (the screenshot driver forces SHM and proves
+  nothing about the dmabuf chain). Decoded at the bike's 800x1280 through `vapostproc ! vah264enc`:
+  a correct, upright picture. Framing and orientation are ruled out - the *codec choice* is not.
+- **Frame size means nothing.** `rate-control=cbr` pads every frame to exactly `bitrate/fps` =
+  12500 bytes, so an empty black compositor still costs ~10 KB a frame, and every "healthy 30 fps
+  at 12500 bytes" heartbeat is equally consistent with a black screen. `CARPLAY_ENCODER` overrides
+  the tuning without a rebuild, so `rate-control=vbr` is a one-env-var experiment - and the iPhone
+  numbers above say VBR is also what the real thing does.
+- **A stale waydroid session is still a live trap.** The `0136` run's stream is indistinguishable
+  from black (2207 frames, not one over the cap, opening with the exact 281-byte IDR + 45-byte
+  P-frame signature of a uniform black frame), waydroid printed none of its startup lines into that
+  log, and it was found afterwards attached to a dead socket. Check `waydroid status` before a run
+  and grep the log for `Android with user 0 is ready` before reading anything into the protocol.
+- **`disableBluetooth` never arrives on this unit** - not over AirPlay, iAP2 or the tunnel, in any
+  capture. The car signals the handover by bringing the tunnelled iAP2 link up and resetting RFCOMM
+  76 ms later, so the graceful shutdown fires on the tunnel link as well as on the command.
 
 ## Reverted: back to NetworkManager, not iwd (2026-08-09)
 

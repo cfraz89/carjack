@@ -81,6 +81,7 @@ async fn desktop_pipewire_encodes() -> Result<()> {
             1080,
             600,
             mode,
+            carjack::config::CodecChoice::Auto,
             Bitrate::default(),
             video_tx,
             dsize_tx,

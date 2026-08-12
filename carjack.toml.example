@@ -44,11 +44,22 @@ drm_device = "auto"
 #   false    - software encode only
 zerocopy = "auto"
 
-# Target video bitrate in kbit/s, applied as CBR to whichever H264 encoder is selected (hardware or
-# software). The car's WiFi link is the bottleneck, so aiming too high shows up as stutter rather
-# than as detail - raise it only if the picture looks soft and the stream stays smooth.
+# Which codec the screen stream carries:
+#   "auto"   - HEVC, which is what a real iPhone sends every head unit captured so far
+#   "hevc"   - the same, explicitly
+#   "h264"   - for an accessory that turns out to need the older codec
+# Nothing an accessory sends reliably declares this: the CFMOTO unit advertises neither `hevcInfo`
+# nor the multi-codec feature bit and still takes HEVC from a phone, so "auto" cannot do better
+# than the phone's own choice. Falls back to H264 if the machine has no HEVC encoder installed.
+# Also settable as CARJACK.GRAPHICS.CODEC.
+codec = "auto"
+
+# Target video bitrate in kbit/s, applied as VBR to whichever encoder is selected (hardware or
+# software) - so this is a ceiling, not what a still screen costs. The car's WiFi link is the
+# bottleneck, so aiming too high shows up as stutter rather than as detail - raise it only if the
+# picture looks soft and the stream stays smooth.
 # Also settable as `carjack --bitrate <KBPS>` or CARJACK.GRAPHICS.BITRATE.
-bitrate = 3000   # 3 Mbit/s
+bitrate = 3000   # 3 Mbit/s ceiling
 
 [display]
 # Initial compositor size/rate, used before the car reports its real display over AirPlay.

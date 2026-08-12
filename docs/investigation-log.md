@@ -12,6 +12,119 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
 
 ## 2026-08
 
+- **2026-08-12 (`logs/cfmoto-iphone.pcapng`, re-parsed): the bike gets HEVC from an iPhone and H264
+  from us - and the PTS "fix" two entries below was wrong, now reverted.** The reference capture
+  had been lost (`logs/` is gitignored) and was restored; parsing its screen socket frame by frame
+  answers several open questions at once. 77 video frames, one `VideoConfig`, 8 keep-alives, over a
+  6.6 s window.
+
+  **It sends HEVC.** The config payload is a `hvc1` sample entry - fourcc `68 76 63 31`,
+  compressorname "HEVC", coded 800x1280 - with `small_param[1] = 0x1e`
+  (`RespectTimestamps | Encrypted | UseFormatDescription | 0x10`) against our `0x06`. So the whole
+  time we have been sending H264 to a unit that a real phone only ever gives H265. It takes ours,
+  ACKs it, never asks for a keyframe, and shows nothing - which is what an undecodable stream looks
+  like from the sender's side. `0x10` is a flag catplay does not name.
+
+  **It declares where the video goes.** `params[3..6]`: origin `(0, 223)`, size `(800, 1056)`,
+  twice. That matches `/info`'s `displayPanels.initialVideoStreams.originYPixels = 224` under an
+  800x1280 panel - a 224 px instrument strip above a 1056-tall video area. carjack sends only
+  `params[1] = (800, 1280)`; catplay's decode path has the view params commented out.
+
+  **It stops sending when nothing changes** - the original question. Frames arrive in bursts a
+  millisecond or two apart, separated by idle gaps of 0.504 s, 0.986 s, 0.984 s and **4.044 s**,
+  with `KeepAliveWithBody` in between. 376 B to 63 KB per frame, median 11 KB: VBR, no filler,
+  1.66 Mbit/s while active and nothing while idle. carjack renders on a fixed 30 fps timer *by
+  design* (`src/compositor.rs:6`) and pads every frame to the CBR target, so it sends a flat
+  3.0 Mbit/s whether the screen moves or not.
+
+  **And it puts its frame PTS one NTP epoch below its own time sync.** Its `t3` read
+  `2209933588.87` (epoch + 944,788 s of uptime); the PTS on frames half a second later read
+  `944789.37`. Bare monotonic, no epoch - exactly what catplay did before the change below. That
+  change is reverted; all that survives is a doc comment and a test on `NTP_UNIX_EPOCH_OFFSET_NS`
+  (fork `283adaf`, on `fix/airplay-device-identity`) pinning the split so it does not get "fixed"
+  again. The bike staying black after the change should have been read as the fix being wrong
+  rather than as a second cause.
+
+- **2026-08-12 (`logs/cfmoto-12-08-0136.*` + local encode dumps): the PTS fix is on the wire and
+  the encode path is proven correct, so a black screen is now most likely a black *source*. Also:
+  this unit never sends `disableBluetooth`.** Three things settled, one still open.
+
+  **The PTS fix works.** Frame `params[0]` now reads `2208988800 + elapsed`, the same domain as the
+  timing exchange, where it used to be bare elapsed. The bike still showed black, so the 70-year
+  skew was a real bug but not the whole story.
+
+  **The encode path is not the problem, and frame size never meant what it looked like.**
+  `tests/encode_dump.rs` (new, `#[ignore]`d) writes what the encoder would send to a file, through
+  whichever backend `main` picks - unlike the screenshot driver, which forces SHM and so proves
+  nothing about the dmabuf chain. At the bike's own 800x1280 through `vapostproc ! vah264enc`, the
+  decoded output is a correct, upright picture. But the *empty* compositor - verifiably pure black,
+  `mean=0 stddev=0` - still costs ~10 KB a frame, because `rate-control=cbr` pads every frame with
+  filler to exactly `bitrate/fps` = 12500 bytes. So:
+
+  ```
+  cfmoto-12-08-0050: 2880 frames, keyframes to 120 KB   -> live content on the wire
+  cfmoto-12-08-0136: 2207 frames, nothing over 12516 B  -> indistinguishable from black
+  ```
+
+  Locally, a live home screen goes over the cap within seconds (69 KB P-frames during the wallpaper
+  animation); 73 s without a single overshoot fits a static or black source. The `0136` run also
+  opens with a 281-byte IDR and 29 45-byte frames - byte for byte the signature a uniform black
+  frame produces in every local dump - and carries **none** of waydroid's startup output
+  (`Starting waydroid session`, `Android with user 0 is ready`), which a fresh launch prints
+  through the same inherited stdio. Waydroid was found afterwards `RUNNING` with
+  `Wayland display: wayland-1`, a socket belonging to a carjack that had already exited: the stale
+  session of [[black-feed-stale-waydroid]], which paints nothing and takes ~18 s to paint even when
+  started clean. Not proven for that run, but it is the reading the evidence supports.
+
+  **`disableBluetooth` never arrives.** Not over AirPlay, not over iAP2, not through the tunnel -
+  in any capture. The car's actual handover signal is the tunnel itself: it brought the tunnelled
+  iAP2 link up at 15:37:05.0617 and reset the RFCOMM channel 76 ms later. So the graceful-shutdown
+  path now fires on the tunnel link coming up as well as on the command, which is what makes it
+  fire on this unit at all.
+
+- **2026-08-12 (`logs/cfmoto-12-08-0050.pcapng` + `.log`): the bike's black screen is a frame PTS
+  70 years in the past - catplay's timing server and its frame timestamps are in different time
+  domains.** The session itself is the healthiest yet: 2880 video frames (36 MB) delivered over
+  96 s on the screen socket, every one TCP-ACKed, no RST, no `ForceKeyFrame` from the car, 33
+  `HidSendReport` touches coming back, and the iAP2 tunnel linking for the first time. The car
+  takes everything we send and displays nothing.
+
+  The screen frame header is plaintext (only `VideoFrame` bodies are ChaCha'd), so the capture can
+  be parsed directly. It is well-formed: one `VideoConfig` (opcode 1) carrying an
+  AVCDecoderConfigurationRecord - High profile, level 3.2, 4-byte NAL lengths, 1 SPS + 1 PPS -
+  `params[1] = (800.0, 1280.0)` matching `/info`, `small_param[1] = 0x06` =
+  `Encrypted | RespectTimestamps`, then 2880 `VideoFrame`s and 94 keep-alives.
+
+  What does not line up is `params[0]`, the presentation timestamp:
+
+  ```
+  timing (UDP, 44 exchanges): car t3 = 2208988800.6856   we answer 2208988800.0723
+  screen frame params[0]:     first  =          0.2229   ... +1/30 s per frame
+  ```
+
+  Both sides of the timing exchange are `session elapsed + NTP epoch offset` (2 208 988 800 s) -
+  `MediaClockSession::respond`. `encode_local`, which stamps the frames, is session elapsed with
+  **no** epoch offset. So the car, which does sync (it pinged us every ~2 s for the whole run),
+  places every frame ~70 years before the clock it just synchronised to, and we asked it to honour
+  that with `RespectTimestamps`.
+
+  The obvious reading of the bench AUTO BOX showing video from the same code is that it never runs
+  a timing exchange: with no PLL, `decode_remote` returns `None` and catplay's own decode path falls
+  back to presenting on arrival, so only a unit that actually syncs is affected. Not verified - no
+  capture of a bench session that reached video.
+
+  Changed, in the fork on `fix/media-clock-ntp-domain` (4fe3097, off `fix/airplay-device-identity`,
+  itself one commit off an in-sync upstream master): all four `MediaClock` methods now convert at
+  the NTP boundary rather than only the sync packets doing it. Writing the round-trip test turned up
+  a second trap - `NtpU64::as_nanos` folds its seconds through `i32`, so an absolute NTP value comes
+  back wrapped (that fold is why `test_negative_roundtrip` passes, so it stays). The decode side
+  therefore subtracts the epoch as a *difference* against the same-wrapped constant, which is how
+  `as_nanos` is used everywhere else anyway. 69 crate tests pass; `media_pll::test_drift_effect`
+  fails on the base branch too (`DISABLE_PLL = true`).
+
+  carjack keeps `respect_timestamps: true` and both manifests point at the new branch. **Untested on
+  the bike.**
+
 - **2026-08-05 (code walk + `logs/cfmoto.log`): root cause is the AirPlay `/setup` identity - carjack
   sends a fake identity that matches nothing. Fixed on a catplay fork branch, untested on the bike.**
   The refused screen SETUP is not the problem - the bytes are fine and the bike once *answered* a

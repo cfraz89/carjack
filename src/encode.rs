@@ -1,9 +1,10 @@
 use std::os::fd::AsFd;
+use std::str::FromStr;
 #[cfg(feature = "cuda")]
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
-use catplay_carplay::video::{AnnexBIter, AvccConfig, NalType};
+use catplay_carplay::video::{AnnexBIter, AvccConfig, HevcNalType, NalType};
 use eyre::{Result, eyre};
 use futures::StreamExt;
 use gstreamer as gst;
@@ -18,8 +19,8 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::compositor::CapturedFrame;
-use crate::config::ZeroCopyMode;
-use libcarjack::airplay::EncodedFrame;
+use crate::config::{CodecChoice, ZeroCopyMode};
+use libcarjack::airplay::{EncodedFrame, VideoCodec};
 
 /// The configured target video bitrate, in kbit/s. A newtype because encoders disagree on units -
 /// most take kbit/s, openh264enc and v4l2 take bit/s - so encoder descriptions spell the unit they
@@ -95,6 +96,7 @@ pub enum EncodeBackend {
     /// by every session.
     Hw {
         backend: &'static HwBackend,
+        codec: VideoCodec,
         /// Only on the `cuda` feature: the CUDA context shared across sessions. `Some` exactly for
         /// backends whose [`Import`] is `Cuda`.
         #[cfg(feature = "cuda")]
@@ -102,21 +104,31 @@ pub enum EncodeBackend {
     },
     /// CPU path: the compositor reads frames back to system memory and a software encoder (or, if
     /// the machine has none, a hardware one fed system memory) takes them.
-    Software,
+    Software { codec: VideoCodec },
 }
 
 impl EncodeBackend {
     /// Whether this backend consumes the compositor's dmabuf directly (so the compositor must
     /// forward dmabufs); false means the software path consuming CPU-read-back frames.
     pub fn is_zero_copy(&self) -> bool {
-        !matches!(self, Self::Software)
+        !matches!(self, Self::Software { .. })
+    }
+
+    /// The codec this backend encodes - what the car is told the stream is, and which parameter
+    /// sets are pulled out of a keyframe.
+    pub fn codec(&self) -> VideoCodec {
+        match self {
+            Self::Hw { codec, .. } | Self::Software { codec } => *codec,
+        }
     }
 
     /// Short human-readable name of the selected backend, for logging.
     pub fn describe(&self) -> String {
         match self {
-            Self::Hw { backend, .. } => format!("zero-copy hardware '{}'", backend.name),
-            Self::Software => "software".into(),
+            Self::Hw { backend, codec, .. } => {
+                format!("zero-copy hardware '{}' {}", backend.name, codec.describe())
+            }
+            Self::Software { codec } => format!("software {}", codec.describe()),
         }
     }
 }
@@ -138,28 +150,61 @@ pub fn init_gstreamer() -> Result<()> {
 ///
 /// `render_node` is the GPU the compositor renders on; a zero-copy backend must live on the same
 /// GPU (the CUDA importer opens exactly this node).
-pub fn resolve_backend(mode: ZeroCopyMode, render_node: &str) -> Result<EncodeBackend> {
+pub fn resolve_backend(
+    mode: ZeroCopyMode,
+    render_node: &str,
+    codec: CodecChoice,
+) -> Result<EncodeBackend> {
     let _ = gst::init();
+    let codec = resolve_codec(codec);
     match mode {
-        ZeroCopyMode::Off => Ok(EncodeBackend::Software),
-        ZeroCopyMode::Force => try_zero_copy(render_node).ok_or_else(|| {
+        ZeroCopyMode::Off => Ok(EncodeBackend::Software { codec }),
+        ZeroCopyMode::Force => try_zero_copy(render_node, codec).ok_or_else(|| {
             eyre!(
                 "zerocopy=true but no zero-copy backend is available on {render_node} (tried: {})",
                 HW_BACKENDS
                     .iter()
-                    .map(HwBackend::describe_elements)
+                    .map(|b| b.describe_elements(codec))
                     .collect::<Vec<_>>()
                     .join(", ")
             )
         }),
-        ZeroCopyMode::Auto => Ok(try_zero_copy(render_node).unwrap_or_else(|| {
+        ZeroCopyMode::Auto => Ok(try_zero_copy(render_node, codec).unwrap_or_else(|| {
             tracing::warn!(
                 "zerocopy=auto: no zero-copy backend available on {render_node}, \
                  falling back to SOFTWARE encode"
             );
-            EncodeBackend::Software
+            EncodeBackend::Software { codec }
         })),
     }
+}
+
+/// Settle the configured codec against what this machine can actually encode.
+///
+/// `auto` means HEVC: it is what an iPhone sends every unit captured so far, and no accessory has
+/// been seen to advertise the choice - the `hevcInfo`/`SUPPORTS_SCREEN_MULTI_CODEC` declarations
+/// are absent even on a unit that takes HEVC from a phone, so they can confirm the choice but
+/// never rule it out (see `libcarjack::airplay::AirPlayConnection::hevc_declared`). H264 remains a
+/// config away for an accessory that turns out to need it.
+pub fn resolve_codec(choice: CodecChoice) -> VideoCodec {
+    let wanted = match choice {
+        CodecChoice::H264 => VideoCodec::H264,
+        CodecChoice::Hevc | CodecChoice::Auto => VideoCodec::Hevc,
+    };
+    if wanted == VideoCodec::H264 || encoder_installed(VideoCodec::Hevc) {
+        return wanted;
+    }
+    tracing::warn!(
+        "codec={choice:?} wants HEVC but no HEVC encoder is installed; falling back to H264"
+    );
+    VideoCodec::H264
+}
+
+/// Whether any encoder for `codec` exists here - hardware row or software default.
+fn encoder_installed(codec: VideoCodec) -> bool {
+    let _ = gst::init();
+    HW_BACKENDS.iter().any(|b| b.encodes(codec))
+        || sw_encoder_candidates(codec).any(|d| element_available(encoder_name(d)))
 }
 
 /// Try to construct a zero-copy backend for `render_node` by probing [`HW_BACKENDS`], honouring an
@@ -168,11 +213,11 @@ pub fn resolve_backend(mode: ZeroCopyMode, render_node: &str) -> Result<EncodeBa
 /// Rows matching the node's actual kernel driver are tried first - a zero-copy import only works
 /// within one GPU, so plain table order can reach a backend whose elements probe fine but whose
 /// import then fails per-frame on a mismatched GPU. The rest stay as fallbacks, in table order.
-fn try_zero_copy(render_node: &str) -> Option<EncodeBackend> {
+fn try_zero_copy(render_node: &str, codec: VideoCodec) -> Option<EncodeBackend> {
     let driver = crate::config::render_node_driver(render_node);
     let mut candidates: Vec<&HwBackend> = HW_BACKENDS
         .iter()
-        .filter(|b| wanted(b) && b.available() && b.can_import_from(driver.as_deref()))
+        .filter(|b| wanted(b) && b.available(codec) && b.can_import_from(driver.as_deref()))
         .collect();
     candidates.sort_by_key(|b| !b.matches_driver(driver.as_deref()));
     tracing::info!(
@@ -194,6 +239,7 @@ fn try_zero_copy(render_node: &str) -> Option<EncodeBackend> {
             Import::DmaBuf => {
                 return Some(EncodeBackend::Hw {
                     backend,
+                    codec,
                     #[cfg(feature = "cuda")]
                     importer: None,
                 });
@@ -206,6 +252,7 @@ fn try_zero_copy(render_node: &str) -> Option<EncodeBackend> {
                 Ok(imp) => {
                     return Some(EncodeBackend::Hw {
                         backend,
+                        codec,
                         importer: Some(Arc::new(imp)),
                     });
                 }
@@ -280,7 +327,7 @@ pub fn driver_has_zero_copy_backend(driver: &str) -> bool {
     let _ = gst::init();
     HW_BACKENDS
         .iter()
-        .any(|b| wanted(b) && b.matches_driver(Some(driver)) && b.available())
+        .any(|b| wanted(b) && b.matches_driver(Some(driver)) && b.encodes(VideoCodec::H264))
 }
 
 /// Whether `CARPLAY_ENCODE_BACKEND` allows this backend (unset = all of them). Applies to both
@@ -306,6 +353,7 @@ pub async fn encode_h264_to_channel(
 ) -> Result<()> {
     gst::init()?;
 
+    let codec = backend.codec();
     let pipeline = gst::Pipeline::new();
 
     let mk = |name: &str, label: &str| {
@@ -441,7 +489,7 @@ pub async fn encode_h264_to_channel(
     }));
 
     // `_frame_feeder` stays alive for the whole call, feeding the appsrc while the pipeline runs.
-    drive_h264_pipeline(&pipeline, &encoder, video_tx, keyframe_rx).await
+    drive_video_pipeline(&pipeline, &encoder, codec, video_tx, keyframe_rx).await
 }
 
 /// Stream the user's existing desktop, captured via the xdg-desktop-portal ScreenCast PipeWire
@@ -456,12 +504,14 @@ pub async fn encode_pipewire_to_channel(
     width: u32,
     height: u32,
     zerocopy: ZeroCopyMode,
+    codec: CodecChoice,
     bitrate: Bitrate,
     video_tx: mpsc::Sender<EncodedFrame>,
     desktop_size_tx: tokio::sync::watch::Sender<Option<(u32, u32)>>,
     keyframe_rx: mpsc::Receiver<()>,
 ) -> Result<()> {
     gst::init()?;
+    let codec = resolve_codec(codec);
     let pipeline = gst::Pipeline::new();
     let src = gst::ElementFactory::make("pipewiresrc")
         .name("source")
@@ -499,8 +549,8 @@ pub async fn encode_pipewire_to_channel(
         });
     }
 
-    let encoder = build_pipewire_encode(&pipeline, &src, width, height, zerocopy, bitrate)?;
-    drive_h264_pipeline(&pipeline, &encoder, video_tx, keyframe_rx).await
+    let encoder = build_pipewire_encode(&pipeline, &src, width, height, zerocopy, codec, bitrate)?;
+    drive_video_pipeline(&pipeline, &encoder, codec, video_tx, keyframe_rx).await
 }
 
 /// Build the desktop encode chain from `src` (a `pipewiresrc`), scaling/re-timing to the car's
@@ -513,6 +563,7 @@ fn build_pipewire_encode(
     width: u32,
     height: u32,
     zerocopy: ZeroCopyMode,
+    codec: VideoCodec,
     bitrate: Bitrate,
 ) -> Result<gst::Element> {
     let mk = |name: &str, label: &str| {
@@ -543,7 +594,10 @@ fn build_pipewire_encode(
     // NVIDIA the final GL->CUDA handoff still downloads to system memory (interop fails), but it's
     // still the right choice when the desktop is NVIDIA-rendered.
     let build_hw = |b: &HwBackend| -> Result<gst::Element> {
-        let (enc_name, encoder) = make_encoder(&b.encoder_desc(bitrate))?;
+        let desc = b
+            .encoder_desc(codec, bitrate)
+            .ok_or_else(|| eyre!("'{}' cannot encode {}", b.name, codec.describe()))?;
+        let (enc_name, encoder) = make_encoder(&desc)?;
         let mut chain = b
             .desktop
             .iter()
@@ -581,7 +635,7 @@ fn build_pipewire_encode(
             driver.as_deref().unwrap_or("unknown"),
             candidates.first().map(|b| b.name).unwrap_or("none"),
         );
-        if let Some(b) = candidates.into_iter().find(|b| b.desktop_available()) {
+        if let Some(b) = candidates.into_iter().find(|b| b.desktop_available(codec)) {
             return build_hw(b);
         }
         if matches!(zerocopy, ZeroCopyMode::Force) {
@@ -598,7 +652,7 @@ fn build_pipewire_encode(
     }
 
     // Software: CPU convert + scale.
-    let (enc_name, encoder) = make_encoder(&software_encoder_desc(bitrate)?)?;
+    let (enc_name, encoder) = make_encoder(&software_encoder_desc(codec, bitrate)?)?;
     let rate = mk("videorate", "videorate")?;
     let scale = mk("videoscale", "videoscale")?;
     let convert = mk("videoconvert", "videoconvert")?;
@@ -613,12 +667,13 @@ fn build_pipewire_encode(
     Ok(encoder)
 }
 
-/// Link `encoder` (whose src pad emits H264) -> `h264parse` -> `appsink`, forward each access unit
-/// to `video_tx`, set the pipeline PLAYING, and run its bus until EOS/error. The pipeline is torn
-/// down when this future is dropped. Shared by the internal-compositor and portal source paths.
-async fn drive_h264_pipeline(
+/// Link `encoder` -> the codec's parser -> `appsink`, forward each access unit to `video_tx`, set
+/// the pipeline PLAYING, and run its bus until EOS/error. The pipeline is torn down when this
+/// future is dropped. Shared by the internal-compositor and portal source paths.
+async fn drive_video_pipeline(
     pipeline: &gst::Pipeline,
     encoder: &gst::Element,
+    codec: VideoCodec,
     video_tx: mpsc::Sender<EncodedFrame>,
     keyframe_rx: mpsc::Receiver<()>,
 ) -> Result<()> {
@@ -628,13 +683,17 @@ async fn drive_h264_pipeline(
             .build()
             .map_err(|_| eyre!("failed to create {label} ({name})"))
     };
-    let output_caps = gst::Caps::builder("video/x-h264")
+    let (media_type, parser_name) = match codec {
+        VideoCodec::H264 => ("video/x-h264", "h264parse"),
+        VideoCodec::Hevc => ("video/x-h265", "h265parse"),
+    };
+    let output_caps = gst::Caps::builder(media_type)
         .field("stream-format", "byte-stream")
         .field("alignment", "au")
         .build();
 
-    let h264parse = mk("h264parse", "h264parse")?;
-    h264parse.set_property("config-interval", -1i32);
+    let parser = mk(parser_name, parser_name)?;
+    parser.set_property("config-interval", -1i32);
     // Forced keyframes, asked for by the car. An upstream force-key-unit event on the encoder's
     // src pad works portably across every backend, no per-backend special-casing needed.
     // `all_headers` re-sends SPS/PPS with the IDR, letting a desynced car latch back on.
@@ -670,17 +729,17 @@ async fn drive_h264_pipeline(
     appsink.set_property("sync", false);
 
     pipeline
-        .add(&h264parse)
-        .map_err(|_| eyre!("add h264parse"))?;
+        .add(&parser)
+        .map_err(|_| eyre!("add {parser_name}"))?;
     pipeline
         .add(&sink_queue)
         .map_err(|_| eyre!("add sink_queue"))?;
     pipeline.add(&appsink).map_err(|_| eyre!("add appsink"))?;
     tracing::debug!(?pipeline, "Gstreamer pipeline");
     encoder
-        .link(&h264parse)
+        .link(&parser)
         .map_err(|_| eyre!("link encoder-parse"))?;
-    h264parse
+    parser
         .link(&sink_queue)
         .map_err(|_| eyre!("link parse-queue"))?;
     sink_queue
@@ -697,7 +756,7 @@ async fn drive_h264_pipeline(
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
                 let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                 let au = normalize_annexb_4byte(map.as_slice());
-                let config = extract_avcc_config(&au);
+                let config = extract_codec_config(&au, codec);
                 match video_tx.blocking_send(EncodedFrame { data: au, config }) {
                     Ok(()) => Ok(gst::FlowSuccess::Ok),
                     Err(_) => Err(gst::FlowError::Eos),
@@ -774,12 +833,23 @@ pub struct HwBackend {
     desktop: &'static [&'static str],
     /// The memory feature `desktop` hands the encoder (`memory:DMABuf`, `memory:GLMemory`, ...).
     desktop_memory: &'static str,
-    /// gst-launch-style hardware encoder description, tuned for real time (CBR, no B-frames, ~1s
+    /// gst-launch-style hardware encoder description, tuned for real time (VBR, no B-frames, ~1s
     /// keyframes). One string serves every path this backend appears on - compositor, desktop,
     /// and the system-memory fallback in [`software_encoder_desc`] - so the tuning has to hold on
     /// both GPU and system memory (see the nvenc gop-size note below). `CARPLAY_ENCODER` overrides
     /// it wholesale.
+    ///
+    /// VBR, not CBR: CBR pads every frame with filler to the exact target, so a static screen costs
+    /// as much as a moving one. An iPhone's stream is variable and idles at nothing.
     encoder: &'static str,
+    /// The same for HEVC, where this backend has one. `None` means this row cannot encode HEVC and
+    /// is skipped when that codec is asked for.
+    encoder_hevc: Option<&'static str>,
+    /// Caps to hand the encoder on the compositor path, when what the postproc offers first is not
+    /// what the car wants. `vah265enc` takes `vapostproc`'s YUY2 and encodes 4:2:2 (`main-422-10`,
+    /// which decodes as Range Extensions) unless NV12 is spelled out; a phone sends 8-bit 4:2:0.
+    /// The memory feature has to be named too, or negotiation falls back to system memory.
+    encoder_input: Option<&'static str>,
 }
 
 /// Probed in order; the first whose elements all exist wins.
@@ -799,8 +869,14 @@ const HW_BACKENDS: &[HwBackend] = &[
         // desktop GL path's GL->CUDA handoff downloads, and the no-CPU-encoder fallback), and
         // nvenc emits an IDR every frame at gop-size=30 specifically when fed system memory. 60 is
         // the one value that behaves on every path this row appears on.
-        encoder: "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=cbr bitrate={kbps} \
+        encoder: "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=vbr bitrate={kbps} \
                   gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true aud=true",
+        encoder_hevc: Some(
+            "nvh265enc preset=p4 tune=ultra-low-latency rc-mode=vbr bitrate={kbps} \
+             gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true aud=true",
+        ),
+        // The CUDA importer already hands the encoder what it wants.
+        encoder_input: None,
     },
     // Qualcomm / embedded (the deployment target). v4l2 stateful encoders take DMABuf directly;
     // rate/keyframe control goes through V4L2 controls (`extra-controls`) rather than gst
@@ -812,7 +888,12 @@ const HW_BACKENDS: &[HwBackend] = &[
         postproc: Some("v4l2convert"),
         desktop: &["v4l2convert"],
         desktop_memory: "memory:DMABuf",
-        encoder: "v4l2h264enc extra-controls=controls,video_bitrate_mode=1,video_bitrate={bps}",
+        // `video_bitrate_mode=0` is VBR in V4L2 (1 is CBR).
+        encoder: "v4l2h264enc extra-controls=controls,video_bitrate_mode=0,video_bitrate={bps}",
+        encoder_hevc: Some(
+            "v4l2h265enc extra-controls=controls,video_bitrate_mode=0,video_bitrate={bps}",
+        ),
+        encoder_input: Some("video/x-raw(memory:DMABuf), format=NV12"),
     },
     // Intel / AMD VA-API. vapostproc imports the dmabuf and outputs NV12 in VAMemory, which
     // vah264enc consumes on the same GPU - fully zero-copy.
@@ -823,34 +904,51 @@ const HW_BACKENDS: &[HwBackend] = &[
         postproc: Some("vapostproc"),
         desktop: &["vapostproc"],
         desktop_memory: "memory:DMABuf",
-        encoder: "vah264enc rate-control=cbr bitrate={kbps} b-frames=0 ref-frames=1 \
+        // Under VBR `bitrate` is the ceiling and `target-percentage` (default 66) sets the target.
+        encoder: "vah264enc rate-control=vbr bitrate={kbps} b-frames=0 ref-frames=1 \
                   target-usage=6 key-int-max=30 aud=true",
+        encoder_hevc: Some(
+            "vah265enc rate-control=vbr bitrate={kbps} b-frames=0 ref-frames=1 \
+             target-usage=6 key-int-max=30 aud=true",
+        ),
+        encoder_input: Some("video/x-raw(memory:VAMemory), format=NV12"),
     },
 ];
 
 impl HwBackend {
     /// The encoder description for this backend on any path, still holding its bitrate placeholder.
     /// `CARPLAY_ENCODER` wins over the row's tuned default - the override applies to hardware
-    /// backends too, not just software.
-    fn encoder_template(&self) -> String {
-        encoder_override().unwrap_or_else(|| self.encoder.to_string())
+    /// backends too, not just software - and is assumed to match the codec being asked for.
+    fn encoder_template(&self, codec: VideoCodec) -> Option<String> {
+        if let Some(desc) = encoder_override() {
+            return Some(desc);
+        }
+        match codec {
+            VideoCodec::H264 => Some(self.encoder.to_string()),
+            VideoCodec::Hevc => self.encoder_hevc.map(str::to_string),
+        }
     }
 
     /// The encoder to build for this backend, with the configured `bitrate` substituted in.
-    fn encoder_desc(&self, bitrate: Bitrate) -> String {
-        bitrate.apply(&self.encoder_template())
+    fn encoder_desc(&self, codec: VideoCodec, bitrate: Bitrate) -> Option<String> {
+        self.encoder_template(codec)
+            .map(|t| bitrate.apply(&t))
+    }
+
+    /// Whether this backend can encode `codec` on this machine at all.
+    fn encodes(&self, codec: VideoCodec) -> bool {
+        self.encoder_template(codec)
+            .is_some_and(|t| element_available(encoder_name(&t)))
     }
 
     /// Whether this backend's compositor-path elements all exist on this machine.
-    fn available(&self) -> bool {
-        self.postproc.is_none_or(element_available)
-            && element_available(encoder_name(&self.encoder_template()))
+    fn available(&self, codec: VideoCodec) -> bool {
+        self.postproc.is_none_or(element_available) && self.encodes(codec)
     }
 
     /// Whether this backend's desktop-path elements all exist on this machine.
-    fn desktop_available(&self) -> bool {
-        self.desktop.iter().copied().all(element_available)
-            && element_available(encoder_name(&self.encoder_template()))
+    fn desktop_available(&self, codec: VideoCodec) -> bool {
+        self.desktop.iter().copied().all(element_available) && self.encodes(codec)
     }
 
     /// Whether this backend runs on the GPU driven by DRM `driver` (used to pick the desktop
@@ -871,9 +969,13 @@ impl HwBackend {
     }
 
     /// `"name: elem ! elem ! encoder"`, for logging and the no-backend-available error.
-    fn describe_elements(&self) -> String {
+    fn describe_elements(&self, codec: VideoCodec) -> String {
         let chain = self.postproc.map(|p| format!("{p} ! ")).unwrap_or_default();
-        format!("{}: {chain}{}", self.name, encoder_name(self.encoder))
+        let enc = self
+            .encoder_template(codec)
+            .map(|t| encoder_name(&t).to_string())
+            .unwrap_or_else(|| format!("no {} encoder", codec.describe()));
+        format!("{}: {chain}{enc}", self.name)
     }
 }
 
@@ -916,13 +1018,15 @@ fn build_backend(
     backend: &EncodeBackend,
     bitrate: Bitrate,
 ) -> Result<(gst::Element, FrameFeeder)> {
+    let codec = backend.codec();
     match backend {
-        EncodeBackend::Software => Ok((
-            build_software_chain(pipeline, tail, bitrate)?,
+        EncodeBackend::Software { .. } => Ok((
+            build_software_chain(pipeline, tail, codec, bitrate)?,
             FrameFeeder::Shm,
         )),
         EncodeBackend::Hw {
             backend,
+            codec: _,
             #[cfg(feature = "cuda")]
             importer,
         } => {
@@ -933,7 +1037,7 @@ fn build_backend(
                 // bin (the bin propagates its contexts to children as they're added).
                 pipeline.set_context(&importer.gst_context());
             }
-            let encoder = build_hw_chain(pipeline, tail, backend, bitrate)?;
+            let encoder = build_hw_chain(pipeline, tail, backend, codec, bitrate)?;
             #[cfg(feature = "cuda")]
             let feeder = match importer {
                 Some(importer) => FrameFeeder::Cuda(importer.clone()),
@@ -949,9 +1053,9 @@ fn build_backend(
 /// Software encoder default. x264enc is the most widely available H264 encoder, but its defaults
 /// are tuned for *file* encoding and would add seconds of lag: `ultrafast`/`zerolatency` and
 /// `bframes=0` remove reordering/lookahead delay, `key-int-max=30` matches the hardware backends'
-/// ~1s keyframes, `pass=cbr` gives a steady rate instead of x264's spiky default, and
-/// `byte-stream`/`aud` match what the AirPlay screen sink consumes.
-const DEFAULT_SW_ENCODER: &str = "x264enc speed-preset=ultrafast tune=zerolatency pass=cbr \
+/// ~1s keyframes, `pass=qual` is x264's bitrate-targeted VBR (`cbr` would pad a static screen to
+/// the full rate), and `byte-stream`/`aud` match what the AirPlay screen sink consumes.
+const DEFAULT_SW_ENCODER: &str = "x264enc speed-preset=ultrafast tune=zerolatency pass=qual \
     bitrate={kbps} key-int-max=30 bframes=0 byte-stream=true aud=true";
 
 /// Tried in order when [`DEFAULT_SW_ENCODER`] isn't installed. openh264enc is the usual stand-in
@@ -959,34 +1063,55 @@ const DEFAULT_SW_ENCODER: &str = "x264enc speed-preset=ultrafast tune=zerolatenc
 const SW_ENCODER_FALLBACKS: &[&str] =
     &["openh264enc complexity=low rate-control=bitrate bitrate={bps} gop-size=30"];
 
+/// The HEVC equivalents, in the same order of preference.
+const DEFAULT_SW_ENCODER_HEVC: &str = "x265enc speed-preset=ultrafast tune=zerolatency \
+    bitrate={kbps} key-int-max=30 option-string=bframes=0";
+const SW_ENCODER_FALLBACKS_HEVC: &[&str] = &[];
+
+/// Software encoder descriptions to try for `codec`, most preferred first.
+fn sw_encoder_candidates(codec: VideoCodec) -> impl Iterator<Item = &'static str> + Clone {
+    let (first, rest) = match codec {
+        VideoCodec::H264 => (DEFAULT_SW_ENCODER, SW_ENCODER_FALLBACKS),
+        VideoCodec::Hevc => (DEFAULT_SW_ENCODER_HEVC, SW_ENCODER_FALLBACKS_HEVC),
+    };
+    std::iter::once(first).chain(rest.iter().copied())
+}
+
 /// The encoder for a software (non-zero-copy) chain, honouring `CARPLAY_ENCODER` first.
 ///
 /// Last resort is a hardware encoder fed system memory: `zerocopy=false` rules out zero-copy
 /// import, not the GPU's encoder block, and plenty of machines ship a vendor encoder but no CPU
 /// one. Each row's `encoder` is tuned to hold up on system memory too, so it's usable as-is.
-fn software_encoder_desc(bitrate: Bitrate) -> Result<String> {
+fn software_encoder_desc(codec: VideoCodec, bitrate: Bitrate) -> Result<String> {
     if let Some(desc) = encoder_override() {
         return Ok(bitrate.apply(&desc));
     }
-    let sw = std::iter::once(DEFAULT_SW_ENCODER).chain(SW_ENCODER_FALLBACKS.iter().copied());
+    let sw = sw_encoder_candidates(codec);
     if let Some(desc) = sw.clone().find(|d| element_available(encoder_name(d))) {
         return Ok(bitrate.apply(desc));
     }
     if let Some(desc) = HW_BACKENDS
         .iter()
-        .map(|b| b.encoder_desc(bitrate))
+        .filter_map(|b| b.encoder_desc(codec, bitrate))
         .find(|d| element_available(encoder_name(d)))
     {
         tracing::warn!(
-            "no software H264 encoder installed; using hardware '{}' on system memory",
+            "no software {} encoder installed; using hardware '{}' on system memory",
+            codec.describe(),
             encoder_name(&desc)
         );
         return Ok(desc);
     }
     Err(eyre!(
-        "no H264 encoder available (tried: {})",
-        sw.map(encoder_name)
-            .chain(HW_BACKENDS.iter().map(|b| encoder_name(b.encoder)))
+        "no {} encoder available (tried: {})",
+        codec.describe(),
+        sw.map(|d| encoder_name(d).to_string())
+            .chain(
+                HW_BACKENDS
+                    .iter()
+                    .filter_map(|b| b.encoder_template(codec))
+                    .map(|t| encoder_name(&t).to_string())
+            )
             .collect::<Vec<_>>()
             .join(", ")
     ))
@@ -1001,9 +1126,13 @@ fn build_hw_chain(
     pipeline: &gst::Pipeline,
     src_tail: &gst::Element,
     b: &HwBackend,
+    codec: VideoCodec,
     bitrate: Bitrate,
 ) -> Result<gst::Element> {
-    let (enc_name, encoder) = make_encoder(&b.encoder_desc(bitrate))?;
+    let desc = b
+        .encoder_desc(codec, bitrate)
+        .ok_or_else(|| eyre!("'{}' cannot encode {}", b.name, codec.describe()))?;
+    let (enc_name, encoder) = make_encoder(&desc)?;
     pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
 
     let mut tail = src_tail.clone();
@@ -1017,7 +1146,12 @@ fn build_hw_chain(
             .map_err(|_| eyre!("link src-postproc"))?;
         tail = postproc;
     }
-    tail.link(&encoder).map_err(|_| eyre!("link encoder"))?;
+    match b.encoder_input.map(gst::Caps::from_str).transpose()? {
+        Some(caps) => tail
+            .link_filtered(&encoder, &caps)
+            .map_err(|_| eyre!("link encoder ({caps})"))?,
+        None => tail.link(&encoder).map_err(|_| eyre!("link encoder"))?,
+    }
 
     let chain = b.postproc.map(|p| format!("{p} ! ")).unwrap_or_default();
     tracing::info!(
@@ -1035,6 +1169,7 @@ fn build_hw_chain(
 fn build_software_chain(
     pipeline: &gst::Pipeline,
     src_tail: &gst::Element,
+    codec: VideoCodec,
     bitrate: Bitrate,
 ) -> Result<gst::Element> {
     let mk = |name: &str, label: &str| {
@@ -1043,7 +1178,7 @@ fn build_software_chain(
             .build()
             .map_err(|_| eyre!("failed to create {label} ({name})"))
     };
-    let (enc_name, encoder) = make_encoder(&software_encoder_desc(bitrate)?)?;
+    let (enc_name, encoder) = make_encoder(&software_encoder_desc(codec, bitrate)?)?;
     let convert = mk("videoconvert", "videoconvert")?;
     pipeline.add(&convert).map_err(|_| eyre!("add convert"))?;
     pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
@@ -1166,10 +1301,13 @@ fn parse_encoder_string(s: &str) -> Result<(String, Vec<(String, String)>)> {
     Ok((name, props))
 }
 
-/// Extract SPS/PPS parameter sets from a keyframe's Annex-B access unit.
-fn extract_avcc_config(data: &[u8]) -> Option<AvccConfig> {
-    let mut sps = Vec::new();
-    let mut pps = Vec::new();
+/// Extract the parameter sets from a keyframe's Annex-B access unit: SPS/PPS for H264,
+/// VPS/SPS/PPS for HEVC.
+///
+/// They stay Annex-B with their start codes, in decode order, which is the form catplay's
+/// `avcc_config_serialize`/`hvcc_config_serialize` parse to build the config frame's atom.
+fn extract_codec_config(data: &[u8], codec: VideoCodec) -> Option<AvccConfig> {
+    let mut sets: [Vec<u8>; 3] = Default::default();
 
     for chunk in AnnexBIter::annexb(data) {
         let chunk = chunk.ok()?;
@@ -1177,27 +1315,33 @@ fn extract_avcc_config(data: &[u8]) -> Option<AvccConfig> {
             continue;
         }
         let nal_start = chunk.prefix_start + chunk.prefix_len;
-        let nal_type = NalType::from_byte(data[nal_start]);
-        match nal_type {
-            NalType::Sps => {
-                sps.extend_from_slice(&data[chunk.prefix_start..nal_start + chunk.data_size])
-            }
-            NalType::Pps => {
-                pps.extend_from_slice(&data[chunk.prefix_start..nal_start + chunk.data_size])
-            }
-            _ => {}
-        }
+        let slot = match codec {
+            VideoCodec::H264 => match NalType::from_byte(data[nal_start]) {
+                NalType::Sps => 1,
+                NalType::Pps => 2,
+                _ => continue,
+            },
+            VideoCodec::Hevc => match HevcNalType::from_byte(data[nal_start]) {
+                HevcNalType::VpsNut => 0,
+                HevcNalType::SpsNut => 1,
+                HevcNalType::PpsNut => 2,
+                _ => continue,
+            },
+        };
+        sets[slot].extend_from_slice(&data[chunk.prefix_start..nal_start + chunk.data_size]);
     }
 
-    if sps.is_empty() {
+    // No SPS means this is not the keyframe that carries the configuration.
+    if sets[1].is_empty() {
         return None;
     }
-    let mut sps_pps = sps;
-    sps_pps.extend_from_slice(&pps);
+    if codec.is_hevc() && sets[0].is_empty() {
+        return None;
+    }
 
     Some(AvccConfig {
         nal_size_len: 4,
-        sps_pps,
+        sps_pps: sets.concat(),
     })
 }
 
@@ -1243,6 +1387,50 @@ fn normalize_annexb_4byte(buf: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// The head of a real `vah265enc` access unit (`/tmp/enc-hevc3.h265`, 800x1280 Main): an AUD,
+    /// then VPS/SPS/PPS, then the IDR slice. Truncated - only the parameter sets matter here.
+    const HEVC_KEYFRAME_HEAD: &[&[u8]] = &[
+        &[0x46, 0x01, 0x10],                                     // 35, AUD
+        &[0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60],       // 32, VPS
+        &[0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03],       // 33, SPS
+        &[0x44, 0x01, 0xc0, 0x76, 0x4c, 0x08, 0x90],             // 34, PPS
+        &[0x26, 0x01, 0xaf, 0xe0, 0xfa, 0x20, 0xab, 0x43],       // 19, IDR slice
+    ];
+
+    fn annexb(nals: &[&[u8]]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for nal in nals {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(nal);
+        }
+        out
+    }
+
+    /// HEVC needs VPS as well as SPS/PPS, and its NAL type lives in different bits than H264's -
+    /// reading it the H264 way finds nothing and the car gets a config frame with no parameter
+    /// sets at all.
+    #[test]
+    fn hevc_config_collects_vps_sps_pps_in_order() {
+        let au = annexb(HEVC_KEYFRAME_HEAD);
+        let config = super::extract_codec_config(&au, VideoCodec::Hevc).expect("config extracted");
+        assert_eq!(config.nal_size_len, 4);
+        assert_eq!(
+            config.sps_pps,
+            annexb(&HEVC_KEYFRAME_HEAD[1..4]),
+            "expected VPS, SPS then PPS, with their start codes and nothing else"
+        );
+        // The same bytes read as H264 are not parameter sets, so nothing should come back.
+        assert!(super::extract_codec_config(&au, VideoCodec::H264).is_none());
+    }
+
+    /// A frame that carries no parameter sets is a delta frame, and must not be announced as a
+    /// keyframe carrying configuration.
+    #[test]
+    fn a_frame_without_parameter_sets_has_no_config() {
+        let au = annexb(&[&[0x02, 0x01, 0xd0, 0x09]]); // type 1, TrailR
+        assert!(super::extract_codec_config(&au, VideoCodec::Hevc).is_none());
+    }
+
     use super::*;
 
     #[test]
@@ -1264,7 +1452,12 @@ mod tests {
     /// Software imposes no constraint, so the compositor keeps its full modifier set.
     #[test]
     fn software_backend_is_unconstrained() {
-        assert!(super::importable_modifiers(&EncodeBackend::Software).is_empty());
+        assert!(
+            super::importable_modifiers(&EncodeBackend::Software {
+                codec: VideoCodec::Hevc
+            })
+            .is_empty()
+        );
     }
 
     /// Machine-gated. This returned empty once because the element was dropped before its pad was
@@ -1274,12 +1467,15 @@ mod tests {
         let _ = gst::init();
         let Some(hw) = HW_BACKENDS
             .iter()
-            .find(|b| b.import == Import::DmaBuf && b.postproc.is_some() && b.available())
+            .find(|b| {
+                b.import == Import::DmaBuf && b.postproc.is_some() && b.available(VideoCodec::Hevc)
+            })
         else {
             return;
         };
         let backend = EncodeBackend::Hw {
             backend: hw,
+            codec: VideoCodec::Hevc,
             #[cfg(feature = "cuda")]
             importer: None,
         };
@@ -1356,15 +1552,18 @@ mod tests {
     #[test]
     fn v4l2_extra_controls_parse_as_one_property() {
         let v4l2 = HW_BACKENDS.iter().find(|b| b.name == "v4l2").unwrap();
-        let (name, props) = parse_encoder_string(&v4l2.encoder_desc(Bitrate::from_kbps(3000)))
-            .expect("v4l2 encoder description parses");
+        let desc = v4l2
+            .encoder_desc(VideoCodec::H264, Bitrate::from_kbps(3000))
+            .expect("the v4l2 row has an H264 encoder");
+        let (name, props) =
+            parse_encoder_string(&desc).expect("v4l2 encoder description parses");
         assert_eq!(name, "v4l2h264enc");
         assert_eq!(
             props,
             vec![(
                 "extra-controls".to_string(),
-                // video_bitrate_mode=1 is CBR, matching the other rows' rate-control=cbr.
-                "controls,video_bitrate_mode=1,video_bitrate=3000000".to_string()
+                // video_bitrate_mode=0 is VBR, matching the other rows' rate-control=vbr.
+                "controls,video_bitrate_mode=0,video_bitrate=3000000".to_string()
             )]
         );
     }

@@ -23,7 +23,7 @@ use tokio_util::task::AbortOnDropHandle;
 fn resolve_gpu() -> Result<(String, EncodeBackend, Bitrate)> {
     let cfg = Config::load(&Cli::parse_from(["carjack"]))?;
     let node = carjack::config::resolve_render_node(&cfg.graphics.drm_device)?;
-    let backend = resolve_backend(cfg.graphics.zerocopy, &node)?;
+    let backend = resolve_backend(cfg.graphics.zerocopy, &node, cfg.graphics.codec)?;
     Ok((node, backend, Bitrate::from_kbps(cfg.graphics.bitrate)))
 }
 

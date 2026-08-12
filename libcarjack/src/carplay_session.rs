@@ -14,6 +14,7 @@ use iap2_proto::{
 use std::net::{IpAddr, SocketAddr};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Wall clock for `DeviceTimeUpdate`: seconds since the Unix epoch, minutes east of UTC, and the
@@ -132,6 +133,10 @@ pub struct CarplaySession<S: Stream> {
     /// Length of the authentication challenge we sent, so a rejection names it.
     challenge_len: usize,
     ready_tx: Option<oneshot::Sender<()>>,
+    /// Fired once the handover is done (WiFi associated, or the accessory said `disableBluetooth`).
+    /// Nothing is sent on it - an iPhone keeps acknowledging and lets the accessory drop the link -
+    /// it only marks the point after which losing the link is the expected ending, not a fault.
+    handover: CancellationToken,
 }
 
 impl<S: Stream> CarplaySession<S> {
@@ -140,6 +145,7 @@ impl<S: Stream> CarplaySession<S> {
         wifi_tx: mpsc::Sender<WifiCredentials>,
         ready_tx: oneshot::Sender<()>,
         identity: DeviceIdentity,
+        handover: CancellationToken,
     ) -> Self {
         CarplaySession {
             iap2,
@@ -150,6 +156,7 @@ impl<S: Stream> CarplaySession<S> {
             accepted_messages: Vec::new(),
             challenge_len: 0,
             ready_tx: Some(ready_tx),
+            handover,
         }
     }
 
@@ -161,8 +168,9 @@ impl<S: Stream> CarplaySession<S> {
         let result = self.run_inner().await;
         // Say goodbye properly. Without this the accessory sits waiting out its own retransmit
         // timeout before it will re-SYN, which shows up as a slow reconnect. Skipped when the
-        // accessory is the one that reset - echoing it back would be noise.
-        if matches!(&result, Err(e) if !matches!(e, Iap2Error::LinkReset)) {
+        // accessory is the one that reset - echoing it back would be noise - and past the
+        // handover, where the link is already gone and a phone would not have sent one anyway.
+        if !matches!(&result, Err(Iap2Error::LinkReset)) && !self.handover.is_cancelled() {
             let _ = self.iap2.send_reset().await;
         }
         result
@@ -171,10 +179,22 @@ impl<S: Stream> CarplaySession<S> {
     async fn run_inner(&mut self) -> Result<(), Iap2Error> {
         self.do_identification().await?;
 
+        let mut handed_over = false;
         loop {
             tokio::select! {
                 packet = self.iap2.receive_packet() => {
-                    let packet = packet?;
+                    let packet = match packet {
+                        Ok(packet) => packet,
+                        // Past the handover the link going away *is* the ending, however it
+                        // goes: the AUTO BOX drops the RFCOMM channel within a millisecond of
+                        // AirPlay connecting (an ECONNRESET, not an iAP2 reset), the bike a few
+                        // seconds later. Reporting it made a normal teardown read like a fault.
+                        Err(e) if handed_over => {
+                            tracing::info!("Accessory closed the iAP2 link after the handover ({e})");
+                            return Ok(());
+                        }
+                        Err(e) => return Err(e),
+                    };
                     // `receive_packet` has already absorbed the link-layer traffic - bare
                     // acknowledgements, duplicates, extended acks - and turned a reset into an
                     // error, so anything arriving here is session data.
@@ -193,6 +213,14 @@ impl<S: Stream> CarplaySession<S> {
                 // itself transmits, and must not be cancelled half-done.
                 _ = self.iap2.wait_for_link_work() => {
                     self.iap2.maintain().await?;
+                }
+                // Handover reached. Deliberately no action: an iPhone stops initiating here but
+                // stays on the link acknowledging until the accessory drops it, so all this does is
+                // stop that drop being reported as a failure. The arm disables itself, since a
+                // cancelled token is ready forever.
+                _ = self.handover.cancelled(), if !handed_over => {
+                    handed_over = true;
+                    tracing::info!("Handover complete; the accessory drops Bluetooth from here");
                 }
             }
         }

@@ -8,6 +8,7 @@ use eyre::{Result, eyre};
 use libcarjack::carplay_session::{TouchEvent, WifiCredentials};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 
@@ -167,7 +168,11 @@ async fn backoff_or_ctrl_c() -> bool {
 /// `source = app`: run `[app] command` in carjack's own headless compositor and stream that.
 async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
     let render_node = carjack::config::resolve_render_node(&config.graphics.drm_device)?;
-    let backend = encode::resolve_backend(config.graphics.zerocopy, &render_node)?;
+    let backend = encode::resolve_backend(
+        config.graphics.zerocopy,
+        &render_node,
+        config.graphics.codec,
+    )?;
     tracing::info!(
         "Render node: {render_node}, encode backend: {}",
         backend.describe()
@@ -258,6 +263,7 @@ async fn run_desktop(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
     let rd = portal::start_remote_desktop().await?;
     tracing::info!("Desktop source ready (PipeWire node {})", rd.node_id());
     let zerocopy = config.graphics.zerocopy;
+    let codec = config.graphics.codec;
     let bitrate = Bitrate::from_kbps(config.graphics.bitrate);
     let bt_device = config.bluetooth_device().unwrap_or_default().to_owned();
 
@@ -267,7 +273,7 @@ async fn run_desktop(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
                 tracing::info!("Ctrl-C received, shutting down");
                 break Ok(());
             }
-            result = run_desktop_session(&host, &rd, zerocopy, bitrate, &bt_device, &wifi) => {
+            result = run_desktop_session(&host, &rd, zerocopy, codec, bitrate, &bt_device, &wifi) => {
                 // Lift anything still held: the input session outlives car sessions.
                 rd.end_session();
                 match result {
@@ -301,6 +307,9 @@ struct Established {
     /// the handshake. A `watch`, not a `oneshot`: `establish_carplay` reads it early (to look up
     /// accessory settings before WiFi connects) and the caller reads it again afterward.
     car_addr_rx: tokio::sync::watch::Receiver<Option<String>>,
+    /// Ends the Bluetooth iAP2 session on our terms; fired when the car sends `disableBluetooth`
+    /// over the AirPlay control channel.
+    handover: CancellationToken,
 }
 
 /// Bind an IPv6 link-local address to the interface it has to be used on - link-local is
@@ -370,6 +379,7 @@ async fn establish_carplay(
     let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCredentials>(4);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let (car_addr_tx, car_addr_rx) = tokio::sync::watch::channel::<Option<String>>(None);
+    let handover = CancellationToken::new();
 
     tracing::info!("Starting CarPlay session");
 
@@ -382,6 +392,7 @@ async fn establish_carplay(
         wifi_tx,
         ready_tx,
         car_addr_tx,
+        handover.clone(),
     )));
 
     let mut wifi_handle: Option<tokio::task::JoinHandle<Result<CarWifi>>> = None;
@@ -442,6 +453,12 @@ async fn establish_carplay(
     };
     let car_wifi = car_wifi_result?;
 
+    // The handover is done: the credentials are in hand and we are on the accessory's AP. This
+    // does not end the Bluetooth session - an iPhone stays on the link and lets the accessory drop
+    // it, and both units do so within seconds - it only marks the point after which that drop is
+    // the expected ending rather than a failure.
+    handover.cancel();
+
     let bluetooth_id = host.bluetooth_address().await?;
     let picked = match airplay_hint {
         Some(hint) => {
@@ -470,12 +487,14 @@ async fn establish_carplay(
     let mac_address = wifi.get_wifi_mac().await?;
     let conn =
         connect_airplay_endpoint(endpoint, remote_homekit_id, bluetooth_id, mac_address).await?;
+
     Ok(Established {
         conn,
         carplay_handle,
         touch_tx,
         touch_rx,
         car_addr_rx,
+        handover,
     })
 }
 
@@ -496,6 +515,7 @@ async fn run_session(
         touch_tx,
         mut touch_rx,
         car_addr_rx,
+        handover,
     } = establish_carplay(host.clone(), config.bluetooth_device().unwrap_or_default(), wifi)
         .await?;
 
@@ -536,7 +556,14 @@ async fn run_session(
         Bitrate::from_kbps(config.graphics.bitrate),
         keyframe_rx,
     )));
-    let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx, keyframe_tx);
+    let video = libcarjack::airplay::run_video_stream(
+        conn,
+        backend.codec(),
+        video_rx,
+        touch_tx,
+        keyframe_tx,
+        handover,
+    );
     tokio::pin!(video);
 
     let mut carplay_done = false;
@@ -585,6 +612,7 @@ async fn run_desktop_session(
     host: &Arc<IapHost>,
     rd: &portal::RemoteDesktopStream,
     zerocopy: carjack::config::ZeroCopyMode,
+    codec: carjack::config::CodecChoice,
     bitrate: Bitrate,
     bt_device: &str,
     wifi: &Arc<dyn WifiBackend>,
@@ -595,6 +623,7 @@ async fn run_desktop_session(
         touch_tx,
         mut touch_rx,
         car_addr_rx: _,
+        handover,
     } = establish_carplay(host.clone(), bt_device, wifi).await?;
     let (width, height) = (conn.width, conn.height);
     tracing::info!("Streaming desktop to car at {width}x{height}");
@@ -610,12 +639,20 @@ async fn run_desktop_session(
         width,
         height,
         zerocopy,
+        codec,
         bitrate,
         video_tx,
         desktop_size_tx,
         keyframe_rx,
     )));
-    let video = libcarjack::airplay::run_video_stream(conn, video_rx, touch_tx, keyframe_tx);
+    let video = libcarjack::airplay::run_video_stream(
+        conn,
+        encode::resolve_codec(codec),
+        video_rx,
+        touch_tx,
+        keyframe_tx,
+        handover,
+    );
     tokio::pin!(video);
 
     let mut carplay_done = false;

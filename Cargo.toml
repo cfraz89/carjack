@@ -42,12 +42,13 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "tracing-lo
 usb-gadget = "1.2.0"
 tap = "1.0.1"
 ring = "0.17"
-# Fork `cfraz89/catplay`, branch `fix/airplay-device-identity` - carries the plumbed-through
-# AirPlay `/setup` device identity (BT MAC as `deviceID`, associated WiFi MAC as `macAddress`),
-# on top of upstream `catplay-labs/catplay` master.
-catplay_hap = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/airplay-device-identity", default-features=false, features = ["std"] }
-catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/airplay-device-identity", default-features = false, features = ["tx"]}
-catplay_util = { git = "https://github.com/cfraz89/catplay.git", branch = "fix/airplay-device-identity" }
+# Fork `cfraz89/catplay`, branch `feat/hevc-and-view-rect` - the screen config frame's view
+# parameters and `displayPanels` in `/info`, on top of the plumbed-through AirPlay `/setup` device
+# identity (BT MAC as `deviceID`, associated WiFi MAC as `macAddress`) and upstream
+# `catplay-labs/catplay` master.
+catplay_hap = { git = "https://github.com/cfraz89/catplay.git", branch = "feat/hevc-and-view-rect", default-features=false, features = ["std"] }
+catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "feat/hevc-and-view-rect", default-features = false, features = ["tx"]}
+catplay_util = { git = "https://github.com/cfraz89/catplay.git", branch = "feat/hevc-and-view-rect" }
 bytes = "1.12.1"
 gstreamer = "0.24"
 gstreamer-app = "0.24"

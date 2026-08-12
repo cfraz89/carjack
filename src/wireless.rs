@@ -19,6 +19,7 @@ use libcarjack::{
 };
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 use crate::wifi_connect::WifiBackend;
 
@@ -248,6 +249,7 @@ pub async fn wireless_carplay(
     wifi_tx: mpsc::Sender<WifiCredentials>,
     ready_tx: oneshot::Sender<()>,
     car_addr_tx: tokio::sync::watch::Sender<Option<String>>,
+    handover: CancellationToken,
 ) -> Result<()> {
     let adapter = &host.adapter;
     let identity = host.identity.clone();
@@ -292,7 +294,7 @@ pub async fn wireless_carplay(
     .1?;
 
     tracing::debug!("iAP2 link established");
-    carplay::run_carplay_session(iap2, wifi_tx, ready_tx, identity).await?;
+    carplay::run_carplay_session(iap2, wifi_tx, ready_tx, identity, handover).await?;
     tracing::debug!("iAP lifecycle ended");
     Ok(())
 }

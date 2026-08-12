@@ -12,22 +12,45 @@ use catplay_carplay::modes::{
     EntityEnum, Resource, ResourceConstraint, ResourceController, ResourceID,
     ResourceTransferPriority,
 };
+use catplay_carplay::common::AirPlayFeature;
 use catplay_carplay::msg::Command;
 use catplay_carplay::rtsp_frame::HttpStatus;
 use catplay_carplay::screen::tx::{ScreenTransmitError, ScreenTransmitSink};
-use catplay_carplay::video::{AvccConfig, AvccConfigExtended, EncodedVideoFrame, Pts};
+use catplay_carplay::video::{AvccConfig, AvccConfigExtended, EncodedVideoFrame, Pts, VideoView};
 use catplay_hap::{HomekitStorageFile, HomekitStorageRef};
 use eyre::{eyre, Result};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::carplay_session::{TouchEvent, TouchEventType};
 
-/// A single encoded H264 access unit with optional AVCC configuration
-/// (present on keyframes, extracted by the encoder).
+/// A single encoded access unit with optional codec configuration (present on keyframes,
+/// extracted by the encoder): SPS/PPS for H264, VPS/SPS/PPS for HEVC.
 pub struct EncodedFrame {
     pub data: Vec<u8>,
     pub config: Option<AvccConfig>,
+}
+
+/// Which codec the screen stream carries. An iPhone sends HEVC to every unit captured so far;
+/// H264 is what carjack sent before and what an older accessory may need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoCodec {
+    H264,
+    Hevc,
+}
+
+impl VideoCodec {
+    pub fn is_hevc(self) -> bool {
+        matches!(self, Self::Hevc)
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::H264 => "H264",
+            Self::Hevc => "HEVC",
+        }
+    }
 }
 
 pub struct AirPlayConnection {
@@ -35,6 +58,11 @@ pub struct AirPlayConnection {
     pub width: u32,
     pub height: u32,
     pub max_fps: u32,
+    /// Where our stream sits on the accessory's panel, when it reserves part of it for itself.
+    pub view: Option<VideoView>,
+    /// Whether the accessory declared multi-codec (HEVC) support. Informational: the CFMOTO unit
+    /// declares neither `hevcInfo` nor the feature bit and takes HEVC from an iPhone regardless.
+    pub hevc_declared: bool,
 }
 
 /// HomeKit pairings for the whole process, so a car that has met us before can take
@@ -113,8 +141,8 @@ pub async fn connect_airplay(
         );
     }
 
-    let disp = tx
-        .info_cached()
+    let info = tx.info_cached();
+    let disp = info
         .displays
         .first()
         .ok_or_else(|| eyre!("car declared no display in /info"))?;
@@ -123,25 +151,88 @@ pub async fn connect_airplay(
     let disp_uuid = disp.uuid.clone();
     tracing::info!("Car display: {width}x{height} @ {max_fps} fps, uuid={disp_uuid}");
 
+    let view = panel_view(&info, &disp_uuid);
+    match view {
+        Some(v) => tracing::info!(
+            "Car panel reserves part of itself: video at ({}, {}) sized {}x{}",
+            v.origin_x,
+            v.origin_y,
+            v.width,
+            v.height
+        ),
+        None => tracing::debug!("Car gave no panel geometry; video covers the display"),
+    }
+
+    // Confirmation only, never a veto: the CFMOTO unit declares neither and takes HEVC from an
+    // iPhone, so absence says nothing about what it can decode.
+    let hevc_declared = info.hevc_info.is_some()
+        || info
+            .features
+            .contains(AirPlayFeature::SUPPORTS_SCREEN_MULTI_CODEC);
+    tracing::info!(
+        hevc_declared,
+        hevc_info = info.hevc_info.is_some(),
+        multi_codec = info
+            .features
+            .contains(AirPlayFeature::SUPPORTS_SCREEN_MULTI_CODEC),
+        "Accessory codec declaration"
+    );
+
     Ok(AirPlayConnection {
         tx,
         width,
         height,
         max_fps,
+        view,
+        hevc_declared,
+    })
+}
+
+/// Where our stream sits on the accessory's panel, from `/info`'s `displayPanels`.
+///
+/// `None` when it covers the whole panel, which is the only case catplay used to handle. An
+/// accessory that keeps a strip for its own instruments gives an origin below the top; the size is
+/// what is left of the panel. (An iPhone sends one pixel less for the origin than the panel
+/// declares - the reason is unknown, so the declared value is used.)
+fn panel_view(info: &catplay_carplay::msg::InfoMessageResponse, display_uuid: &str) -> Option<VideoView> {
+    let panel = info
+        .display_panels
+        .iter()
+        .find(|p| p.initial_video_streams.iter().any(|s| s.uuid == display_uuid))?;
+    let stream = panel
+        .initial_video_streams
+        .iter()
+        .find(|s| s.uuid == display_uuid)?;
+    let origin_x = stream.origin_x_pixels.unwrap_or(0);
+    let origin_y = stream.origin_y_pixels.unwrap_or(0);
+    if origin_x == 0 && origin_y == 0 {
+        return None;
+    }
+    let width = panel.width_pixels?.saturating_sub(origin_x);
+    let height = panel.height_pixels?.saturating_sub(origin_y);
+    (width > 0 && height > 0).then_some(VideoView {
+        origin_x: origin_x as f32,
+        origin_y: origin_y as f32,
+        width: width as f32,
+        height: height as f32,
     })
 }
 
 pub async fn run_video_stream(
     conn: AirPlayConnection,
+    codec: VideoCodec,
     mut video_rx: mpsc::Receiver<EncodedFrame>,
     touch_tx: mpsc::Sender<TouchEvent>,
     keyframe_tx: mpsc::Sender<()>,
+    handover: CancellationToken,
 ) -> Result<()> {
     let AirPlayConnection {
         tx,
         width,
         height,
         max_fps,
+        view,
+        hevc_declared: _,
     } = conn;
 
     // CarPlay resource arbitration: claim the main screen for us (the controller) via a
@@ -182,6 +273,7 @@ pub async fn run_video_stream(
         touch_tx,
         keyframe_tx.clone(),
         tunnel,
+        handover,
     )));
 
     let latency = Duration::from_millis(100);
@@ -273,12 +365,13 @@ pub async fn run_video_stream(
             height,
             data: BytesMut::from(&encoded.data[..]),
             config: encoded.config.map(|avcc| AvccConfigExtended {
-                hevc: false,
+                hevc: codec.is_hevc(),
                 avcc,
                 video_latency: Duration::ZERO,
                 width,
                 height,
                 respect_timestamps: true,
+                view,
             }),
             nal_offsets: None,
             is_keyframe: Some(is_keyframe),
@@ -397,6 +490,7 @@ async fn handle_car_commands(
     touch_tx: mpsc::Sender<TouchEvent>,
     keyframe_tx: mpsc::Sender<()>,
     tunnel: crate::iap2_tunnel::Tunnel,
+    handover: CancellationToken,
 ) {
     let mut touching = false;
     while let Some(mut cmd) = tx.pop_command().await {
@@ -422,6 +516,15 @@ async fn handle_car_commands(
                     let _ = touch_tx.try_send(event);
                 }
                 cmd.respond_ok();
+            }
+            Command::DisableBluetooth(_) => {
+                // No unit has ever sent this - both drop the channel themselves - so it only marks
+                // the handover, the same as reaching it any other way. A unit that sends it and
+                // then *waits* for us to disconnect would hang here, and would be the reason to
+                // start closing the link ourselves.
+                tracing::info!("Car asked us to disable Bluetooth");
+                cmd.respond_ok();
+                handover.cancel();
             }
             Command::IApSendMessage(m) => {
                 // iAP2 continues here once the accessory drops the Bluetooth link - see

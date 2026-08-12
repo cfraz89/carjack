@@ -87,8 +87,12 @@ pub struct Graphics {
     /// Zero-copy encode mode: `"auto"` (try it, fall back to software with a warning), `true`
     /// (require it - error out if the pipeline can't be built), or `false` (software).
     pub zerocopy: ZeroCopyMode,
-    /// Target H264 bitrate in kbit/s (CBR). Kept modest by default since the car's WiFi link is
-    /// the bottleneck - overshooting it shows up as stutter, not detail.
+    /// Video codec: `"auto"` (HEVC, which is what an iPhone sends), `"hevc"`, or `"h264"` for an
+    /// accessory that needs the older one.
+    pub codec: CodecChoice,
+    /// Target bitrate in kbit/s. Variable, so this is the ceiling rather than what a static screen
+    /// costs. Kept modest by default since the car's WiFi link is the bottleneck - overshooting it
+    /// shows up as stutter, not detail.
     pub bitrate: u32,
 }
 
@@ -100,6 +104,7 @@ impl Default for Graphics {
         Self {
             drm_device: "auto".into(),
             zerocopy: ZeroCopyMode::Auto,
+            codec: CodecChoice::Auto,
             bitrate: DEFAULT_BITRATE_KBPS,
         }
     }
@@ -143,6 +148,38 @@ impl ZeroCopyMode {
                 "invalid zerocopy value '{other}' (expected auto/true/false)"
             )),
         }
+    }
+}
+
+/// Which codec to encode the screen stream in.
+///
+/// `Auto` resolves to HEVC: every capture of a real iPhone shows it sending HEVC, including to a
+/// unit that advertises no codec support at all, so there is nothing reliable to negotiate against
+/// - see `encode::resolve_codec`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CodecChoice {
+    #[default]
+    Auto,
+    Hevc,
+    H264,
+}
+
+impl CodecChoice {
+    fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "hevc" | "h265" | "h.265" => Ok(Self::Hevc),
+            "h264" | "h.264" | "avc" => Ok(Self::H264),
+            other => Err(eyre!(
+                "invalid codec value '{other}' (expected auto/hevc/h264)"
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CodecChoice {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Self::parse(&String::deserialize(d)?).map_err(serde::de::Error::custom)
     }
 }
 

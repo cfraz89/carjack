@@ -542,7 +542,7 @@ dependencies = [
 [[package]]
 name = "catplay_async"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "async-trait",
  "catplay_async_derive",
@@ -555,7 +555,7 @@ dependencies = [
 [[package]]
 name = "catplay_async_derive"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -565,7 +565,7 @@ dependencies = [
 [[package]]
 name = "catplay_audio"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "alac",
  "bitflags",
@@ -579,7 +579,7 @@ dependencies = [
 [[package]]
 name = "catplay_bonjour"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "async-trait",
  "if-addrs",
@@ -593,7 +593,7 @@ dependencies = [
 [[package]]
 name = "catplay_carplay"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "async-trait",
  "bitflags",
@@ -625,7 +625,7 @@ dependencies = [
 [[package]]
 name = "catplay_csm"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "inventory",
 ]
@@ -633,7 +633,7 @@ dependencies = [
 [[package]]
 name = "catplay_fairplay"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "thiserror 2.0.19",
 ]
@@ -641,7 +641,7 @@ dependencies = [
 [[package]]
 name = "catplay_hap"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "aes",
  "catplay_mfi",
@@ -666,7 +666,7 @@ dependencies = [
 [[package]]
 name = "catplay_iap2_client"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "async-trait",
  "bytes",
@@ -686,7 +686,7 @@ dependencies = [
 [[package]]
 name = "catplay_iap2_link"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "bitflags",
  "bytes",
@@ -700,7 +700,7 @@ dependencies = [
 [[package]]
 name = "catplay_mfi"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "libc",
  "log",
@@ -711,7 +711,7 @@ dependencies = [
 [[package]]
 name = "catplay_plist"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "bitflags",
  "bytes",
@@ -728,7 +728,7 @@ dependencies = [
 [[package]]
 name = "catplay_ring"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "libc",
  "log",
@@ -737,7 +737,7 @@ dependencies = [
 [[package]]
 name = "catplay_tokio"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "async-trait",
  "bytes",
@@ -755,7 +755,7 @@ dependencies = [
 [[package]]
 name = "catplay_tracing"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "libc",
  "log",
@@ -766,7 +766,7 @@ dependencies = [
 [[package]]
 name = "catplay_tracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "catplay_tracing",
  "log",
@@ -777,7 +777,7 @@ dependencies = [
 [[package]]
 name = "catplay_udp"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "async-trait",
  "bytes",
@@ -794,7 +794,7 @@ dependencies = [
 [[package]]
 name = "catplay_util"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=fix%2Fairplay-device-identity#5b268f5d8f460c7d0617af9a92b66d179ac46901"
+source = "git+https://github.com/cfraz89/catplay.git?branch=feat%2Fhevc-and-view-rect#821c412fe492201d67d49a64c297c97abd26e573"
 dependencies = [
  "async-trait",
  "catplay_async",
@@ -2248,6 +2248,7 @@ dependencies = [
  "iap2-proto",
  "tap",
  "tokio",
+ "tokio-util",
  "tracing",
  "usb",
  "uuid",
