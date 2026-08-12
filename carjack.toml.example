@@ -55,15 +55,15 @@ zerocopy = "auto"
 codec = "auto"
 
 # Target video bitrate in kbit/s, applied as VBR to whichever encoder is selected (hardware or
-# software) - so this is a ceiling, not what a still screen costs. The car's WiFi link is the
+# software) - so this is a ceiling, not what a still screen costs. The accessory's WiFi link is the
 # bottleneck, so aiming too high shows up as stutter rather than as detail - raise it only if the
 # picture looks soft and the stream stays smooth.
 # Also settable as `carjack --bitrate <KBPS>` or CARJACK.GRAPHICS.BITRATE.
 bitrate = 3000   # 3 Mbit/s ceiling
 
 [display]
-# Initial compositor size/rate, used before the car reports its real display over AirPlay.
-# TIP: set these to your car's actual values. Then the app boots at the right size and the later
+# Initial compositor size/rate, used before the accessory reports its real display over AirPlay.
+# TIP: set these to your accessory's actual values. Then the app boots at the right size and the later
 # reconfigure is a no-op - important with resizable = false below.
 width = 1280
 height = 720
@@ -75,6 +75,6 @@ fps = 30
 command = "waydroid show-full-ui"
 # Can the app live-resize?
 #   true  - launched at startup (boots during the BT/WiFi phase) and left to resize itself
-#   false - can't resize (Android/Waydroid): NOT launched until the car's resolution is known,
+#   false - can't resize (Android/Waydroid): NOT launched until the accessory's resolution is known,
 #           and relaunched on later reconnects that change the size
 resizable = false

@@ -1,4 +1,4 @@
-//! Joining the car's access point, over iwd.
+//! Joining the accessory's access point, over iwd.
 //!
 //! iwd has no connection-profile API: a network is provisioned by a file in its state directory,
 //! and `Network.Connect()` is the whole of the API. The Agent API is no substitute -
@@ -23,7 +23,7 @@ use netlink_packet_route::address::{
 };
 use tokio::sync::OnceCell;
 
-use super::{CarWifi, WifiBackend};
+use super::{AccessoryWifi, WifiBackend};
 
 /// How long to give iwd to associate and configure IP before retrying.
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -64,41 +64,41 @@ impl WifiBackend for IwdBackend {
         check_writable().await
     }
 
-    async fn connect_to_car_wifi(
+    async fn connect_to_accessory_wifi(
         &self,
         ssid: &str,
         passphrase: &str,
-        car_mac: Option<&str>,
-    ) -> Result<CarWifi> {
-        connect_to_car_wifi(ssid, passphrase, car_mac).await
+        accessory_mac: Option<&str>,
+    ) -> Result<AccessoryWifi> {
+        connect_to_accessory_wifi(ssid, passphrase, accessory_mac).await
     }
 }
 
-async fn connect_to_car_wifi(
+async fn connect_to_accessory_wifi(
     ssid: &str,
     passphrase: &str,
-    car_mac: Option<&str>,
-) -> Result<CarWifi> {
+    accessory_mac: Option<&str>,
+) -> Result<AccessoryWifi> {
     let ssid = Ssid::from(ssid);
-    if let Some(car_wifi) = super::reuse_if_live(&ssid, live_connection(&ssid).await) {
-        return Ok(car_wifi);
+    if let Some(accessory_wifi) = super::reuse_if_live(&ssid, live_connection(&ssid).await) {
+        return Ok(accessory_wifi);
     }
 
     // The address already announced to the accessory over iAP2.
     let announced = get_wifi_mac().await?;
 
     super::connect_with_known_settings(
-        car_mac,
+        accessory_mac,
         enclose!((ssid, announced) |disable_he| { async move {
             provision(&ssid, passphrase, &announced, disable_he).await?;
 
-            let (station, device) = car_station().await?;
+            let (station, device) = accessory_station().await?;
             let iface = device.name().await?;
-            let network = car_network(&station, &ssid).await?;
+            let network = accessory_network(&station, &ssid).await?;
 
             if let Err(e) = tokio::time::timeout(ACTIVATION_TIMEOUT, network.connect())
                 .await
-                .map_err(|_| eyre!("Timed out bringing up the car's WiFi connection"))
+                .map_err(|_| eyre!("Timed out bringing up the accessory's WiFi connection"))
                 .and_then(|r| r.map_err(Into::into))
             {
                 // Abort so the next attempt doesn't fail `InProgress` on our own leftover connect.
@@ -125,15 +125,15 @@ async fn connect_to_car_wifi(
             }
 
             wait_for_addresses(&iface).await?;
-            Ok(CarWifi { iface })
+            Ok(AccessoryWifi { iface })
         } }),
     )
     .await
 }
 
-/// Write the car's network into iwd's state directory - the only way to say what `Connect()`
+/// Write the accessory's network into iwd's state directory - the only way to say what `Connect()`
 /// cannot: the passphrase, that the SSID is hidden, no autoconnect, and our station address.
-/// Rewritten before every attempt, since the car's passphrase changes per session.
+/// Rewritten before every attempt, since the accessory's passphrase changes per session.
 async fn provision(
     ssid: &Ssid,
     passphrase: &str,
@@ -142,7 +142,7 @@ async fn provision(
 ) -> Result<()> {
     if !(8..=63).contains(&passphrase.len()) || passphrase.contains(['\n', '\r']) {
         return Err(eyre!(
-            "The car offered a {}-character passphrase; WPA-PSK needs 8 to 63",
+            "The accessory offered a {}-character passphrase; WPA-PSK needs 8 to 63",
             passphrase.len()
         ));
     }
@@ -161,7 +161,7 @@ async fn provision(
     write_profile(&path, &body)
         .await
         .map_err(|_| cannot_write(&dir))?;
-    tracing::info!(path = %path.display(), "Provisioned the car's network for iwd");
+    tracing::info!(path = %path.display(), "Provisioned the accessory's network for iwd");
     Ok(())
 }
 
@@ -181,7 +181,7 @@ fn cannot_write(dir: &std::path::Path) -> eyre::Report {
     )
 }
 
-/// Confirm carjack can provision iwd's state directory before anything tries to join the car.
+/// Confirm carjack can provision iwd's state directory before anything tries to join the accessory.
 async fn check_writable() -> Result<()> {
     let info = DaemonProxy::new(iwd().await).await?.get_info().await?;
     let dir = state_directory(&info)?;
@@ -237,7 +237,7 @@ async fn write_profile(path: &std::path::Path, body: &str) -> std::io::Result<()
             .write(true)
             .create(true)
             .truncate(true)
-            .mode(0o600) // Not world-readable - holds the car's passphrase.
+            .mode(0o600) // Not world-readable - holds the accessory's passphrase.
             .open(&temp)
             .await?;
         file.write_all(body.as_bytes()).await?;
@@ -296,16 +296,16 @@ fn network_file_name(ssid: &Ssid) -> String {
     name
 }
 
-/// The car's network object, scanning if the last scan didn't find it. Must run after
+/// The accessory's network object, scanning if the last scan didn't find it. Must run after
 /// provisioning - only then does iwd know to probe for a hidden SSID.
-async fn car_network(station: &StationProxy<'_>, ssid: &Ssid) -> Result<NetworkProxy<'static>> {
+async fn accessory_network(station: &StationProxy<'_>, ssid: &Ssid) -> Result<NetworkProxy<'static>> {
     if let Some(network) = find_network(station, ssid).await? {
         return Ok(network);
     }
     scan(station).await?;
     find_network(station, ssid)
         .await?
-        .ok_or_else(|| eyre!("iwd's scan did not find the car's network {ssid}"))
+        .ok_or_else(|| eyre!("iwd's scan did not find the accessory's network {ssid}"))
 }
 
 async fn find_network(
@@ -321,7 +321,7 @@ async fn find_network(
 }
 
 /// Trigger a scan and wait for it to settle. Errors are swallowed - a scan already running answers
-/// `Busy`, and stale results are still worth reading; the caller retries if the car isn't found.
+/// `Busy`, and stale results are still worth reading; the caller retries if the accessory isn't found.
 async fn scan(station: &StationProxy<'_>) -> Result<()> {
     let mut changes = station.receive_scanning_changed().await;
     if let Err(e) = station.scan().await {
@@ -345,9 +345,9 @@ async fn scan(station: &StationProxy<'_>) -> Result<()> {
 }
 
 /// The current connection, if it's already on `ssid` and carries an address - i.e. nothing left
-/// for `connect_to_car_wifi` to do. `None` means "not it, go and connect".
-async fn live_connection(ssid: &Ssid) -> Result<Option<CarWifi>> {
-    let (station, device) = car_station().await?;
+/// for `connect_to_accessory_wifi` to do. `None` means "not it, go and connect".
+async fn live_connection(ssid: &Ssid) -> Result<Option<AccessoryWifi>> {
+    let (station, device) = accessory_station().await?;
     if station.state().await? != StationState::Connected {
         return Ok(None);
     }
@@ -359,7 +359,7 @@ async fn live_connection(ssid: &Ssid) -> Result<Option<CarWifi>> {
     }
     let iface = device.name().await?;
     if link_local_is_ready(&iface).await? {
-        Ok(Some(CarWifi { iface }))
+        Ok(Some(AccessoryWifi { iface }))
     } else {
         tracing::debug!("On {ssid} already, but its link-local IPv6 hasn't settled yet");
         Ok(None)
@@ -370,7 +370,7 @@ async fn live_connection(ssid: &Ssid) -> Result<Option<CarWifi>> {
 ///
 /// A powered-down device carries no Station interface, so power-up goes through `Device` first,
 /// then waits for the Station to appear.
-async fn car_station() -> Result<(StationProxy<'static>, DeviceProxy<'static>)> {
+async fn accessory_station() -> Result<(StationProxy<'static>, DeviceProxy<'static>)> {
     if let Some(found) = find_station().await? {
         return Ok(found);
     }
@@ -498,7 +498,7 @@ fn is_settled_link_local(msg: &AddressMessage) -> bool {
 }
 
 async fn get_wifi_mac() -> Result<String> {
-    let (_station, device) = car_station().await?;
+    let (_station, device) = accessory_station().await?;
     Ok(super::announced_wifi_mac(&permanent_mac(
         &device.name().await?,
     )?))
@@ -685,13 +685,13 @@ mod tests {
     /// Live check against iwd: the provisioning file must be one the daemon reads back as written.
     #[test]
     #[ignore = "needs a live iwd and CAP_DAC_OVERRIDE/CAP_CHOWN on this test binary"]
-    fn iwd_reads_back_the_car_provisioning_file() {
+    fn iwd_reads_back_the_accessory_provisioning_file() {
         const SSID: &str = "carjack provision-check";
         RUNTIME.block_on(async {
             let ssid = Ssid::from(SSID);
             super::provision(&ssid, "hunter2hunter2", "FE:B2:9F:ED:EA:72", false)
                 .await
-                .expect("iwd would not take the car's provisioning file");
+                .expect("iwd would not take the accessory's provisioning file");
 
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             let known = loop {

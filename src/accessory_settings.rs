@@ -1,4 +1,4 @@
-//! Per-accessory settings, keyed by the car's Bluetooth MAC. Hand-edited config under XDG config.
+//! Per-accessory settings, keyed by the accessory's Bluetooth MAC. Hand-edited config under XDG config.
 
 use std::collections::HashMap;
 
@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AccessorySettings {
-    /// Force HE (802.11ax) off when associating with this car's WiFi - some head units disconnect
-    /// otherwise. See `wifi_connect::WifiBackend::connect_to_car_wifi`.
+    /// Force HE (802.11ax) off when associating with this accessory's WiFi - some head units disconnect
+    /// otherwise. See `wifi_connect::WifiBackend::connect_to_accessory_wifi`.
     pub disable_he: bool,
 }
 

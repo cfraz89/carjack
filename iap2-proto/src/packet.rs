@@ -167,7 +167,7 @@ mod tests {
     }
 
     /// With a payload the length also covers the trailing payload checksum. Bytes from
-    /// `cfmoto_8.pcapng` frame 622 (our own AuthenticationSucceeded, which the car accepted).
+    /// `cfmoto_8.pcapng` frame 622 (our own AuthenticationSucceeded, which the accessory accepted).
     #[test]
     fn payload_packet_length_covers_its_checksum() {
         let packet = Packet::new(

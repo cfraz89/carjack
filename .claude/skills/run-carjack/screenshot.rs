@@ -1,11 +1,11 @@
-//! carjack driver: capture what the car would actually see.
+//! carjack driver: capture what the accessory would actually see.
 //!
 //! carjack has no window. Its entire visual output is the frame its internal Smithay compositor
 //! composites and hands to the H264 encoder - so "screenshot carjack" means "grab a frame off that
 //! stream". This brings the compositor up on the real GPU, optionally runs a Wayland client inside
 //! it, samples frames, and writes the brightest one to disk as PNG.
 //!
-//! Deliberately does NOT touch Bluetooth, NetworkManager or the car. It exercises the
+//! Deliberately does NOT touch Bluetooth, NetworkManager or the accessory. It exercises the
 //! compositor -> capture half of the pipeline only, which is the half you can verify without a
 //! head unit (and without knocking this machine's WiFi over - see `just test-run`).
 //!

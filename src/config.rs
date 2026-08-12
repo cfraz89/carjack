@@ -26,7 +26,7 @@ pub struct Bluetooth {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
-/// Which WiFi daemon joins the car's access point.
+/// Which WiFi daemon joins the accessory's access point.
 pub struct Wifi {
     /// `None` if unset - probed from D-Bus at startup instead. See `wifi_connect::detect_backend`.
     pub backend: Option<WifiBackendKind>,
@@ -91,7 +91,7 @@ pub struct Graphics {
     /// accessory that needs the older one.
     pub codec: CodecChoice,
     /// Target bitrate in kbit/s. Variable, so this is the ceiling rather than what a static screen
-    /// costs. Kept modest by default since the car's WiFi link is the bottleneck - overshooting it
+    /// costs. Kept modest by default since the accessory's WiFi link is the bottleneck - overshooting it
     /// shows up as stutter, not detail.
     pub bitrate: u32,
 }
@@ -186,8 +186,8 @@ impl<'de> Deserialize<'de> for CodecChoice {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Display {
-    /// Initial compositor size/rate, used before the car reports its real display over AirPlay.
-    /// Set these to your car's values so an app that can't live-resize (Waydroid) boots correct
+    /// Initial compositor size/rate, used before the accessory reports its real display over AirPlay.
+    /// Set these to your accessory's values so an app that can't live-resize (Waydroid) boots correct
     /// and the later reconfigure is a no-op.
     pub width: u32,
     pub height: u32,
@@ -210,7 +210,7 @@ pub struct App {
     /// Desktop command to stream (run via `sh -c`). Empty = stream black until a client connects.
     pub command: String,
     /// `true`: launched at startup and left to resize itself. `false` (apps that fix their
-    /// resolution at boot, e.g. Waydroid): held until the car's resolution is known.
+    /// resolution at boot, e.g. Waydroid): held until the accessory's resolution is known.
     pub resizable: bool,
 }
 
@@ -226,7 +226,7 @@ impl Default for App {
 /// Command-line arguments. `-c` picks the config file; the rest override individual config
 /// settings (flag > env var > config file > default).
 #[derive(Debug, Clone, clap::Parser)]
-#[command(about = "Wireless CarPlay bridge - streams a Wayland desktop to a car head unit")]
+#[command(about = "Wireless CarPlay bridge - streams a Wayland desktop to an accessory head unit")]
 pub struct Cli {
     /// Config file to load (default: ~/.config/carjack/config.toml, falling back to
     /// /etc/carjack/config.toml under the systemd service).

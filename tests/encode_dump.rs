@@ -1,4 +1,4 @@
-//! Write what the encoder would send the car to a file, so the picture the head unit decodes can
+//! Write what the encoder would send the accessory to a file, so the picture the head unit decodes can
 //! actually be looked at. The compositor's own screenshot driver forces the SHM path and so proves
 //! nothing about the zero-copy dmabuf chain that a real run uses; this goes through whichever
 //! backend `main` would pick.

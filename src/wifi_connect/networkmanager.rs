@@ -1,4 +1,4 @@
-//! Joining the car's access point, over NetworkManager.
+//! Joining the accessory's access point, over NetworkManager.
 
 use std::str::FromStr;
 
@@ -18,13 +18,13 @@ use std::time::Duration;
 use tap::TapFallible;
 use tokio::sync::OnceCell;
 
-use super::{CarWifi, WifiBackend};
+use super::{AccessoryWifi, WifiBackend};
 
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 static NETWORK_MANAGER: OnceCell<NetworkManagerProxy<'static>> = OnceCell::const_new();
 
-/// The NetworkManager proxy, built once. Its D-Bus connection is what the car's profile binds its
+/// The NetworkManager proxy, built once. Its D-Bus connection is what the accessory's profile binds its
 /// activation to, so it has to outlive every session.
 async fn get_network_manager() -> &'static NetworkManagerProxy<'static> {
     NETWORK_MANAGER
@@ -47,23 +47,23 @@ impl WifiBackend for NetworkManagerBackend {
         get_wifi_mac().await
     }
 
-    async fn connect_to_car_wifi(
+    async fn connect_to_accessory_wifi(
         &self,
         ssid: &str,
         passphrase: &str,
-        car_mac: Option<&str>,
-    ) -> Result<CarWifi> {
-        connect_to_car_wifi(ssid, passphrase, car_mac).await
+        accessory_mac: Option<&str>,
+    ) -> Result<AccessoryWifi> {
+        connect_to_accessory_wifi(ssid, passphrase, accessory_mac).await
     }
 }
 
-async fn connect_to_car_wifi(
+async fn connect_to_accessory_wifi(
     ssid: &str,
     passphrase: &str,
-    car_mac: Option<&str>,
-) -> Result<CarWifi> {
-    if let Some(car_wifi) = super::reuse_if_live(ssid, live_connection(ssid).await) {
-        return Ok(car_wifi);
+    accessory_mac: Option<&str>,
+) -> Result<AccessoryWifi> {
+    if let Some(accessory_wifi) = super::reuse_if_live(ssid, live_connection(ssid).await) {
+        return Ok(accessory_wifi);
     }
 
     // The same address we announced over iAP2 - the accessory waits for exactly that station.
@@ -77,9 +77,9 @@ async fn connect_to_car_wifi(
     };
 
     super::connect_with_known_settings(
-        car_mac,
+        accessory_mac,
         enclose!((announced_mac, announced) |disable_he| { async move {
-            let profile = car_profile(ssid, passphrase, announced_mac, disable_he);
+            let profile = accessory_profile(ssid, passphrase, announced_mac, disable_he);
             let nm = get_network_manager().await;
             let device = wifi_device().await?;
             let (conn, active) = match existing_profile(nm, &profile).await {
@@ -105,7 +105,7 @@ async fn connect_to_car_wifi(
 
             if let Err(e) = tokio::time::timeout(ACTIVATION_TIMEOUT, wait_for_activation(&active))
                 .await
-                .map_err(|_| eyre!("Timed out bringing up the car's WiFi connection"))
+                .map_err(|_| eyre!("Timed out bringing up the accessory's WiFi connection"))
                 .and_then(|r| r)
             {
                 conn.delete()
@@ -132,7 +132,7 @@ async fn connect_to_car_wifi(
                 ),
                 Err(e) => tracing::debug!(?e, "Could not read back the associated address"),
             }
-            car_wifi(&device, &active).await
+            accessory_wifi(&device, &active).await
         } }),
     )
     .await
@@ -179,10 +179,10 @@ async fn existing_profile(
     keep
 }
 
-/// The connection profile for the car's access point.
+/// The connection profile for the accessory's access point.
 ///
 /// `disable_he` currently requires patched iwd, or wpa_supplicant with config_disable_he and patched NetworkManager.
-fn car_profile(
+fn accessory_profile(
     ssid: &str,
     passphrase: &str,
     announced_mac: AssignedMacAddress,
@@ -220,7 +220,7 @@ async fn wait_for_activation(active: &ActiveProxy<'_>) -> Result<()> {
             ActiveConnectionState::Deactivating | ActiveConnectionState::Deactivated
         ) {
             return Err(eyre!(
-                "The car's WiFi connection went down while activating"
+                "The accessory's WiFi connection went down while activating"
             ));
         }
         tokio::select! {
@@ -232,8 +232,8 @@ async fn wait_for_activation(active: &ActiveProxy<'_>) -> Result<()> {
 }
 
 /// The current WiFi connection, if it is already on `ssid` and carries an address - i.e. there is
-/// nothing left for `connect_to_car_wifi` to do. `None` means "not it, go and connect".
-async fn live_connection(ssid: &str) -> Result<Option<CarWifi>> {
+/// nothing left for `connect_to_accessory_wifi` to do. `None` means "not it, go and connect".
+async fn live_connection(ssid: &str) -> Result<Option<AccessoryWifi>> {
     let device = wifi_device().await?;
     // Compared as SSIDs rather than as text: an access point names itself in bytes, and only the
     // bytes decide whether this is the same network.
@@ -247,8 +247,8 @@ async fn live_connection(ssid: &str) -> Result<Option<CarWifi>> {
     let Some(active) = device.active_connection().await? else {
         return Ok(None);
     };
-    match car_wifi(&device, &active).await {
-        Ok(car_wifi) => Ok(Some(car_wifi)),
+    match accessory_wifi(&device, &active).await {
+        Ok(accessory_wifi) => Ok(Some(accessory_wifi)),
         Err(e) => {
             tracing::debug!("On {ssid} already, but it isn't usable yet ({e})");
             Ok(None)
@@ -270,20 +270,20 @@ async fn current_ssid(device: &DeviceProxy<'_>) -> Result<Option<Ssid>> {
     Ok(ssid)
 }
 
-/// What the rest of carjack needs from an activated connection to the car.
-async fn car_wifi(device: &DeviceProxy<'_>, active: &ActiveProxy<'_>) -> Result<CarWifi> {
+/// What the rest of carjack needs from an activated connection to the accessory.
+async fn accessory_wifi(device: &DeviceProxy<'_>, active: &ActiveProxy<'_>) -> Result<AccessoryWifi> {
     // Absent until NetworkManager has finished the IPv4 stage, which is what `wait_for_activation`
     // gates on - so reaching here without one means the activation is still in flight.
     active
         .ip4_config()
         .await?
-        .ok_or(eyre!("The car's connection has no IPv4 configuration yet"))?;
-    Ok(CarWifi {
+        .ok_or(eyre!("The accessory's connection has no IPv4 configuration yet"))?;
+    Ok(AccessoryWifi {
         iface: device.interface().await?,
     })
 }
 
-/// The WiFi device to run the car's connection on: whichever one is already up, else the first
+/// The WiFi device to run the accessory's connection on: whichever one is already up, else the first
 /// the daemon lists.
 async fn wifi_device() -> Result<DeviceProxy<'static>> {
     let mut wifi = Vec::new();
@@ -306,7 +306,7 @@ async fn get_wifi_mac() -> Result<String> {
     let device = wifi_device().await?;
     let wifi: WirelessProxy = device.cast().await?;
     // Derived from the permanent address rather than being it - see `super::announced_wifi_mac`.
-    // The car's profile pins itself to the same value, so what we announce is what associates.
+    // The accessory's profile pins itself to the same value, so what we announce is what associates.
     let permanent = match wifi.perm_hw_address().await?.non_empty() {
         Some(permanent) => permanent,
         None => device.hw_address().await?,
@@ -335,7 +335,7 @@ mod tests {
     }
 
     /// Live check against NetworkManager: asking for the SSID we are already on must hand back
-    /// the live connection so `connect_to_car_wifi` skips reactivating it, and any other SSID must
+    /// the live connection so `connect_to_accessory_wifi` skips reactivating it, and any other SSID must
     /// not match. Read-only - it never activates or tears down anything.
     #[test]
     #[ignore = "needs a live NetworkManager WiFi connection; set CARJACK_TEST_SSID"]
@@ -357,20 +357,20 @@ mod tests {
         });
     }
 
-    /// Live check against NetworkManager: the profile carjack builds for the car has to be one
+    /// Live check against NetworkManager: the profile carjack builds for the accessory has to be one
     /// the daemon accepts and stores as written - a mistyped property is refused outright, and a
     /// misnamed one is silently kept somewhere carjack's fields don't reach. Created unsaved so
     /// it never touches disk, read back, then deleted; never activated, and its SSID is one no
     /// access point advertises.
     #[test]
     #[ignore = "needs a live NetworkManager"]
-    fn car_profile_is_accepted_by_networkmanager() {
+    fn accessory_profile_is_accepted_by_networkmanager() {
         runtime().block_on(async {
             let nm = super::get_network_manager().await;
             let settings = nm_automata::SettingsProxy::new(nm.inner().connection())
                 .await
                 .expect("no settings interface");
-            let profile = super::car_profile(
+            let profile = super::accessory_profile(
                 "carjack-profile-check",
                 "hunter2hunter2",
                 AssignedMacAddress::Permanent,
@@ -380,7 +380,7 @@ mod tests {
             let stored = settings
                 .add_connection_unsaved(&profile)
                 .await
-                .expect("NetworkManager rejected the car profile");
+                .expect("NetworkManager rejected the accessory profile");
             let read_back = stored.get_settings().await.expect("couldn't read it back");
             stored.delete().await.expect("couldn't delete it");
 
@@ -409,8 +409,8 @@ mod tests {
     }
 
     #[test]
-    fn car_profile_sets_disable_he() {
-        let profile = super::car_profile(
+    fn accessory_profile_sets_disable_he() {
+        let profile = super::accessory_profile(
             "carjack-profile-check",
             "hunter2hunter2",
             AssignedMacAddress::Permanent,
@@ -421,7 +421,7 @@ mod tests {
             Some(true)
         );
 
-        let profile = super::car_profile(
+        let profile = super::accessory_profile(
             "carjack-profile-check",
             "hunter2hunter2",
             AssignedMacAddress::Permanent,

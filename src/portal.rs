@@ -242,7 +242,7 @@ pub struct RemoteDesktopStream {
 }
 
 impl RemoteDesktopStream {
-    /// Inject a CarPlay touch. `car_size` is the car's display size (the space `event.x/.y` are in).
+    /// Inject a CarPlay touch. `accessory_size` is the accessory's display size (the space `event.x/.y` are in).
     ///
     /// Over libei the coordinates go straight into the device's region. On the D-Bus fallback
     /// they're scaled to `stream_size` (or `frame_size` if the portal gave no size) and clamped
@@ -250,19 +250,19 @@ impl RemoteDesktopStream {
     pub async fn send_touch(
         &self,
         event: &TouchEvent,
-        car_size: (u32, u32),
+        accessory_size: (u32, u32),
         frame_size: Option<(u32, u32)>,
     ) -> Result<()> {
         if let Some(ei) = &self.ei {
-            return ei.send_touch(event, car_size);
+            return ei.send_touch(event, accessory_size);
         }
         let stream_id = self.node_id;
         let frame = frame_size.map(|(w, h)| (f64::from(w), f64::from(h)));
         self.warn_on_scale_mismatch(frame);
         let target = self.stream_size.or(frame);
-        let (x, y) = clamp_inside(scale_touch(event.x, event.y, target, car_size), target);
+        let (x, y) = clamp_inside(scale_touch(event.x, event.y, target, accessory_size), target);
         debug!(
-            "touch {:?} slot={} car=({:.0},{:.0}) car_size={car_size:?} target={target:?} \
+            "touch {:?} slot={} accessory=({:.0},{:.0}) accessory_size={accessory_size:?} target={target:?} \
              -> ({x:.0},{y:.0})",
             event.event_type, event.slot, event.x, event.y
         );
@@ -305,7 +305,7 @@ impl RemoteDesktopStream {
     }
 
     /// Lift any finger still held down, and report whether input is still usable. Called when a
-    /// CarPlay session ends: the input session outlives individual car sessions, so a car that
+    /// CarPlay session ends: the input session outlives individual accessory sessions, so an accessory that
     /// vanishes mid-gesture would otherwise leave the desktop with a touch stuck down.
     pub fn end_session(&self) {
         if let Some(ei) = &self.ei {
@@ -349,7 +349,7 @@ impl RemoteDesktopStream {
 }
 
 /// Keep a coordinate strictly inside `target`, which `xdg-desktop-portal`'s `check_position`
-/// requires (`0 <= x < width`): a touch at the very edge of the car's display scales to exactly
+/// requires (`0 <= x < width`): a touch at the very edge of the accessory's display scales to exactly
 /// `width` and would be rejected with "Invalid position", killing the whole event.
 fn clamp_inside((x, y): (f64, f64), target: Option<(f64, f64)>) -> (f64, f64) {
     match target {
@@ -361,20 +361,20 @@ fn clamp_inside((x, y): (f64, f64), target: Option<(f64, f64)>) -> (f64, f64) {
     }
 }
 
-/// Scale a car-space touch coordinate (`x`, `y` in the car's `car_size` display) to the desktop
-/// stream's coordinate space. The desktop is scaled *down* to the car's resolution for streaming, so
+/// Scale an accessory-space touch coordinate (`x`, `y` in the accessory's `accessory_size` display) to the desktop
+/// stream's coordinate space. The desktop is scaled *down* to the accessory's resolution for streaming, so
 /// touch has to be scaled back *up*. Passes through unchanged if the target size is unknown or the
-/// car size is degenerate.
+/// accessory size is degenerate.
 pub(crate) fn scale_touch(
     x: f64,
     y: f64,
     stream_size: Option<(f64, f64)>,
-    car_size: (u32, u32),
+    accessory_size: (u32, u32),
 ) -> (f64, f64) {
     match stream_size {
-        Some((sw, sh)) if car_size.0 > 0 && car_size.1 > 0 => (
-            x * sw / f64::from(car_size.0),
-            y * sh / f64::from(car_size.1),
+        Some((sw, sh)) if accessory_size.0 > 0 && accessory_size.1 > 0 => (
+            x * sw / f64::from(accessory_size.0),
+            y * sh / f64::from(accessory_size.1),
         ),
         _ => (x, y),
     }
@@ -403,8 +403,8 @@ mod tests {
     }
 
     #[test]
-    fn touch_scales_car_space_to_stream_space() {
-        // 1080x600 car -> 1920x1080 desktop stream.
+    fn touch_scales_accessory_space_to_stream_space() {
+        // 1080x600 accessory -> 1920x1080 desktop stream.
         let stream = Some((1920.0, 1080.0));
         // centre stays centre
         assert_eq!(
@@ -417,7 +417,7 @@ mod tests {
             scale_touch(1080.0, 600.0, stream, (1080, 600)),
             (1920.0, 1080.0)
         );
-        // unknown stream size or degenerate car size -> pass through
+        // unknown stream size or degenerate accessory size -> pass through
         assert_eq!(scale_touch(500.0, 250.0, None, (1080, 600)), (500.0, 250.0));
         assert_eq!(scale_touch(500.0, 250.0, stream, (0, 0)), (500.0, 250.0));
     }
@@ -452,15 +452,15 @@ mod tests {
     /// implementation hang up, closing the command channel and failing the next send.
     async fn inject_tap(stream: &super::RemoteDesktopStream) -> eyre::Result<()> {
         use libcarjack::carplay_session::TouchEventType::{Down, Up};
-        let car_size = (1080u32, 600u32);
+        let accessory_size = (1080u32, 600u32);
         let tap = |event_type| TouchEvent {
             event_type,
             slot: 0,
             x: 540.0,
             y: 300.0,
         };
-        stream.send_touch(&tap(Down), car_size, None).await?;
-        stream.send_touch(&tap(Up), car_size, None).await?;
+        stream.send_touch(&tap(Down), accessory_size, None).await?;
+        stream.send_touch(&tap(Up), accessory_size, None).await?;
         // A duplicate Up here would be dropped by the slot tracker - but never send one on purpose:
         // unfiltered, it aborts Mutter (`g_assert` in release_slot) and takes the session with it.
         // Injection is queued to the EI thread; give it time to reach the compositor and for a
@@ -483,7 +483,7 @@ mod tests {
         // interior and origin untouched
         assert_eq!(clamp_inside((960.0, 540.0), stream), (960.0, 540.0));
         assert_eq!(clamp_inside((0.0, 0.0), stream), (0.0, 0.0));
-        // overshoot (a car reporting beyond its own display) and negatives are pulled in
+        // overshoot (an accessory reporting beyond its own display) and negatives are pulled in
         assert_eq!(clamp_inside((5000.0, -3.0), stream), (1919.0, 0.0));
         // unknown target -> unchanged
         assert_eq!(clamp_inside((5000.0, 1.0), None), (5000.0, 1.0));

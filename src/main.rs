@@ -21,7 +21,7 @@ use carjack::encode::{self, Bitrate, EncodeBackend};
 use clap::Parser;
 
 use crate::{
-    wifi_connect::{CarWifi, WifiBackend},
+    wifi_connect::{AccessoryWifi, WifiBackend},
     wireless::{IapHost, wireless_carplay},
 };
 
@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
     }
 
     // Shared HomeKit identity across both source paths and runs - in the data dir, not the cache,
-    // so losing it doesn't leave every paired car with a dead pairing in its table.
+    // so losing it doesn't leave every paired accessory with a dead pairing in its table.
     match xdg::BaseDirectories::with_prefix("carjack").place_data_file("homekit.bin") {
         Ok(path) => libcarjack::airplay::init_homekit_storage(&path)?,
         Err(e) => tracing::warn!("No HomeKit storage path ({e}); pairing from scratch every run"),
@@ -180,7 +180,7 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
 
     let host = Arc::new(IapHost::start(wifi.as_ref()).await?);
 
-    // Size the compositor from the last car's cached display, if any, so even a non-resizable app
+    // Size the compositor from the last accessory's cached display, if any, so even a non-resizable app
     // can boot at the right size during the BT/WiFi/AirPlay setup rather than after.
     let mut cache = DisplayCache::load();
     let cached = cache.last_props();
@@ -205,7 +205,7 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
         compositor.socket_name.clone(),
     );
     // Launch up front only if the target size is already known (resizable, or a cached display) -
-    // otherwise `run_session` launches it once the car's real resolution comes in.
+    // otherwise `run_session` launches it once the accessory's real resolution comes in.
     if config.app.resizable || cached.is_some() {
         app.launch();
     }
@@ -274,7 +274,7 @@ async fn run_desktop(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
                 break Ok(());
             }
             result = run_desktop_session(&host, &rd, zerocopy, codec, bitrate, &bt_device, &wifi) => {
-                // Lift anything still held: the input session outlives car sessions.
+                // Lift anything still held: the input session outlives accessory sessions.
                 rd.end_session();
                 match result {
                     Ok(()) => {
@@ -303,11 +303,11 @@ struct Established {
     touch_tx: mpsc::Sender<TouchEvent>,
     /// Read in the session loop and injected into the compositor or the portal.
     touch_rx: mpsc::Receiver<TouchEvent>,
-    /// The car's Bluetooth MAC (for the display cache and accessory settings); resolves during
+    /// The accessory's Bluetooth MAC (for the display cache and accessory settings); resolves during
     /// the handshake. A `watch`, not a `oneshot`: `establish_carplay` reads it early (to look up
     /// accessory settings before WiFi connects) and the caller reads it again afterward.
-    car_addr_rx: tokio::sync::watch::Receiver<Option<String>>,
-    /// Ends the Bluetooth iAP2 session on our terms; fired when the car sends `disableBluetooth`
+    accessory_addr_rx: tokio::sync::watch::Receiver<Option<String>>,
+    /// Ends the Bluetooth iAP2 session on our terms; fired when the accessory sends `disableBluetooth`
     /// over the AirPlay control channel.
     handover: CancellationToken,
 }
@@ -333,16 +333,16 @@ fn with_scope_id(addr: std::net::SocketAddr, iface: &str) -> std::net::SocketAdd
     }
 }
 
-/// How hard to try the AirPlay endpoint the car invited us to before giving up (which costs a
+/// How hard to try the AirPlay endpoint the accessory invited us to before giving up (which costs a
 /// full Bluetooth teardown and reconnect).
 const AIRPLAY_CONNECT_ATTEMPTS: usize = 4;
 const AIRPLAY_CONNECT_DELAY: Duration = Duration::from_millis(500);
 
-/// How long to wait for the car's invite before giving up on it and trying the receiver it named
+/// How long to wait for the accessory's invite before giving up on it and trying the receiver it named
 /// (if any) instead.
 const INVITE_WAIT: Duration = Duration::from_secs(15);
 
-/// Connect to the endpoint the car's invite pointed at.
+/// Connect to the endpoint the accessory's invite pointed at.
 async fn connect_airplay_endpoint(
     addr: std::net::SocketAddr,
     remote_homekit_id: Option<uuid::Uuid>,
@@ -378,7 +378,7 @@ async fn establish_carplay(
     let (touch_tx, touch_rx) = mpsc::channel::<TouchEvent>(64);
     let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCredentials>(4);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
-    let (car_addr_tx, car_addr_rx) = tokio::sync::watch::channel::<Option<String>>(None);
+    let (accessory_addr_tx, accessory_addr_rx) = tokio::sync::watch::channel::<Option<String>>(None);
     let handover = CancellationToken::new();
 
     tracing::info!("Starting CarPlay session");
@@ -391,11 +391,11 @@ async fn establish_carplay(
         bt_device.to_owned(),
         wifi_tx,
         ready_tx,
-        car_addr_tx,
+        accessory_addr_tx,
         handover.clone(),
     )));
 
-    let mut wifi_handle: Option<tokio::task::JoinHandle<Result<CarWifi>>> = None;
+    let mut wifi_handle: Option<tokio::task::JoinHandle<Result<AccessoryWifi>>> = None;
     let mut ready_rx = Some(ready_rx);
     // Where the accessory said its AirPlay receiver lives, and its HomeKit pairing id if it named
     // one there too (0x4301 only).
@@ -416,13 +416,13 @@ async fn establish_carplay(
                 airplay_hint = airplay_hint.or(creds.airplay.map(|a| (a, creds.pairing_id)));
                 if wifi_handle.is_none() {
                     tracing::info!("Got WiFi creds, connecting");
-                    let car_mac = car_addr_rx.borrow().clone();
+                    let accessory_mac = accessory_addr_rx.borrow().clone();
                     let wifi = wifi.clone();
                     let handle = tokio::spawn(async move {
-                        wifi.connect_to_car_wifi(
+                        wifi.connect_to_accessory_wifi(
                             &creds.ssid,
                             creds.passphrase.as_deref().unwrap_or(""),
-                            car_mac.as_deref(),
+                            accessory_mac.as_deref(),
                         )
                         .await
                     });
@@ -437,21 +437,21 @@ async fn establish_carplay(
     }
 
     // Phase 2: wait for WiFi connection to complete
-    let car_wifi_result = if let Some(handle) = wifi_handle {
+    let accessory_wifi_result = if let Some(handle) = wifi_handle {
         handle.await.map_err(|e| eyre!("WiFi task panicked: {e}"))?
     } else if let Some(creds) = wifi_rx.recv().await {
         airplay_hint = airplay_hint.or(creds.airplay.map(|a| (a, creds.pairing_id)));
-        let car_mac = car_addr_rx.borrow().clone();
-        wifi.connect_to_car_wifi(
+        let accessory_mac = accessory_addr_rx.borrow().clone();
+        wifi.connect_to_accessory_wifi(
             &creds.ssid,
             creds.passphrase.as_deref().unwrap_or(""),
-            car_mac.as_deref(),
+            accessory_mac.as_deref(),
         )
         .await
     } else {
-        return Err(eyre!("No WiFi credentials received from car"));
+        return Err(eyre!("No WiFi credentials received from accessory"));
     };
-    let car_wifi = car_wifi_result?;
+    let accessory_wifi = accessory_wifi_result?;
 
     // The handover is done: the credentials are in hand and we are on the accessory's AP. This
     // does not end the Bluetooth session - an iPhone stays on the link and lets the accessory drop
@@ -462,12 +462,12 @@ async fn establish_carplay(
     let bluetooth_id = host.bluetooth_address().await?;
     let picked = match airplay_hint {
         Some(hint) => {
-            tracing::info!("Car named its AirPlay receiver over iAP2 at {}", hint.0);
+            tracing::info!("Accessory named its AirPlay receiver over iAP2 at {}", hint.0);
             Some(hint)
         }
         None => {
-            tracing::info!("Car WiFi connected, waiting for the car's CarPlay invite...");
-            match wait_for_carplay_ctrl_probe(&car_wifi.iface, &bluetooth_id, INVITE_WAIT).await {
+            tracing::info!("Accessory WiFi connected, waiting for the accessory's CarPlay invite...");
+            match wait_for_carplay_ctrl_probe(&accessory_wifi.iface, &bluetooth_id, INVITE_WAIT).await {
                 Ok((addr, pi)) => {
                     tracing::info!("Got CarPlay ctrl invite; AirPlay peer at {addr}");
                     Some((addr, pi))
@@ -480,9 +480,9 @@ async fn establish_carplay(
         }
     };
     let (endpoint, remote_homekit_id) =
-        picked.ok_or_else(|| eyre!("Car neither invited us nor named an AirPlay receiver"))?;
-    // Either source's address comes from the car itself, so it can be link-local.
-    let endpoint = with_scope_id(endpoint, &car_wifi.iface);
+        picked.ok_or_else(|| eyre!("Accessory neither invited us nor named an AirPlay receiver"))?;
+    // Either source's address comes from the accessory itself, so it can be link-local.
+    let endpoint = with_scope_id(endpoint, &accessory_wifi.iface);
 
     let mac_address = wifi.get_wifi_mac().await?;
     let conn =
@@ -493,12 +493,12 @@ async fn establish_carplay(
         carplay_handle,
         touch_tx,
         touch_rx,
-        car_addr_rx,
+        accessory_addr_rx,
         handover,
     })
 }
 
-/// `source = app`: reconfigure the compositor to the car's display, encode its frames, and
+/// `source = app`: reconfigure the compositor to the accessory's display, encode its frames, and
 /// inject CarPlay touch back into it.
 async fn run_session(
     host: &Arc<IapHost>,
@@ -514,20 +514,20 @@ async fn run_session(
         mut carplay_handle,
         touch_tx,
         mut touch_rx,
-        car_addr_rx,
+        accessory_addr_rx,
         handover,
     } = establish_carplay(host.clone(), config.bluetooth_device().unwrap_or_default(), wifi)
         .await?;
 
-    // Reconfigure the already-running compositor to exactly match the car's size and rate.
+    // Reconfigure the already-running compositor to exactly match the accessory's size and rate.
     let resized = compositor.reconfigure(conn.width, conn.height, conn.max_fps)?;
 
-    // Remember this car's display so next startup can size everything up front. Normalize a
+    // Remember this accessory's display so next startup can size everything up front. Normalize a
     // missing fps to 30 so the cached value is directly usable to start the compositor.
     if conn.width > 0 && conn.height > 0 {
-        if let Some(car_mac) = car_addr_rx.borrow().clone() {
+        if let Some(accessory_mac) = accessory_addr_rx.borrow().clone() {
             cache.remember(
-                &car_mac,
+                &accessory_mac,
                 DisplayProps {
                     width: conn.width,
                     height: conn.height,
@@ -606,7 +606,7 @@ async fn run_session(
     }
 }
 
-/// `source = desktop`: encode the portal's PipeWire stream (scaled to the car) and inject CarPlay
+/// `source = desktop`: encode the portal's PipeWire stream (scaled to the accessory) and inject CarPlay
 /// touch back into the desktop through the portal's RemoteDesktop session.
 async fn run_desktop_session(
     host: &Arc<IapHost>,
@@ -622,15 +622,15 @@ async fn run_desktop_session(
         mut carplay_handle,
         touch_tx,
         mut touch_rx,
-        car_addr_rx: _,
+        accessory_addr_rx: _,
         handover,
     } = establish_carplay(host.clone(), bt_device, wifi).await?;
     let (width, height) = (conn.width, conn.height);
-    tracing::info!("Streaming desktop to car at {width}x{height}");
+    tracing::info!("Streaming desktop to accessory at {width}x{height}");
 
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(4);
     let (keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
-    // The encoder reports the desktop's real frame size here; touch is scaled from car space to it.
+    // The encoder reports the desktop's real frame size here; touch is scaled from accessory space to it.
     let (desktop_size_tx, desktop_size_rx) =
         tokio::sync::watch::channel::<Option<(u32, u32)>>(None);
     let node_id = rd.node_id();

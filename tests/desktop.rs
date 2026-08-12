@@ -1,5 +1,5 @@
 //! Validates the `source = "desktop"` encode path (`encode_pipewire_to_channel`) against *real*
-//! desktop frames, without a car and without the xdg-desktop-portal consent dialog: it drives
+//! desktop frames, without an accessory and without the xdg-desktop-portal consent dialog: it drives
 //! GNOME's internal `org.gnome.Mutter.ScreenCast` D-Bus API directly to get a PipeWire node, then
 //! runs the encoder and checks H264 access units come out.
 //!
@@ -70,10 +70,10 @@ async fn desktop_pipewire_encodes() -> Result<()> {
     let node_id: u32 = msg.body().deserialize()?;
     eprintln!("Mutter ScreenCast: connector={connector}, node={node_id}, zerocopy={mode:?}");
 
-    // Encode the desktop stream, scaled to a car-like 1080x600, and count access units.
+    // Encode the desktop stream, scaled to an accessory-like 1080x600, and count access units.
     let (video_tx, mut video_rx) = mpsc::channel::<EncodedFrame>(64);
     let (dsize_tx, _dsize_rx) = tokio::sync::watch::channel::<Option<(u32, u32)>>(None);
-    // No car here to ask for keyframes; the encoder's request pump just sees a closed channel.
+    // No accessory here to ask for keyframes; the encoder's request pump just sees a closed channel.
     let (_keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
     let _encoder = AbortOnDropHandle::new(tokio::spawn(async move {
         if let Err(e) = encode_pipewire_to_channel(

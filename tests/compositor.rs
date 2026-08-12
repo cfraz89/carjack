@@ -1,4 +1,4 @@
-//! Standalone validation of the internal compositor without a car: bring it up, run a
+//! Standalone validation of the internal compositor without an accessory: bring it up, run a
 //! fullscreen client that paints the screen white, and confirm the composited frames actually
 //! contain the client's output (not just the black clear) - and that the H264 encode path
 //! (including the zero-copy dmabuf pipeline) produces access units from them.
@@ -61,9 +61,9 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
 
     // Also run the H264 encoder on the compositor frames and count encoded access units, so
     // this validates the full compositor -> encode path (incl. the zero-copy dmabuf pipeline)
-    // without needing the car.
+    // without needing the accessory.
     let (video_tx, mut video_rx) = mpsc::channel::<EncodedFrame>(64);
-    // No car here to ask for keyframes, so the sender is simply dropped and the encoder's
+    // No accessory here to ask for keyframes, so the sender is simply dropped and the encoder's
     // request pump sees a closed channel and exits.
     let (_keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
     let _encoder = AbortOnDropHandle::new(tokio::spawn(encode_h264_to_channel(
@@ -150,7 +150,7 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
     Ok(())
 }
 
-/// The car's real display size/refresh arrive after startup, so the compositor starts at a
+/// The accessory's real display size/refresh arrive after startup, so the compositor starts at a
 /// default and is reconfigured. Verify a live `reconfigure` actually switches the frame stream to
 /// the new dimensions (no client needed - the compositor renders at the output size regardless).
 #[tokio::test]

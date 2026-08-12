@@ -55,12 +55,12 @@ never logged one" is not the same claim. All four inbound paths:
   404'd). Only `POST /command`, across three runs and both units.
 - **Control connection** - we are the client; an inbound request is `ProtocolViolationGeneric`, a
   hard error. Zero in any run.
-- **Screen socket** - same strictness, and the bike capture has zero bytes car->us on it.
+- **Screen socket** - same strictness, and the bike capture has zero bytes accessory->us on it.
 - **carplay-ctrl** (bench only; the bike never invites) - logs every frame, but at `debug`, which
   `catplay_carplay=info` hides. Re-run at debug (`logs/bench-ctrl-debug.log`): exactly one frame,
   `GET /ctrl-int/1/connect`, and no `Rejected invalid CarPlay-Ctrl request`.
 
-At the network level on the bike: **zero car-initiated TCP connections**, zero RSTs from us, zero
+At the network level on the bike: **zero accessory-initiated TCP connections**, zero RSTs from us, zero
 ICMPv6 unreachables - so nothing was sent to a port we were not listening on either.
 
 ## The run that ruled out the source, and the config-frame diff (2026-08-12, later)
@@ -72,7 +72,7 @@ Two things it settled and one lead it produced.
 them **over 20 KB** and one at **187 KB**, against a median of 67 B. Filler would have flattened all
 of that to 12500. So a real picture was encoded and sent; the black screen is not a black source.
 
-**The car is now engaging with the stream.** It sent a `ForceKeyFrame` 21 ms after RECORD - the
+**The accessory is now engaging with the stream.** It sent a `ForceKeyFrame` 21 ms after RECORD - the
 first time it has ever asked us for anything on the video path - and forwarded 33 touch reports, so
 it is in CarPlay mode with our stream as its screen.
 
@@ -114,7 +114,7 @@ real encode chain (`tests/encode_dump.rs`, decoded with ffmpeg) but **not yet ag
   are in the backend table, and `extract_codec_config` now collects VPS/SPS/PPS (NAL 32/33/34)
   as well as H264's SPS/PPS.
 - **One trap worth knowing:** left to negotiate freely `vah265enc` takes `vapostproc`'s YUY2 and
-  encodes **4:2:2** (`main-422-10`, which decodes as Range Extensions) - no car decodes that. The
+  encodes **4:2:2** (`main-422-10`, which decodes as Range Extensions) - no accessory decodes that. The
   fix is the new `encoder_input` column pinning NV12 *with its memory feature named*; constraining
   the encoder's output profile instead looks equivalent and isn't, because it pushes the upstream
   negotiation onto DMABuf and dies with "DMABuf caps negotiated without the mandatory support of
@@ -182,7 +182,7 @@ time. The `fix/media-clock-ntp-domain` branch is left on the fork, unused.
   log, and it was found afterwards attached to a dead socket. Check `waydroid status` before a run
   and grep the log for `Android with user 0 is ready` before reading anything into the protocol.
 - **`disableBluetooth` never arrives on this unit** - not over AirPlay, iAP2 or the tunnel, in any
-  capture. The car signals the handover by bringing the tunnelled iAP2 link up and resetting RFCOMM
+  capture. The accessory signals the handover by bringing the tunnelled iAP2 link up and resetting RFCOMM
   76 ms later, so the graceful shutdown fires on the tunnel link as well as on the command.
 
 ## Reverted: back to NetworkManager, not iwd (2026-08-09)
@@ -200,18 +200,18 @@ properties (`disable-ht`/`-vht`/`-he`/`-eht`) that forward them to wpa_supplican
 `hidden` or `ap-isolation` do. Builds and compiles clean against a real NetworkManager
 checkout; not yet deployed.
 
-`wifi_connect.rs`'s retry-with-DisableHE mechanism carries over: `car_profile` sets
+`wifi_connect.rs`'s retry-with-DisableHE mechanism carries over: `accessory_profile` sets
 `disable-he` through `WirelessSetting::other` (the generated binding's catch-all map for
 properties it doesn't have a typed field for) rather than a typed setter, since picking that
 up for real needs `nm-automata` regenerated against a patched NetworkManager - not done yet,
 so this is unverified against a live daemon. `other` is real plumbing, not a hack: it's what
 `nm-automata` round-trips unknown settings through by design.
 
-A wireless CarPlay bridge that impersonates an iPhone to a car head unit: Bluetooth iAP2 to
-authenticate and get handed the car's WiFi credentials, then CarPlay video over that WiFi via
+A wireless CarPlay bridge that impersonates an iPhone to an accessory head unit: Bluetooth iAP2 to
+authenticate and get handed the accessory's WiFi credentials, then CarPlay video over that WiFi via
 AirPlay.
 
-## The blocker on the bike (2026-08-04): the car deauths us 16 ms after the screen SETUP
+## The blocker on the bike (2026-08-04): the accessory deauths us 16 ms after the screen SETUP
 
 **Primary suspect (2026-08-05): session ordering, not the `/setup` identity.** The iPhone capture
 (`logs/cfmoto-iphone.pcapng`) reframes the old deviceID theory. The iPhone opens AirPlay with
@@ -231,12 +231,12 @@ sets it from "known remote" and skips mDNS on the direct-details path (still adv
 that name no receiver, e.g. the bench). Builds; `just test-lib` green. **Untested against the bike -
 that is the next validation.**
 
-**Experiment (2026-08-05, `logs/cfmoto.log` with `catplay_carplay=info`): the car answers every
+**Experiment (2026-08-05, `logs/cfmoto.log` with `catplay_carplay=info`): the accessory answers every
 AirPlay request through `assert_modes`, and goes silent exactly at the screen SETUP.** Pair-verify,
 the encrypted `SETUP /setup`, `/info` (32 KB) and `modesChanged` all return 200 OK; the very next
 request - `SETUP /` for the screen stream - is never answered at all (times out 11 s later into
 `Request/channel timeout`). No `Screen setup response received`, no ACK, no RST. So the "did the
-car answer the SETUP before deauthing" question is settled: **it does not answer it, in this run**;
+accessory answer the SETUP before deauthing" question is settled: **it does not answer it, in this run**;
 it drops the session the moment the video screen session begins. Full exchange table in the
 investigation log.
 
@@ -245,7 +245,7 @@ The sharpest evidence yet, from `cfmoto.log` + `cfmoto.pcapng` (17:05, the first
 
 ```
 16.620  Timeout waiting for CarPlay ctrl invite; connecting to [fe80::9083:…]:7000
-16.909  AirPlay bootstrap complete!   Car display: 800x1280 @ 30 fps
+16.909  AirPlay bootstrap complete!   Accessory display: 800x1280 @ 30 fps
 16.922  Asserted screen modes (controller owns screen)      (385 -> 182 on the wire)
 16.925  screen SETUP sent  (314 bytes)
 16.9417 kernel: wlp0s20f3: deauthenticated from 92:83:8e:ef:a7:d3 (Reason: 2)
@@ -254,37 +254,37 @@ The sharpest evidence yet, from `cfmoto.log` + `cfmoto.pcapng` (17:05, the first
 - **The direct connect works.** `/setup`, pair-setup, pair-verify, `/info` answered with a 13.8 KB
   plist, event socket up, modes exchange answered. 289 ms from TCP to display known. The `/info`
   timeout that once justified deleting this path was the dying link, nothing more.
-- **The deauth is the car's.** `deauthenticated from …`, *not* `deauthenticating … by local
+- **The deauth is the accessory's.** `deauthenticated from …`, *not* `deauthenticating … by local
   choice`: mac80211 prints the first for a frame it **received**. The 21:02 run's four were all
   local-choice (rechecked), so these are two different failure modes and this is the one that
   matters.
 - **16 ms is a decision, not a link failure.** Too fast for a rekey, an inactivity timer or a
-  retry exhaustion. The car chose to drop the station immediately after the screen SETUP.
+  retry exhaustion. The accessory chose to drop the station immediately after the screen SETUP.
 - **It also kills the mDNS-keepalive theory** from the 2026-08-03 entry: this run advertised and
   connected, and the association died anyway - on a timescale no keepalive argument can explain.
 
-The car never answers the SETUP; carjack waits 11 s, gets `Request/channel timeout`, restarts, and
+The accessory never answers the SETUP; carjack waits 11 s, gets `Request/channel timeout`, restarts, and
 the retry ends in a Bluetooth page timeout.
 
 This is the same shape as `cfmoto_16` (SETUP *answered* 314 -> 225, deauth 77 ms after the screen
 data socket's handshake, before RECORD, no data ever sent) and `cfmoto_12`. So across three
-captures the trigger sits in the same place: the screen stream. Whether the car answers the SETUP
+captures the trigger sits in the same place: the screen stream. Whether the accessory answers the SETUP
 first varies; that it drops the station within tens of milliseconds does not.
 
 What the SETUP actually carries is small - `streamConnectionID` (a random u64), `type`,
 `latencyMs` (carjack asks 100 ms), and the display `uuid` from `/info`. Nothing obviously
-objectionable, and `cfmoto_16` shows the car accepting it. Two candidates worth separating:
-the plist contents, and the car reconfiguring its AP when a session moves to streaming (an AP that
+objectionable, and `cfmoto_16` shows the accessory accepting it. Two candidates worth separating:
+the plist contents, and the accessory reconfiguring its AP when a session moves to streaming (an AP that
 has torn down its association state answers exactly `PREV_AUTH_NOT_VALID`).
 
 **Next evidence, cheap:** catplay already logs `Sending screen SETUP: {setup:?}` and
 `Screen setup response received: {resp:?}` at info - `.env` was pinning `catplay_carplay=error`,
 which is why no run has ever shown them. Now set to `info`. The next bike run therefore says
-whether the car answered before deauthing, and with what.
+whether the accessory answered before deauthing, and with what.
 
 ## Superseded: the blocker as it looked on 2026-08-03 (a different failure mode)
 
-**Not the car. The WiFi association dies on its own about 12 s in, while the car carries on
+**Not the accessory. The WiFi association dies on its own about 12 s in, while the accessory carries on
 talking to us over Bluetooth the whole time.** The 21:02 run settles this:
 
 - **The deauth is ours.** `wlp0s20f3: deauthenticating from 92:83:8e:ef:a7:d3 **by local choice**
@@ -293,16 +293,16 @@ talking to us over Bluetooth the whole time.** The 21:02 run settles this:
   `cfmoto_16` was the same event read the wrong way round.
 - **The AP is healthy and keeps taking us back.** Every retry gets `RX AssocResp … status=0
   aid=1`. An AP that had walked away or rebooted could not do that.
-- **The car is healthy.** In the btsnoop, the bike is running SDP and PBAP (`Get final
+- **The accessory is healthy.** In the btsnoop, the bike is running SDP and PBAP (`Get final
   "telecom/pb.vcf"`) at 21:02:43 - half a minute *after* the WiFi started cycling, and long after
-  carjack had given up. So "the car walks away and takes Bluetooth with it" does **not** apply
+  carjack had given up. So "the accessory walks away and takes Bluetooth with it" does **not** apply
   here; only the WiFi path failed.
 - **It is not an `assert_modes` reaction.** This run never got that far: `/info` was sent and
   never answered, so the deauth cannot be a response to anything we asserted. The
   ~20-45 ms-after-`assert_modes` correlation in the older captures was coincidence - the modes
   assertion is simply what a session that survives ~12 s is doing at the moment the link drops.
 
-The shape to explain is now: associate → DHCP completes (`192.168.149.57`, car is `.201`) →
+The shape to explain is now: associate → DHCP completes (`192.168.149.57`, accessory is `.201`) →
 traffic flows for ~2 s → goes quiet → ~10 s later the local stack gives up and deauths → repeat
 every ~11 s. What is missing is a WiFi capture spanning the association (with EAPOL and beacons)
 or `wpa_supplicant -dd`; nothing in the journal says *why* the supplicant concluded the auth was
@@ -351,22 +351,22 @@ mdns anyway") was circular - we never gave it anything to discover.
 Two identity mismatches point the same way, and both are now understood to be Bluetooth-keyed:
 the Bonjour record's `id` is documented by catplay as the phone's **Bluetooth** MAC (carjack sent
 the WiFi interface MAC), and the iPhone's `0x4300` group 1 carries its **Bluetooth** MAC where
-carjack sends a WiFi MAC. The car appears to correlate the station on its AP with the device it
+carjack sends a WiFi MAC. The accessory appears to correlate the station on its AP with the device it
 authenticated over Bluetooth, by Bluetooth address.
 
 Changed: carjack now always advertises `_carplay-ctrl._tcp` with the adapter's Bluetooth address
 as `id`, waits for the invite, and connects only where the invite points. The direct-connect and
 gateway-fallback paths are gone (`connect_airplay_endpoint` takes one address), along with
-`CarWifi::gateway`/`iface_mac`.
+`AccessoryWifi::gateway`/`iface_mac`.
 
 **Confirmed on the bench AUTO BOX (2026-08-03 22:34, `/tmp/bench-invite.log`) - the `id` was the
 whole problem.** The invite arrived **69 ms** after the advertisement:
 
 ```
-12:34:23.708  Car WiFi connected, waiting for the car's CarPlay invite...
+12:34:23.708  Accessory WiFi connected, waiting for the accessory's CarPlay invite...
 12:34:23.710  _carplay-ctrl._tcp advertised on wlp0s20f3:8082 (id=4C:79:6E:DA:29:4B)
 12:34:23.779  Got CarPlay ctrl invite; AirPlay peer at 192.168.43.1:7000, pi=Some(90665097-…)
-12:34:24.006  AirPlay bootstrap complete!  Car display: 1080x600 @ 30 fps
+12:34:24.006  AirPlay bootstrap complete!  Accessory display: 1080x600 @ 30 fps
 12:34:24.070  RECORD sent, streaming video     (first keyframe 4.05 ms)
               … 30.0 fps steady for 70 s, 0 dropped to backpressure, touch arriving …
 ```
@@ -374,7 +374,7 @@ whole problem.** The invite arrived **69 ms** after the advertisement:
 The same unit on 2026-07-17 advertised the **WiFi** MAC and timed out after 15 s, reaching RECORD
 only through the fallback that is now deleted. Same unit, same advertisement, different `id`:
 69 ms versus never. That is direct evidence for the Bluetooth-MAC correlation, independent of the
-bike. It is also strictly better than the old path - the invite carries the car's HomeKit pairing
+bike. It is also strictly better than the old path - the invite carries the accessory's HomeKit pairing
 id (`pi`), which the gateway fallback never had, so pair-verify now has its fast path.
 
 **Tested on the bike (2026-08-03 22:53, `cfmoto.pcapng` + `/tmp/carjack.btsnoop`) - it does not
@@ -490,7 +490,7 @@ Two real defects surfaced and fixed while standing this up against a live iwd on
   "destination was not specified". Fixed by defaulting the destination to `net.connman.iwd`.
 - **iwd's systemd unit drops `CAP_DAC_OVERRIDE`, so it reads provisioning files by ordinary
   permissions, not as root** - a chris-owned 0600 file stayed unprovisioned (0/6) while a
-  world-readable 0644 worked (6/6). Fixing it with 0644 would leak the car's passphrase.
+  world-readable 0644 worked (6/6). Fixing it with 0644 would leak the accessory's passphrase.
 - **Superseded (2026-08-07): the POSIX ACL answer to that does not survive an iwd restart.**
   `wifi_connect` used to write 0600 and add a root-read ACL (`u:0:r`) via the `exacl` crate. That
   holds until the *directory* is the problem: `iwd.service` sets `StateDirectory=iwd` with
@@ -510,7 +510,7 @@ Two real defects surfaced and fixed while standing this up against a live iwd on
   (`cap_net_admin,cap_dac_override+ep`). One thing to grant, one to deploy.
 
 Verified against a live host iwd: `iwd_is_configured_for_carjack`, `live_connection_...` and
-`iwd_reads_back_the_car_provisioning_file` (writes a throwaway profile, confirms iwd registered
+`iwd_reads_back_the_accessory_provisioning_file` (writes a throwaway profile, confirms iwd registered
 it with `Hidden=true`/`AutoConnect=false`/type `psk`, then `Forget()`s it) all pass. Then
 confirmed against the bench unit - see below. Note the live iwd tests must run **on the host**,
 not under `toolbox run`: inside the container iwd's D-Bus answers `AccessDenied` even though
@@ -557,7 +557,7 @@ desktop paths) were **unbiased**, and the encoder ending makes both its arm and 
 once - so identical faults reported either the real GStreamer error or "encoder stopped before
 producing a keyframe", at random. Both loops are now `biased;`.
 
-`tests/compositor.rs` drives compositor → encode with **no car** and reproduces the whole encode
+`tests/compositor.rs` drives compositor → encode with **no accessory** and reproduces the whole encode
 path in ~3s; it is the right first stop for anything in this area. `GST_DEBUG=*:2` alone hid the
 cause - the caps detail needs `GST_DEBUG=*:2,GST_CAPS:5`.
 
@@ -567,11 +567,11 @@ Verified against the CFMOTO bike unless noted.
 
 - **Bluetooth → iAP2 handshake, end to end, in about a second.** iAP1 switch → link SYN →
   identification → the Apple authentication chain (`AA00`/`AA06`/`AA02`/`AA03`/`AA05`) →
-  `4300`/`4301`, at which point the car hands over its WiFi credentials and the address of its
+  `4300`/`4301`, at which point the accessory hands over its WiFi credentials and the address of its
   AirPlay receiver. Confirmed clean in `cfmoto_11.pcapng`.
-- **WiFi association and DHCP** on the car's AP - via NetworkManager up to 2026-08-07, via iwd
-  since; the iwd path has not yet met a car (see below).
-- **AirPlay video and touch**, on the bench unit: the car's display is learned from `/info`, the
+- **WiFi association and DHCP** on the accessory's AP - via NetworkManager up to 2026-08-07, via iwd
+  since; the iwd path has not yet met an accessory (see below).
+- **AirPlay video and touch**, on the bench unit: the accessory's display is learned from `/info`, the
   compositor is reconfigured to it, and touch comes back over the AirPlay HID channel.
 - **The internal compositor and both encode paths** (zero-copy CUDA on NVIDIA, software
   fallback). See `CLAUDE.md` for the backend table and what is verified where.
@@ -595,7 +595,7 @@ against the bike without a Bonjour-supplied pairing id.
 ## What is done but not yet retested against the bike
 
 **Six fixes and one refuted hypothesis, from `cfmoto_14` + its logs (2026-07-27/28). All
-unit-tested, all building, none yet run against the car - that is the next thing to do.** Details
+unit-tested, all building, none yet run against the accessory - that is the next thing to do.** Details
 in the top two log entries.
 
 **The Bluetooth connection problem is Page Timeout, not profiles.** 9 of carjack's 12 outbound
@@ -643,7 +643,7 @@ And from the session/video side:
    `cfmoto_14` took 4.92 s to its first keyframe; session 2, registry warm, took **296 ms**.
 2. **The keyframe gate moved back after `setup_screen`.** Putting it before was my regression:
    nothing may sit between `assert_modes` and SETUP. `cfmoto_12` sent SETUP 2 ms after the modes
-   assertion and the car answered RECORD; `cfmoto_13` and both `cfmoto_14` sessions delayed it and
+   assertion and the accessory answered RECORD; `cfmoto_13` and both `cfmoto_14` sessions delayed it and
    lost the unit within ~2 s.
 3. **Inbound iAP2 connections are filtered by the configured address.** carjack was accepting a
    page from *any* bonded head unit - in `cfmoto_14` it streamed to the bench AUTO BOX 58 s after
@@ -716,23 +716,23 @@ Worth remembering, because both misled for a while: the same symptom was first b
 `persist=volatile` (changed nothing, reverted). A ~50% failure that follows process boundaries is
 a hash-order tell; chasing it as *state* wasted the most time.
 
-## Housekeeping landed 2026-08-01 (unrun against a car)
+## Housekeeping landed 2026-08-01 (unrun against an accessory)
 
 Not aimed at the deauth; all three are things that were making iteration harder.
 
 - **NetworkManager now goes through `nm-automata`**, our own bindings generated in full from
-  NetworkManager's spec, replacing the hand-written `nmrs`. The car's profile is a typed
+  NetworkManager's spec, replacing the hand-written `nmrs`. The accessory's profile is a typed
   `ConnectionProfile` rather than a settings map with two properties patched in by string key -
   and the values are typed too, not strings spelled by hand: `WirelessMode::Infrastructure`,
   `WirelessBand::A`, `WirelessSecurityKeyMgmt::WpaPsk`, `AssignedMacAddress::Permanent`,
   `Ipv4Method::Auto`, `Ipv6Method::LinkLocal`, and an `Ssid` (bytes, as an access point actually
   names itself) that the current-network comparison goes through instead of `String::from_utf8`.
   A property whose object is absent now reads as `None` rather than a proxy for `/`, so
-  `current_ssid` no longer compares a path against a literal and `car_wifi` says plainly that the
+  `current_ssid` no longer compares a path against a literal and `accessory_wifi` says plainly that the
   activation has no IPv4 configuration yet - which is what the stray `IP4Config ... path "/"`
   warning in the logs was.
   Three `#[ignore]` tests in `wifi_connect` check it against the running daemon: the read path
-  (`live_connection`, the permanent MAC) and a round-trip of the car's profile through
+  (`live_connection`, the permanent MAC) and a round-trip of the accessory's profile through
   `AddConnectionUnsaved` → `GetSettings` → `Delete`. The round-trip one is what surfaced the
   serialisation bug above - run it a few times, not once, since that failure was intermittent.
   They share one tokio runtime rather than taking one each: `get_network_manager` caches its
@@ -744,7 +744,7 @@ Not aimed at the deauth; all three are things that were making iteration harder.
   attempt failed into a silent retry (a second profile, no log line). backon now `notify`s, so a
   retry says why.
 - **`ipv6.method` is now `link-local`, and the IPv6 gate is `IP6_READY`.** It was defaulting to
-  `auto`, i.e. waiting on SLAAC - and the car answers no router solicitation, in `cfmoto_12` or
+  `auto`, i.e. waiting on SLAAC - and the accessory answers no router solicitation, in `cfmoto_12` or
   `cfmoto_16` (only our own RSes appear, retried into silence). **The flag is sufficient and the
   DAD watcher is now deleted**: over every session that logged it, `wait_for_link_local` returned
   on its first pass 660-810 µs after `IP6_READY` - i.e. it never waited for anything.
@@ -773,7 +773,7 @@ Not aimed at the deauth; all three are things that were making iteration harder.
 0. **Power-cycle the head unit, check `.env`, and keep the console output.** `just test-run` does
    not save a log, and the last two runs were diagnosed blind from packet captures alone - which
    is how the wrong conclusion got drawn from `cfmoto_12`. carjack logs the encode backend, the
-   car's display, and (now) a warning every second the keyframe gate waits; that output answers
+   accessory's display, and (now) a warning every second the keyframe gate waits; that output answers
    in one line what a capture cannot answer at all. Note which `CARJACK.SOURCE` was used.
 1. **Run against the bike and capture** (`just test-run`, with a BT+WiFi capture as in
    `cfmoto_12`). In order, confirm:
@@ -781,8 +781,8 @@ Not aimed at the deauth; all three are things that were making iteration harder.
    - AirPlay reaches RECORD (as in `cfmoto_12`);
    - **video bytes appear on the screen socket within milliseconds of RECORD** - that is the
      whole point of the fix, and the thing `cfmoto_12` lacked;
-   - the car does *not* send RFCOMM DISC ~2 s later.
-2. **Then** the video path proper: whether the car requests keyframes, whether backpressure
+   - the accessory does *not* send RFCOMM DISC ~2 s later.
+2. **Then** the video path proper: whether the accessory requests keyframes, whether backpressure
    fires, and whether the picture holds up. Frame orientation is the first thing to eyeball.
 3. **Also retest the bench unit** - the RECORD gate is on the shared `run_video_stream` path, so
    it affects the AUTO BOX too.
@@ -791,8 +791,8 @@ Not aimed at the deauth; all three are things that were making iteration harder.
 
 - **Frame orientation is unverified.** GL renders bottom-up and the readback orientation has
   never been checked against content with a clear top/bottom. A one-line output-transform fix if
-  the car shows an upside-down image.
-- **Multitouch is correct by construction but unvalidated** end-to-end against a real car, and
+  the accessory shows an upside-down image.
+- **Multitouch is correct by construction but unvalidated** end-to-end against a real accessory, and
   the touch coordinate range is assumed to match the display resolution.
 - **HFP identity answers are still stubs** (`AT+CGMI`/`AT+CGMM` return `ERROR`). Not implicated
   in any failure so far - iAP2 gets well past it - but a real iPhone answers these.
@@ -805,4 +805,4 @@ Not aimed at the deauth; all three are things that were making iteration harder.
   cycles - the iAP2 handshake stops completing, or you get `ProfileUnavailable` /
   already-connected errors. **Power-cycle the head unit**; don't debug carjack for this.
 - On the primary dev machine, `iwlwifi` needs `disable_11ax=1` (via `/etc/modprobe.d/`) or
-  association with the car's AP is flaky. Check that first on any new dev machine.
+  association with the accessory's AP is flaky. Check that first on any new dev machine.

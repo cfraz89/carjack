@@ -248,17 +248,17 @@ pub async fn wireless_carplay(
     target: String,
     wifi_tx: mpsc::Sender<WifiCredentials>,
     ready_tx: oneshot::Sender<()>,
-    car_addr_tx: tokio::sync::watch::Sender<Option<String>>,
+    accessory_addr_tx: tokio::sync::watch::Sender<Option<String>>,
     handover: CancellationToken,
 ) -> Result<()> {
     let adapter = &host.adapter;
     let identity = host.identity.clone();
 
     let device = find_target_device(adapter, &target).await?;
-    // Surface the car's MAC early - so the caller can look up its accessory settings before WiFi
+    // Surface the accessory's MAC early - so the caller can look up its accessory settings before WiFi
     // connects, and size the compositor / launch the app from its cached display before AirPlay
     // reports the real one. A `watch`, not a `oneshot`: both readers need the value independently.
-    let _ = car_addr_tx.send(Some(device.address().to_string()));
+    let _ = accessory_addr_tx.send(Some(device.address().to_string()));
 
     // Gate on relinks: one at a time.
     let connect_attempt = Arc::new(tokio::sync::Semaphore::new(1));

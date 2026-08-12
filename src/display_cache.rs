@@ -1,5 +1,5 @@
-//! Per-car display cache. Remembers the resolution/refresh a head unit reported, keyed by the
-//! car's Bluetooth MAC, so on the next connect we can size the compositor (and launch the desktop
+//! Per-accessory display cache. Remembers the resolution/refresh a head unit reported, keyed by the
+//! accessory's Bluetooth MAC, so on the next connect we can size the compositor (and launch the desktop
 //! app) up front - hiding a slow app's boot (e.g. Waydroid) behind the BT/WiFi/AirPlay setup
 //! instead of waiting for AirPlay to report the display. Stored as JSON in the XDG cache dir; a
 //! missing or corrupt file just means "no cache yet".
@@ -19,8 +19,8 @@ pub struct DisplayProps {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CacheFile {
-    /// MAC of the most recently connected car - used to pick a size at startup, before we know
-    /// which car this run will connect to.
+    /// MAC of the most recently connected accessory - used to pick a size at startup, before we know
+    /// which accessory this run will connect to.
     #[serde(default)]
     last: Option<String>,
     #[serde(default)]
@@ -46,17 +46,17 @@ impl DisplayCache {
         DisplayCache { path, file }
     }
 
-    /// Cached props for a specific car MAC, if known.
+    /// Cached props for a specific accessory MAC, if known.
     pub fn get(&self, mac: &str) -> Option<DisplayProps> {
         self.file.displays.get(mac).copied()
     }
 
-    /// Best guess for startup, before we know which car will connect: the most recently used car.
+    /// Best guess for startup, before we know which accessory will connect: the most recently used accessory.
     pub fn last_props(&self) -> Option<DisplayProps> {
         self.file.last.as_ref().and_then(|m| self.get(m))
     }
 
-    /// Record a car's display and mark it the most recent, persisting if anything changed.
+    /// Record an accessory's display and mark it the most recent, persisting if anything changed.
     pub fn remember(&mut self, mac: &str, props: DisplayProps) {
         let unchanged = self.file.displays.get(mac) == Some(&props);
         let is_last = self.file.last.as_deref() == Some(mac);

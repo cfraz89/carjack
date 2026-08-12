@@ -39,13 +39,13 @@ pub struct EiTouch {
 
 /// Work for the EI thread.
 enum Command {
-    /// One touch to inject, in the car's coordinate space (mapped into a region on the EI thread,
+    /// One touch to inject, in the accessory's coordinate space (mapped into a region on the EI thread,
     /// which is what owns the region list).
     Touch {
         event: TouchEvent,
-        car_size: (u32, u32),
+        accessory_size: (u32, u32),
     },
-    /// Lift every finger that's still down - sent when a CarPlay session ends, so a car that
+    /// Lift every finger that's still down - sent when a CarPlay session ends, so an accessory that
     /// disappears mid-gesture doesn't leave the desktop with a finger held down forever.
     ReleaseAll,
 }
@@ -90,21 +90,21 @@ impl EiTouch {
         }
     }
 
-    /// Queue a CarPlay touch for injection. `car_size` is the car's display size (the space
+    /// Queue a CarPlay touch for injection. `accessory_size` is the accessory's display size (the space
     /// `event.x/.y` are in); the EI thread maps it into the device region matching the streamed
     /// monitor.
     ///
     /// Non-blocking, so it never stalls the session loop; an error means the libei connection is
     /// gone for good.
-    pub fn send_touch(&self, event: &TouchEvent, car_size: (u32, u32)) -> Result<()> {
+    pub fn send_touch(&self, event: &TouchEvent, accessory_size: (u32, u32)) -> Result<()> {
         self.send(Command::Touch {
             event: event.clone(),
-            car_size,
+            accessory_size,
         })
     }
 
     /// Lift every finger still held down. Call this when a CarPlay session ends: the EI connection
-    /// outlives individual sessions, so a car that vanishes mid-gesture would otherwise leave the
+    /// outlives individual sessions, so an accessory that vanishes mid-gesture would otherwise leave the
     /// desktop with a finger stuck down.
     pub fn release_all(&self) -> Result<()> {
         self.send(Command::ReleaseAll)
@@ -214,7 +214,7 @@ async fn ei_loop(
                     return Ok(());
                 };
                 match &command {
-                    Command::Touch { event, car_size } => session.inject(event, *car_size),
+                    Command::Touch { event, accessory_size } => session.inject(event, *accessory_size),
                     Command::ReleaseAll => session.release_all(),
                 }
             }
@@ -226,7 +226,7 @@ async fn ei_loop(
 /// to emit events on it.
 struct EiSession {
     connection: event::Connection,
-    /// `mapping_id` of the video stream, to pick the region the car is actually looking at when the
+    /// `mapping_id` of the video stream, to pick the region the accessory is actually looking at when the
     /// server offers several (multi-monitor).
     mapping_id: Option<String>,
     /// EI event timestamps are microseconds on an arbitrary but monotonic clock.
@@ -253,7 +253,7 @@ impl EiSession {
     fn handle_event(&mut self, event: EiEvent) {
         match event {
             EiEvent::SeatAdded(seat) => {
-                // Touch only: the car sends nothing else into the desktop.
+                // Touch only: the accessory sends nothing else into the desktop.
                 seat.seat.bind_capabilities(DeviceCapability::Touch.into());
                 debug!("EI seat {:?}: bound touch capability", seat.seat.name());
             }
@@ -303,7 +303,7 @@ impl EiSession {
             EiEvent::DevicePaused(paused) => {
                 if let Some(touch) = self.touch.as_mut().filter(|t| t.device == paused.device) {
                     touch.emulating = false;
-                    // Mutter releases our slots on pause; forget them so a later `up` from the car
+                    // Mutter releases our slots on pause; forget them so a later `up` from the accessory
                     // is dropped instead of aborting the compositor.
                     self.slots.clear();
                     debug!("EI touchscreen paused");
@@ -342,9 +342,9 @@ impl EiSession {
     ///
     /// Every event is filtered through [`SlotTracker`] first: Mutter's EIS treats an `up` for a
     /// slot it never acquired as a fatal `g_assert`, aborting gnome-shell (the whole session), and
-    /// a `motion` for an unknown slot silently moves the wrong finger. The car can produce either
+    /// a `motion` for an unknown slot silently moves the wrong finger. The accessory can produce either
     /// after a dropped event or a paused device, so nothing reaches the wire unfiltered.
-    fn inject(&mut self, event: &TouchEvent, car_size: (u32, u32)) {
+    fn inject(&mut self, event: &TouchEvent, accessory_size: (u32, u32)) {
         let Some(touch) = self.touch.as_ref().filter(|t| t.emulating) else {
             // Paused, or gone: dropping is correct, not an error. The tracker is cleared on pause,
             // so a later `up` for this gesture is dropped too rather than crashing the compositor.
@@ -362,9 +362,9 @@ impl EiSession {
             debug!("libei touch dropped: touchscreen has no region");
             return;
         };
-        let (x, y) = region_position(region, event.x, event.y, car_size);
+        let (x, y) = region_position(region, event.x, event.y, accessory_size);
         debug!(
-            "libei touch {:?} slot={} car=({:.0},{:.0}) car_size={car_size:?} \
+            "libei touch {:?} slot={} accessory=({:.0},{:.0}) accessory_size={accessory_size:?} \
              region={}x{}+{}+{} -> ({x:.1},{y:.1})",
             event.event_type,
             event.slot,
@@ -423,7 +423,7 @@ impl EiSession {
 
 /// Which touch slots are currently down, so carjack only ever emits a well-formed sequence
 /// (`down` -> `motion`* -> `up`) per slot - Mutter's EIS aborts the whole compositor on an `up`
-/// for a slot it never acquired, so anything malformed the car sends has to be filtered here.
+/// for a slot it never acquired, so anything malformed the accessory sends has to be filtered here.
 #[derive(Default)]
 struct SlotTracker {
     down: std::collections::BTreeSet<u32>,
@@ -480,14 +480,14 @@ fn pick_region<'a>(
     regions.first()
 }
 
-/// Map a car-space touch into `region`: scale by the region's size, offset by its position, and keep
+/// Map an accessory-space touch into `region`: scale by the region's size, offset by its position, and keep
 /// the result inside it - out-of-region coordinates are *silently discarded* by the EIS
-/// implementation, and a car reports touch right at the edge of its display.
-fn region_position(region: &event::Region, x: f64, y: f64, car_size: (u32, u32)) -> (f32, f32) {
-    let (car_w, car_h) = (f64::from(car_size.0), f64::from(car_size.1));
+/// implementation, and an accessory reports touch right at the edge of its display.
+fn region_position(region: &event::Region, x: f64, y: f64, accessory_size: (u32, u32)) -> (f32, f32) {
+    let (accessory_w, accessory_h) = (f64::from(accessory_size.0), f64::from(accessory_size.1));
     let (rw, rh) = (f64::from(region.width), f64::from(region.height));
-    let (sx, sy) = if car_w > 0.0 && car_h > 0.0 {
-        (x * rw / car_w, y * rh / car_h)
+    let (sx, sy) = if accessory_w > 0.0 && accessory_h > 0.0 {
+        (x * rw / accessory_w, y * rh / accessory_h)
     } else {
         (x, y)
     };
@@ -536,8 +536,8 @@ mod tests {
     }
 
     #[test]
-    fn car_touch_maps_into_the_region() {
-        // 1080x600 car -> a 1728x1080 logical region at the origin.
+    fn accessory_touch_maps_into_the_region() {
+        // 1080x600 accessory -> a 1728x1080 logical region at the origin.
         let r = region(0, 0, 1728, 1080, None);
         assert_eq!(region_position(&r, 0.0, 0.0, (1080, 600)), (0.0, 0.0));
         assert_eq!(
@@ -568,7 +568,7 @@ mod tests {
     }
 
     /// The safety net that matters most: Mutter *aborts the whole session* on an `up` for a slot it
-    /// never acquired, so no malformed sequence from the car may ever reach the wire.
+    /// never acquired, so no malformed sequence from the accessory may ever reach the wire.
     #[test]
     fn slot_tracker_only_allows_well_formed_sequences() {
         use TouchEventType::{Down, Motion, Up};

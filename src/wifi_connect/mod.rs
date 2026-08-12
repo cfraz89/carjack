@@ -17,30 +17,30 @@ use carjack::config::WifiBackendKind;
 
 use crate::accessory_settings::AccessoryStore;
 
-/// What the rest of carjack needs from an activated connection to the car.
-pub struct CarWifi {
+/// What the rest of carjack needs from an activated connection to the accessory.
+pub struct AccessoryWifi {
     pub iface: String,
 }
 
-/// A WiFi daemon carjack can drive to join the car's access point.
+/// A WiFi daemon carjack can drive to join the accessory's access point.
 #[async_trait]
 pub trait WifiBackend: Send + Sync {
     /// The WiFi address carjack announces to the accessory over iAP2, and associates with.
     async fn get_wifi_mac(&self) -> Result<String>;
 
-    /// Fail fast if this backend can't do what `connect_to_car_wifi` will need later.
+    /// Fail fast if this backend can't do what `connect_to_accessory_wifi` will need later.
     async fn check_ready(&self) -> Result<()> {
         Ok(())
     }
 
-    /// Join the car's access point (or reuse an existing connection already on it). Retries with
-    /// whatever this car is already known to need - see [`crate::accessory_settings`].
-    async fn connect_to_car_wifi(
+    /// Join the accessory's access point (or reuse an existing connection already on it). Retries with
+    /// whatever this accessory is already known to need - see [`crate::accessory_settings`].
+    async fn connect_to_accessory_wifi(
         &self,
         ssid: &str,
         passphrase: &str,
-        car_mac: Option<&str>,
-    ) -> Result<CarWifi>;
+        accessory_mac: Option<&str>,
+    ) -> Result<AccessoryWifi>;
 }
 
 /// Which WiFi daemon owns its D-Bus name, used when `[wifi] backend` isn't set explicitly.
@@ -84,12 +84,12 @@ pub(crate) fn build(kind: WifiBackendKind) -> Box<dyn WifiBackend> {
 }
 
 /// Shared by both backends' `live_connection` checks: log and unwrap the "are we already on this
-/// car's network" query the same way, so `connect_to_car_wifi` only has to decide whether to ask.
-fn reuse_if_live(ssid: impl std::fmt::Display, checked: Result<Option<CarWifi>>) -> Option<CarWifi> {
+/// accessory's network" query the same way, so `connect_to_accessory_wifi` only has to decide whether to ask.
+fn reuse_if_live(ssid: impl std::fmt::Display, checked: Result<Option<AccessoryWifi>>) -> Option<AccessoryWifi> {
     match checked {
-        Ok(Some(car_wifi)) => {
+        Ok(Some(accessory_wifi)) => {
             tracing::info!("Already connected to {ssid}; reusing the live connection");
-            Some(car_wifi)
+            Some(accessory_wifi)
         }
         Ok(None) => None,
         Err(e) => {
@@ -99,16 +99,16 @@ fn reuse_if_live(ssid: impl std::fmt::Display, checked: Result<Option<CarWifi>>)
     }
 }
 
-async fn connect_with_known_settings<F, Fut>(car_mac: Option<&str>, attempt: F) -> Result<CarWifi>
+async fn connect_with_known_settings<F, Fut>(accessory_mac: Option<&str>, attempt: F) -> Result<AccessoryWifi>
 where
     F: Fn(bool) -> Fut,
-    Fut: Future<Output = Result<CarWifi>>,
+    Fut: Future<Output = Result<AccessoryWifi>>,
 {
-    let disable_he = car_mac.is_some_and(|mac| AccessoryStore::load().get(mac).disable_he);
+    let disable_he = accessory_mac.is_some_and(|mac| AccessoryStore::load().get(mac).disable_he);
 
     (|| attempt(disable_he))
         .retry(ConstantBuilder::new().with_delay(Duration::from_secs(2)))
-        .notify(|e, _| tracing::warn!("Bringing up the car's WiFi failed ({e}); retrying"))
+        .notify(|e, _| tracing::warn!("Bringing up the accessory's WiFi failed ({e}); retrying"))
         .await
 }
 

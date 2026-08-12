@@ -6,8 +6,8 @@ use catplay_util::EventSleeper;
 use eyre::{eyre, Result};
 use uuid::Uuid;
 
-/// Advertise `_carplay-ctrl._tcp` via mDNS, wait for the car's `ctrl-int/1/connect` invite,
-/// and correlate it against the car's own `_airplay._tcp` Bonjour record to learn its real
+/// Advertise `_carplay-ctrl._tcp` via mDNS, wait for the accessory's `ctrl-int/1/connect` invite,
+/// and correlate it against the accessory's own `_airplay._tcp` Bonjour record to learn its real
 /// AirPlay address and HomeKit pairing id (rather than guessing the WiFi gateway IP and
 /// skipping HomeKit pair-verify fast-path).
 ///

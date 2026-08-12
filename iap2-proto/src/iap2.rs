@@ -179,13 +179,13 @@ impl<S: Stream> Iap2<S> {
     /// Pure acknowledgements do not advance the sequence: both an iPhone and the accessory
     /// repeat their last data packet's number on them (`iphone-cfmoto.pklg` - the phone sends
     /// data as seq `0x47` and then acknowledges two separate messages with seq `0x47` again;
-    /// the car does the same with `0x78` before moving to `0x79`).
+    /// the accessory does the same with `0x78` before moving to `0x79`).
     ///
     /// Burning a sequence number per acknowledgement leaves a gap the accessory never sees
     /// filled, so it stops accepting everything we send afterwards: it freezes its cumulative
     /// ack, retransmits its last message until it gives up, and tears down the link. That is
     /// exactly what `cfmoto_9.pcapng` shows - three 1 s keepalives take us from seq `0xa7` to
-    /// `0xa9`, and the car ignores every packet from there on, including the `0xaa` that
+    /// `0xa9`, and the accessory ignores every packet from there on, including the `0xaa` that
     /// follows, while re-sending its WiFi configuration nine times.
     ///
     /// **This never blocks on the send window.** The session dispatches its replies from inside

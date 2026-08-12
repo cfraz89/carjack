@@ -84,7 +84,7 @@ test-proto +flags="":
 
 # The libcarjack unit tests (iAP2 session logic, against bytes captured from real head units).
 # Links against gstreamer/catplay so it builds in the toolbox like `just build`, but needs no
-# GPU and no car. `cargo test` alone doesn't reach it - that only covers the root package.
+# GPU and no accessory. `cargo test` alone doesn't reach it - that only covers the root package.
 test-lib +flags="":
     {{toolbox_build}}cargo test -p libcarjack --lib {{flags}} < /dev/null
 

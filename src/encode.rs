@@ -114,7 +114,7 @@ impl EncodeBackend {
         !matches!(self, Self::Software { .. })
     }
 
-    /// The codec this backend encodes - what the car is told the stream is, and which parameter
+    /// The codec this backend encodes - what the accessory is told the stream is, and which parameter
     /// sets are pulled out of a keyframe.
     pub fn codec(&self) -> VideoCodec {
         match self {
@@ -377,7 +377,7 @@ pub async fn encode_h264_to_channel(
     pipeline.add(&src).map_err(|_| eyre!("add source"))?;
 
     // Leaky queue: drops the oldest frame (rather than growing latency) if the encoder or the
-    // car's WiFi momentarily falls behind.
+    // accessory's WiFi momentarily falls behind.
     let queue = mk("queue", "queue")?;
     queue.set_property_from_str("leaky", "downstream");
     queue.set_property("max-size-buffers", 3u32);
@@ -493,7 +493,7 @@ pub async fn encode_h264_to_channel(
 }
 
 /// Stream the user's existing desktop, captured via the xdg-desktop-portal ScreenCast PipeWire
-/// `node_id`, scaled/re-timed to the car's `width`x`height` @ 30fps. Input goes back through the
+/// `node_id`, scaled/re-timed to the accessory's `width`x`height` @ 30fps. Input goes back through the
 /// portal (see `src/portal.rs`), not here. `pipewiresrc` is a live source with its own
 /// timestamps, so no appsrc/feeder is needed.
 ///
@@ -521,7 +521,7 @@ pub async fn encode_pipewire_to_channel(
     pipeline.add(&src).map_err(|_| eyre!("add pipewiresrc"))?;
 
     // Report the desktop's *actual* frame size (from the negotiated pipewiresrc caps) so touch can
-    // be scaled to it - that's the coordinate space the car's view maps into, regardless of what
+    // be scaled to it - that's the coordinate space the accessory's view maps into, regardless of what
     // the portal reported or how the desktop is scaled.
     if let Some(pad) = src.static_pad("src") {
         pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
@@ -553,7 +553,7 @@ pub async fn encode_pipewire_to_channel(
     drive_video_pipeline(&pipeline, &encoder, codec, video_tx, keyframe_rx).await
 }
 
-/// Build the desktop encode chain from `src` (a `pipewiresrc`), scaling/re-timing to the car's
+/// Build the desktop encode chain from `src` (a `pipewiresrc`), scaling/re-timing to the accessory's
 /// `width`x`height` @ 30fps, and return the H264 encoder element. Picks a [`HW_BACKENDS`] row's
 /// GPU path when `zerocopy` allows and its elements exist - preferring the backend on the GPU that
 /// renders the desktop - else software convert/scale.
@@ -694,9 +694,9 @@ async fn drive_video_pipeline(
 
     let parser = mk(parser_name, parser_name)?;
     parser.set_property("config-interval", -1i32);
-    // Forced keyframes, asked for by the car. An upstream force-key-unit event on the encoder's
+    // Forced keyframes, asked for by the accessory. An upstream force-key-unit event on the encoder's
     // src pad works portably across every backend, no per-backend special-casing needed.
-    // `all_headers` re-sends SPS/PPS with the IDR, letting a desynced car latch back on.
+    // `all_headers` re-sends SPS/PPS with the IDR, letting a desynced accessory latch back on.
     let _keyframe_pump = {
         let encoder = encoder.clone();
         let mut keyframe_rx = keyframe_rx;
@@ -829,7 +829,7 @@ pub struct HwBackend {
     /// import already yields encoder-ready memory (CUDA).
     postproc: Option<&'static str>,
     /// Desktop path: elements between `pipewiresrc` and `videorate` that import the portal's
-    /// dmabuf and convert+scale on the GPU (the desktop isn't the car's resolution).
+    /// dmabuf and convert+scale on the GPU (the desktop isn't the accessory's resolution).
     desktop: &'static [&'static str],
     /// The memory feature `desktop` hands the encoder (`memory:DMABuf`, `memory:GLMemory`, ...).
     desktop_memory: &'static str,
@@ -846,7 +846,7 @@ pub struct HwBackend {
     /// is skipped when that codec is asked for.
     encoder_hevc: Option<&'static str>,
     /// Caps to hand the encoder on the compositor path, when what the postproc offers first is not
-    /// what the car wants. `vah265enc` takes `vapostproc`'s YUY2 and encodes 4:2:2 (`main-422-10`,
+    /// what the accessory wants. `vah265enc` takes `vapostproc`'s YUY2 and encodes 4:2:2 (`main-422-10`,
     /// which decodes as Range Extensions) unless NV12 is spelled out; a phone sends 8-bit 4:2:0.
     /// The memory feature has to be named too, or negotiation falls back to system memory.
     encoder_input: Option<&'static str>,
@@ -1121,7 +1121,7 @@ fn software_encoder_desc(codec: VideoCodec, bitrate: Bitrate) -> Result<String> 
 /// row. For a `postproc` backend (VA-API / v4l2) the appsrc pushes DMA_DRM and the postproc does
 /// RGB->NV12 on the GPU; for CUDA the importer has already produced encoder-ready GstCudaMemory,
 /// so the encoder is linked straight to the source. No scale/convert either way - the compositor
-/// already renders at the car's exact resolution.
+/// already renders at the accessory's exact resolution.
 fn build_hw_chain(
     pipeline: &gst::Pipeline,
     src_tail: &gst::Element,
@@ -1163,7 +1163,7 @@ fn build_hw_chain(
 
 /// Software (non-zero-copy) chain: `appsrc(video/x-raw) ! videoconvert ! <encoder>`.
 ///
-/// `videoscale`/`videorate` are absent - the compositor already renders at the car's exact
+/// `videoscale`/`videorate` are absent - the compositor already renders at the accessory's exact
 /// resolution at a steady rate. `videoconvert` stays since most encoders reject the compositor's
 /// BGRx.
 fn build_software_chain(
@@ -1407,7 +1407,7 @@ mod tests {
     }
 
     /// HEVC needs VPS as well as SPS/PPS, and its NAL type lives in different bits than H264's -
-    /// reading it the H264 way finds nothing and the car gets a config frame with no parameter
+    /// reading it the H264 way finds nothing and the accessory gets a config frame with no parameter
     /// sets at all.
     #[test]
     fn hevc_config_collects_vps_sps_pps_in_order() {

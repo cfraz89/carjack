@@ -1,9 +1,9 @@
 ---
 name: run-carjack
-description: Build, run, test, and screenshot carjack, the wireless CarPlay bridge. Use when asked to start or run carjack, build it, run its tests, capture/screenshot what it streams to the car, or verify the compositor and encode pipeline.
+description: Build, run, test, and screenshot carjack, the wireless CarPlay bridge. Use when asked to start or run carjack, build it, run its tests, capture/screenshot what it streams to the accessory, or verify the compositor and encode pipeline.
 ---
 
-carjack streams a Wayland desktop to a car head unit over CarPlay. It has **no window** — its
+carjack streams a Wayland desktop to an accessory head unit over CarPlay. It has **no window** — its
 entire visual output is the frame its internal Smithay compositor composites and hands to the H264
 encoder. So "screenshot carjack" means "pull a frame off that stream", and the handle for that is
 `.claude/skills/run-carjack/shot.sh`, which brings the compositor up on the real GPU, runs a
@@ -11,7 +11,7 @@ Wayland client inside it, and writes a PNG.
 
 All paths below are relative to the repo root. **All commands here were run on a Fedora host
 (`thunderhorse-mk2`) with a real GPU, BlueZ and NetworkManager — not a container.** That matters:
-see [Safety](#safety) before running anything that touches the car.
+see [Safety](#safety) before running anything that touches the accessory.
 
 ## Safety
 
@@ -19,9 +19,9 @@ carjack drives the **host's real NetworkManager and BlueZ over D-Bus**. An ungua
 disconnect this machine's actual WiFi (it has happened) or leave stray processes behind.
 
 - The screenshot driver and the tests below are safe: they touch **only** the GPU/compositor and
-  never open Bluetooth, NetworkManager, or a socket to the car.
+  never open Bluetooth, NetworkManager, or a socket to the accessory.
 - Anything that starts the full app (`just run`, `just test-run`) is **not** agent-safe — see
-  [Live run](#live-run-needs-the-car-not-run-here).
+  [Live run](#live-run-needs-the-accessory-not-run-here).
 
 ## Prerequisites
 
@@ -85,7 +85,7 @@ Takes ~20–30 s (it samples `--frames` frames at 30 fps, plus build time).
 | flag | what it does |
 |---|---|
 | `--out PATH` | output PNG (default `/tmp/carjack-screenshot.png`) |
-| `--width N` / `--height N` | compositor size (default 1280×720) — use the car's real size to test resize |
+| `--width N` / `--height N` | compositor size (default 1280×720) — use the accessory's real size to test resize |
 | `--fps N` | compositor render rate (default 30) |
 | `--frames N` | how many frames to sample before picking the brightest (default 60) |
 | `--command CMD` | run a different Wayland client instead of `foot` |
@@ -94,7 +94,7 @@ Takes ~20–30 s (it samples `--frames` frames at 30 fps, plus build time).
 Verified variants:
 
 ```bash
-# The car-ish resolution — confirms the client resizes with the output.
+# The accessory-ish resolution — confirms the client resizes with the output.
 .claude/skills/run-carjack/shot.sh --out /tmp/small.png --width 800 --height 480 --frames 40
 ```
 ```
@@ -152,7 +152,7 @@ just test config
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
 ```
 
-## Live run (needs the car — NOT run here)
+## Live run (needs the accessory — NOT run here)
 
 `just run` and `just test-run [timeout]` start the **whole** app: Bluetooth → WiFi → AirPlay to a
 real head unit. **These were deliberately not executed in this session** — no head unit was
@@ -194,7 +194,7 @@ ends.
   activation, fractional scaling, server-side cursors, decoration manager). All expected: carjack's
   compositor is a deliberately minimal single-app kiosk. Filter with `grep -vE '^warn:'`.
 - **Frame orientation is correct** — verified visually, not just numerically. CLAUDE.md lists this
-  as unverified ("GL renders bottom-up… if the car shows an upside-down image"). A captured frame
+  as unverified ("GL renders bottom-up… if the accessory shows an upside-down image"). A captured frame
   has the client's top line at the top of the PNG, so the `copy_framebuffer` readback is **not**
   flipped.
 - **`waydroid session status` is not a valid subcommand** (only `start`/`stop`), so it can't be

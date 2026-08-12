@@ -21,7 +21,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use std::sync::Arc;
 use tokio::sync::{Notify, mpsc};
 
-/// How long catplay may take to hand an outgoing command to the car before we give up on it.
+/// How long catplay may take to hand an outgoing command to the accessory before we give up on it.
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Buffer for each direction of the pipe. Generous: iAP2 frames are small, and a stall here would
@@ -49,7 +49,7 @@ pub fn open(tx: AirPlayTransmitterProxyRef) -> (TunnelStream, Tunnel) {
     )
 }
 
-/// Handle for feeding the tunnel the payloads the car sends us.
+/// Handle for feeding the tunnel the payloads the accessory sends us.
 #[derive(Clone)]
 pub struct Tunnel {
     inbound: mpsc::Sender<Vec<u8>>,
@@ -85,7 +85,7 @@ async fn pump(
     let mut out = vec![0u8; 4096];
     loop {
         tokio::select! {
-            // Ours -> car.
+            // Ours -> accessory.
             read = pipe.read(&mut out) => match read {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
@@ -93,7 +93,7 @@ async fn pump(
                         data: out[..n].to_vec().into(),
                     });
                     match tx.send_command_noresp(&cmd, SEND_TIMEOUT) {
-                        Ok(_) => tracing::trace!(bytes = n, "iAP2 tunnel -> car"),
+                        Ok(_) => tracing::trace!(bytes = n, "iAP2 tunnel -> accessory"),
                         Err(e) => {
                             tracing::warn!(?e, "iAP2 tunnel send failed; closing");
                             break;
@@ -101,11 +101,11 @@ async fn pump(
                     }
                 }
             },
-            // Car -> ours.
+            // Accessory -> ours.
             frame = inbound.recv() => match frame {
                 None => break,
                 Some(data) => {
-                    tracing::trace!(bytes = data.len(), "iAP2 tunnel <- car");
+                    tracing::trace!(bytes = data.len(), "iAP2 tunnel <- accessory");
                     if pipe.write_all(&data).await.is_err() {
                         break;
                     }

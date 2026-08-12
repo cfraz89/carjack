@@ -1,5 +1,5 @@
 //! Internal Wayland compositor (Smithay-based). carjack runs its own minimal headless compositor
-//! so it can render at exactly the car's resolution, render on the same GPU it encodes on
+//! so it can render at exactly the accessory's resolution, render on the same GPU it encodes on
 //! (zero-copy), pull composited frames straight out of the render loop, and inject CarPlay touch
 //! directly into the seat.
 //!
@@ -89,12 +89,12 @@ struct Ready {
 }
 
 /// A request to re-size/re-time the running compositor. Sent from the session thread once the
-/// car's real display parameters are known; `ack` reports success/failure back to the caller so
+/// accessory's real display parameters are known; `ack` reports success/failure back to the caller so
 /// [`Compositor::reconfigure`] can block until the new mode is live.
 struct ReconfigureRequest {
     width: u32,
     height: u32,
-    /// Refresh rate in fps; `0` (car didn't report one) falls back to the default.
+    /// Refresh rate in fps; `0` (accessory didn't report one) falls back to the default.
     fps: u32,
     /// Reports back `Ok(true)` if the mode actually changed, `Ok(false)` if it was already at
     /// these parameters, or the failure.
@@ -178,7 +178,7 @@ impl Compositor {
             .map_err(|e| eyre!("send touch to compositor: {e}"))
     }
 
-    /// Re-size and re-time the running compositor to the car's real display parameters. Blocks
+    /// Re-size and re-time the running compositor to the accessory's real display parameters. Blocks
     /// until the compositor thread has applied the new mode (or reports the failure). Returns
     /// whether the mode actually changed (`false` = it was already at these parameters).
     pub fn reconfigure(&self, width: u32, height: u32, fps: u32) -> Result<bool> {
@@ -270,7 +270,7 @@ struct State {
     /// modifiers chosen for this GPU at startup).
     allocator: GbmAllocator<DrmDeviceFd>,
     modifiers: Vec<smithay::backend::allocator::Modifier>,
-    /// Current render-timer period (derived from the car's refresh rate); read by the timer each
+    /// Current render-timer period (derived from the accessory's refresh rate); read by the timer each
     /// tick so `reconfigure` can change the framerate live.
     frame_interval: Duration,
 }
@@ -357,7 +357,7 @@ impl State {
         let _ = self.display_handle.flush_clients();
     }
 
-    /// Re-size/re-time the compositor to the car's real display parameters: reallocates the render
+    /// Re-size/re-time the compositor to the accessory's real display parameters: reallocates the render
     /// pool, updates the output mode and render-timer period, and reconfigures mapped clients to
     /// the new fullscreen size. Runs on the compositor thread; the error is a `String` so it can
     /// cross the ack channel.
@@ -603,7 +603,7 @@ fn run(
         .map_err(|e| eyre!("add keyboard: {e}"))?;
     seat.add_touch();
 
-    // Headless output at exactly the car's resolution, so clients render fullscreen at the
+    // Headless output at exactly the accessory's resolution, so clients render fullscreen at the
     // right size and no scaling is needed downstream.
     let output = Output::new(
         "carplay".to_string(),
@@ -816,7 +816,7 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        // Force every app fullscreen at the car's resolution - single-app kiosk.
+        // Force every app fullscreen at the accessory's resolution - single-app kiosk.
         let size = (self.width, self.height);
         surface.with_pending_state(|state| {
             state.size = Some(size.into());

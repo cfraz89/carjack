@@ -65,7 +65,7 @@ pub struct AirPlayConnection {
     pub hevc_declared: bool,
 }
 
-/// HomeKit pairings for the whole process, so a car that has met us before can take
+/// HomeKit pairings for the whole process, so an accessory that has met us before can take
 /// `/pair-verify` against stored keys instead of a full `/pair-setup`. Left unset (tests) each
 /// connection gets a throwaway identity.
 ///
@@ -145,22 +145,22 @@ pub async fn connect_airplay(
     let disp = info
         .displays
         .first()
-        .ok_or_else(|| eyre!("car declared no display in /info"))?;
+        .ok_or_else(|| eyre!("accessory declared no display in /info"))?;
     let (width, height) = (disp.width_pixels, disp.height_pixels);
     let max_fps = disp.max_fps.unwrap_or(0);
     let disp_uuid = disp.uuid.clone();
-    tracing::info!("Car display: {width}x{height} @ {max_fps} fps, uuid={disp_uuid}");
+    tracing::info!("Accessory display: {width}x{height} @ {max_fps} fps, uuid={disp_uuid}");
 
     let view = panel_view(&info, &disp_uuid);
     match view {
         Some(v) => tracing::info!(
-            "Car panel reserves part of itself: video at ({}, {}) sized {}x{}",
+            "Accessory panel reserves part of itself: video at ({}, {}) sized {}x{}",
             v.origin_x,
             v.origin_y,
             v.width,
             v.height
         ),
-        None => tracing::debug!("Car gave no panel geometry; video covers the display"),
+        None => tracing::debug!("Accessory gave no panel geometry; video covers the display"),
     }
 
     // Confirmation only, never a veto: the CFMOTO unit declares neither and takes HEVC from an
@@ -251,9 +251,9 @@ pub async fn run_video_stream(
     tx.assert_modes(modes.serialize_to_state()).await?;
     tracing::info!("Asserted screen modes (controller owns screen)");
 
-    // Service the CarPlay control commands the car sends back over the AirPlay event
+    // Service the CarPlay control commands the accessory sends back over the AirPlay event
     // channel (HID reports, mode changes, key-frame requests, ...). catplay queues each one
-    // and blocks its event server waiting for our response; if we never answer, the car
+    // and blocks its event server waiting for our response; if we never answer, the accessory
     // tears the whole session down within ~100ms of the first command (it sends a
     // HidSendReport right after RECORD). Runs for the session lifetime.
     // iAP2 moves onto this channel when the accessory drops Bluetooth; without someone reading it
@@ -267,7 +267,7 @@ pub async fn run_video_stream(
         }
     }));
 
-    let _cmd_guard = abort_on_drop(tokio::spawn(handle_car_commands(
+    let _cmd_guard = abort_on_drop(tokio::spawn(handle_accessory_commands(
         tx.clone(),
         modes,
         touch_tx,
@@ -298,7 +298,7 @@ pub async fn run_video_stream(
     let mut frames_at_last_heartbeat: u64 = 0;
     const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
-    // Steady media clock. The car honours our PTS (`respect_timestamps`), so presenting frames on
+    // Steady media clock. The accessory honours our PTS (`respect_timestamps`), so presenting frames on
     // an evenly-spaced timeline (`frame_dur` apart) - rather than at jittery wall-clock arrival
     // time - is what makes playback smooth: the `latency` buffer soaks up encode/delivery jitter.
     // We re-anchor to real-time only if the clock drifts out of a safe window (a stall, or the
@@ -328,7 +328,7 @@ pub async fn run_video_stream(
             continue;
         }
 
-        // The car has stopped keeping up (a WiFi stall, a busy head unit). `push_frame` would
+        // The accessory has stopped keeping up (a WiFi stall, a busy head unit). `push_frame` would
         // wait for a slot, which just converts the backlog into latency, so drop this frame
         // instead - and because every later delta frame references the one we dropped, ask the
         // encoder for a fresh keyframe so the picture recovers now rather than at the next
@@ -338,7 +338,7 @@ pub async fn run_video_stream(
             if !requested_keyframe {
                 tracing::warn!(
                     queued = screen_guard.queue_len(),
-                    "Car's screen queue is full; dropping frame and forcing a keyframe"
+                    "Accessory's screen queue is full; dropping frame and forcing a keyframe"
                 );
                 let _ = keyframe_tx.try_send(());
                 requested_keyframe = true;
@@ -380,7 +380,7 @@ pub async fn run_video_stream(
         };
 
         if let Err((err, _)) = screen_guard.push_frame(frame).await {
-            // A closed screen socket means the car tore the session down - bail so the
+            // A closed screen socket means the accessory tore the session down - bail so the
             // caller can restart the whole flow from a fresh Bluetooth connection.
             if matches!(err, ScreenTransmitError::Closed) {
                 return Err(eyre!("Screen socket closed by accessory"));
@@ -461,7 +461,7 @@ async fn wait_for_first_keyframe(
                 Ok(None) => return Err(eyre!("encoder stopped before producing a keyframe")),
                 Err(_) => tracing::warn!(
                     "Still waiting for the encoder's first keyframe after {:?} ({deltas} delta \
-                     frames so far) - the car tears the session down ~2s from here",
+                     frames so far) - the accessory tears the session down ~2s from here",
                     started.elapsed()
                 ),
             }
@@ -479,12 +479,12 @@ async fn wait_for_first_keyframe(
     }
 }
 
-/// Answer the CarPlay control commands the car sends over the AirPlay event channel.
-/// With no real iPhone to proxy to (we stream a desktop), the car just needs each command
+/// Answer the CarPlay control commands the accessory sends over the AirPlay event channel.
+/// With no real iPhone to proxy to (we stream a desktop), the accessory just needs each command
 /// acknowledged: ChangeModes gets a mode-state response, everything else an OK. Touch comes
 /// here too, as `HidSendReport` touchscreen reports, which we decode and forward to the
 /// compositor.
-async fn handle_car_commands(
+async fn handle_accessory_commands(
     tx: AirPlayTransmitterProxyRef,
     mut modes: ResourceController,
     touch_tx: mpsc::Sender<TouchEvent>,
@@ -494,7 +494,7 @@ async fn handle_car_commands(
 ) {
     let mut touching = false;
     while let Some(mut cmd) = tx.pop_command().await {
-        tracing::debug!("Car command: {:?}", cmd.command().get_type());
+        tracing::debug!("Accessory command: {:?}", cmd.command().get_type());
         match cmd.command() {
             Command::ChangeModes(change) => {
                 let resp = modes.process_request_to_response(change);
@@ -503,11 +503,11 @@ async fn handle_car_commands(
                 }
             }
             Command::ForceKeyFrame(_) => {
-                // The car asks for this when it has lost sync - it has just joined the stream,
+                // The accessory asks for this when it has lost sync - it has just joined the stream,
                 // or dropped enough packets that its decoder can no longer follow the deltas.
                 // Answering OK and doing nothing (which is what we used to do) leaves it
                 // showing a frozen or torn picture until the encoder's next natural IDR.
-                tracing::debug!("Car requested a keyframe");
+                tracing::debug!("Accessory requested a keyframe");
                 let _ = keyframe_tx.try_send(());
                 cmd.respond_ok();
             }
@@ -522,7 +522,7 @@ async fn handle_car_commands(
                 // the handover, the same as reaching it any other way. A unit that sends it and
                 // then *waits* for us to disconnect would hang here, and would be the reason to
                 // start closing the link ourselves.
-                tracing::info!("Car asked us to disable Bluetooth");
+                tracing::info!("Accessory asked us to disable Bluetooth");
                 cmd.respond_ok();
                 handover.cancel();
             }
@@ -537,13 +537,13 @@ async fn handle_car_commands(
             _ => cmd.respond_ok(),
         }
     }
-    tracing::debug!("Car command handler ended");
+    tracing::debug!("Accessory command handler ended");
 }
 
 /// Decode a CarPlay touchscreen HID report into a touch event. Observed format (12 bytes):
 /// `[reportId=0, tip, Xlo, Xhi, Ylo, Yhi, const=1, 0, 0, 0, 0, 0]` - a single contact whose
 /// `tip` switch (byte 1) is 1 while touching, and whose X/Y (little-endian u16) are in the
-/// car's display-pixel space. Our compositor renders at exactly that resolution, so the
+/// accessory's display-pixel space. Our compositor renders at exactly that resolution, so the
 /// coordinates pass through unscaled. `touching` tracks the contact across reports so we can
 /// emit Down/Motion/Up. Non-touch reports (e.g. 1-byte button reports) are ignored.
 fn parse_touch_report(bytes: &[u8], touching: &mut bool) -> Option<TouchEvent> {
@@ -600,7 +600,7 @@ mod tests {
         }
     }
 
-    /// RECORD must not go out on a delta frame: the car's stream has to open on a keyframe, and
+    /// RECORD must not go out on a delta frame: the accessory's stream has to open on a keyframe, and
     /// the whole point of the gate is that we hold the announcement until we have one.
     #[tokio::test]
     async fn first_keyframe_skips_deltas() {
