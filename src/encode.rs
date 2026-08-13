@@ -3,6 +3,7 @@ use std::str::FromStr;
 #[cfg(feature = "cuda")]
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use catplay_carplay::video::{AvccConfig, avcc_config_deserialize, hvcc_config_deserialize};
 use eyre::{Result, eyre};
@@ -708,11 +709,17 @@ async fn drive_video_pipeline(
 
     let parser = mk(parser_name, parser_name)?;
     parser.set_property("config-interval", -1i32);
+    // The config frame rides out with the keyframe that opens the stream, and again with one that
+    // answers the accessory: a receiver that asks for a keyframe has lost its decoder, and the
+    // configuration is what starts it.
+    let answer_with_config = Arc::new(AtomicBool::new(true));
+
     // Forced keyframes, asked for by the accessory. An upstream force-key-unit event on the encoder's
     // src pad works portably across every backend, no per-backend special-casing needed.
     // `all_headers` re-sends SPS/PPS with the IDR, letting a desynced accessory latch back on.
     let _keyframe_pump = {
         let encoder = encoder.clone();
+        let answer_with_config = answer_with_config.clone();
         let mut keyframe_rx = keyframe_rx;
         AbortOnDropHandle::new(tokio::spawn(async move {
             while keyframe_rx.recv().await.is_some() {
@@ -726,6 +733,7 @@ async fn drive_video_pipeline(
                 if !pad.send_event(event) {
                     tracing::warn!("Encoder refused the force-keyframe event");
                 } else {
+                    answer_with_config.store(true, Ordering::Relaxed);
                     tracing::debug!("Forced a keyframe");
                 }
             }
@@ -763,6 +771,7 @@ async fn drive_video_pipeline(
     let appsink = appsink
         .downcast::<gst_app::AppSink>()
         .map_err(|_| eyre!("'sink' is not an appsink"))?;
+    let answer_with_config = answer_with_config.clone();
     appsink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
@@ -770,7 +779,7 @@ async fn drive_video_pipeline(
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
                 // The parser knows which frames are keyframes; only those carry the configuration.
                 let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
-                let config = keyframe
+                let config = (keyframe && answer_with_config.swap(false, Ordering::Relaxed))
                     .then(|| sample.caps().and_then(|caps| codec_config(caps, codec)))
                     .flatten();
                 let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;

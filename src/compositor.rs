@@ -11,6 +11,7 @@
 use std::ffi::OsString;
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use eyre::{Result, eyre};
@@ -113,6 +114,7 @@ pub struct Compositor {
     frame_rx: tokio::sync::watch::Receiver<Option<Arc<CapturedFrame>>>,
     touch_tx: calloop::channel::Sender<TouchEvent>,
     control_tx: calloop::channel::Sender<ReconfigureRequest>,
+    frame_requested: Arc<AtomicBool>,
     loop_signal: LoopSignal,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -136,6 +138,8 @@ impl Compositor {
         // Setup runs on the compositor thread; it reports readiness (or a setup error) back
         // here so `start` can return a ready-to-use handle.
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<Ready>>();
+        let frame_requested = Arc::new(AtomicBool::new(false));
+        let thread_frame_requested = frame_requested.clone();
 
         let thread = std::thread::Builder::new()
             .name("carjack-compositor".into())
@@ -150,6 +154,7 @@ impl Compositor {
                     frame_tx,
                     touch_rx,
                     control_rx,
+                    thread_frame_requested,
                     &ready_tx,
                 ) {
                     let _ = ready_tx.send(Err(e));
@@ -166,6 +171,7 @@ impl Compositor {
             frame_rx,
             touch_tx,
             control_tx,
+            frame_requested,
             loop_signal: ready.loop_signal,
             thread: Some(thread),
         })
@@ -179,6 +185,17 @@ impl Compositor {
         self.touch_tx
             .send(event.clone())
             .map_err(|e| eyre!("send touch to compositor: {e}"))
+    }
+
+    /// Ask for a frame even if nothing has changed - what a keyframe request needs, since a
+    /// keyframe can only ride out on a frame that gets published.
+    pub fn request_frame(&self) {
+        self.frame_requested.store(true, Ordering::Relaxed);
+    }
+
+    /// A handle for [`Compositor::request_frame`] that can outlive a borrow of the compositor.
+    pub fn frame_requester(&self) -> Arc<AtomicBool> {
+        self.frame_requested.clone()
     }
 
     /// Re-size and re-time the running compositor to the accessory's real display parameters. Blocks
@@ -523,6 +540,7 @@ fn run(
     frame_tx: tokio::sync::watch::Sender<Option<Arc<CapturedFrame>>>,
     touch_rx: calloop::channel::Channel<TouchEvent>,
     control_rx: calloop::channel::Channel<ReconfigureRequest>,
+    frame_requested: Arc<AtomicBool>,
     ready_tx: &std::sync::mpsc::Sender<Result<Ready>>,
 ) -> Result<()> {
     let fps = fps.max(1);
@@ -722,7 +740,10 @@ fn run(
                 // A frame every IDLE_REFRESH even when nothing moves: the accessory's decoder gets
                 // a heartbeat, and a keyframe it asks for while the screen is still has a buffer to
                 // ride out on.
-                if state.dirty || state.last_published.elapsed() >= IDLE_REFRESH {
+                if state.dirty
+                    || frame_requested.swap(false, Ordering::Relaxed)
+                    || state.last_published.elapsed() >= IDLE_REFRESH
+                {
                     state.render_and_publish();
                     state.dirty = false;
                     state.last_published = std::time::Instant::now();

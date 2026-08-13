@@ -4,6 +4,24 @@
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
 
+## Answering `ForceKeyFrame` properly (2026-08-13)
+
+A request from the accessory now moves three things instead of one:
+
+- the encoder forces an IDR, as before;
+- the **config frame goes out with it** (and the `0x10` opening marker, which follows the config) -
+  a receiver that asks for a keyframe has lost its decoder, and the configuration is what starts
+  one. A keyframe nobody asked for still carries neither;
+- the **compositor publishes a frame** even if nothing changed, so the forced keyframe has a buffer
+  to ride out on within a tick instead of waiting up to `IDLE_REFRESH`.
+
+Which keyframes carry a config is now the sender's decision (`885c374` moves the last policy out of
+catplay), because the accessory's request is only visible here. `tests/wire_format.rs` pins it: 45
+frames including natural IDRs carry no config, then a request produces one that does.
+
+Untested against a unit that actually asks - the bench never has, in nine runs. The bike asked 407
+times in one run, so that is where it will show.
+
 ## Damage-driven frames, and one config frame again (2026-08-13)
 
 Both changes follow from the iPhone capture below.

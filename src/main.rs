@@ -549,14 +549,24 @@ async fn run_session(
     // Built here, not at launch time: the appsrc latches its caps once, so this must follow
     // `reconfigure`. Channels are shallow - a real-time stream wants low latency, not buffering.
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(4);
-    let (keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
+    let (keyframe_tx, mut keyframe_rx) = mpsc::channel::<()>(1);
+    // A keyframe request has to reach the compositor as well as the encoder: with damage-driven
+    // publishing a still screen produces no frame for the keyframe to ride out on.
+    let (encoder_keyframe_tx, encoder_keyframe_rx) = mpsc::channel::<()>(1);
+    let frame_requester = compositor.frame_requester();
+    let _keyframe_relay = AbortOnDropHandle::new(tokio::spawn(async move {
+        while keyframe_rx.recv().await.is_some() {
+            frame_requester.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = encoder_keyframe_tx.try_send(());
+        }
+    }));
     let backend = backend.with_codec(encode::resolve_codec(config.graphics.codec, conn.hevc_expected));
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_h264_to_channel(
         frame_rx,
         video_tx,
         backend.clone(),
         Bitrate::from_kbps(config.graphics.bitrate),
-        keyframe_rx,
+        encoder_keyframe_rx,
     )));
     let video = libcarjack::airplay::run_video_stream(
         conn,

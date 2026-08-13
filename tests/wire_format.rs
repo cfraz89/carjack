@@ -36,6 +36,63 @@ fn nal_headers(sample: &[u8]) -> Option<Vec<u8>> {
     (pos == sample.len()).then_some(headers)
 }
 
+/// Run the encoder, handing back the frame channel and the keyframe request channel.
+async fn encoder() -> Result<(mpsc::Receiver<EncodedFrame>, mpsc::Sender<()>, AbortOnDropHandle<Result<()>>, Compositor)> {
+    let cfg = Config::load(&Cli::parse_from(["carjack"]))?;
+    let node = carjack::config::resolve_render_node(&cfg.graphics.drm_device)?;
+    // `true`: no accessory here to declare a codec, so `auto` keeps its preference.
+    let backend = resolve_backend(
+        cfg.graphics.zerocopy,
+        &node,
+        carjack::encode::resolve_codec(cfg.graphics.codec, true),
+    )?;
+    let comp = Compositor::start(
+        node,
+        backend.is_zero_copy(),
+        carjack::encode::importable_modifiers(&backend),
+        800,
+        1280,
+        30,
+    )?;
+
+    let (video_tx, video_rx) = mpsc::channel::<EncodedFrame>(64);
+    let (keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
+    let task = AbortOnDropHandle::new(tokio::spawn(encode_h264_to_channel(
+        comp.subscribe_frames(),
+        video_tx,
+        backend.clone(),
+        Bitrate::from_kbps(cfg.graphics.bitrate),
+        keyframe_rx,
+    )));
+    Ok((video_rx, keyframe_tx, task, comp))
+}
+
+/// The accessory asks for a keyframe when it has lost its decoder, so the keyframe answering it
+/// carries the configuration that starts one - where a keyframe nobody asked for does not.
+#[tokio::test]
+#[ignore = "needs the GPU; run explicitly with --ignored"]
+async fn a_requested_keyframe_carries_the_config() -> Result<()> {
+    let (mut frames, keyframe_tx, _task, _comp) = encoder().await?;
+
+    let opening = frames.recv().await.ok_or_else(|| eyre!("no frames"))?;
+    assert!(opening.config.is_some(), "the stream opens on a configured keyframe");
+
+    // Natural keyframes keep coming (key-int-max=30) and must not repeat it.
+    for _ in 0..45 {
+        let frame = frames.recv().await.ok_or_else(|| eyre!("encoder stopped"))?;
+        assert!(frame.config.is_none(), "only a requested keyframe repeats the config");
+    }
+
+    keyframe_tx.send(()).await?;
+    for _ in 0..45 {
+        let frame = frames.recv().await.ok_or_else(|| eyre!("encoder stopped"))?;
+        if frame.config.is_some() {
+            return Ok(());
+        }
+    }
+    Err(eyre!("no configured keyframe after the request"))
+}
+
 async fn first_keyframe() -> Result<EncodedFrame> {
     let cfg = Config::load(&Cli::parse_from(["carjack"]))?;
     let node = carjack::config::resolve_render_node(&cfg.graphics.drm_device)?;
