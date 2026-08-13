@@ -82,6 +82,9 @@ type RenderDevice = GbmDevice<DrmDeviceFd>;
 
 const TARGET_FPS: u64 = 30;
 
+/// Longest gap between published frames on a still screen. An iPhone leaves up to four seconds.
+const IDLE_REFRESH: Duration = Duration::from_secs(1);
+
 /// What the compositor thread reports back once it's up and listening.
 struct Ready {
     socket_name: OsString,
@@ -265,6 +268,10 @@ struct State {
     pool_idx: usize,
     zero_copy: bool,
     damage_tracker: OutputDamageTracker,
+    /// Set by any client commit; cleared when the frame it produced has been published. The
+    /// render timer publishes only when it is set - a still screen costs no frames.
+    dirty: bool,
+    last_published: std::time::Instant,
     frame_tx: tokio::sync::watch::Sender<Option<Arc<CapturedFrame>>>,
     /// Kept so `reconfigure` can re-allocate the render pool at a new size (with the same
     /// modifiers chosen for this GPU at startup).
@@ -345,6 +352,21 @@ impl State {
         }
 
         // Tell clients to draw their next frame, then flush.
+        let now = self.start_time.elapsed();
+        let output = self.output.clone();
+        self.space.elements().for_each(|window| {
+            window.send_frame(&output, now, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            })
+        });
+        self.space.refresh();
+        self.popups.cleanup();
+        let _ = self.display_handle.flush_clients();
+    }
+
+    /// A tick with nothing to publish: clients still get their frame callbacks, so one that wants
+    /// to animate is never left waiting on us.
+    fn idle_tick(&mut self) {
         let now = self.start_time.elapsed();
         let output = self.output.clone();
         self.space.elements().for_each(|window| {
@@ -689,6 +711,7 @@ fn run(
     let mut next_deadline = std::time::Instant::now() + frame_interval;
     // Cadence stats, logged ~every 5s.
     let mut stat_count: u32 = 0;
+    let mut stat_published: u32 = 0;
     let mut stat_render_max = Duration::ZERO;
     let mut stat_since = std::time::Instant::now();
     loop_handle
@@ -696,7 +719,17 @@ fn run(
             Timer::from_duration(frame_interval),
             move |_, _, state: &mut State| {
                 let render_start = std::time::Instant::now();
-                state.render_and_publish();
+                // A frame every IDLE_REFRESH even when nothing moves: the accessory's decoder gets
+                // a heartbeat, and a keyframe it asks for while the screen is still has a buffer to
+                // ride out on.
+                if state.dirty || state.last_published.elapsed() >= IDLE_REFRESH {
+                    state.render_and_publish();
+                    state.dirty = false;
+                    state.last_published = std::time::Instant::now();
+                    stat_published += 1;
+                } else {
+                    state.idle_tick();
+                }
                 let now = std::time::Instant::now();
 
                 stat_count += 1;
@@ -704,12 +737,14 @@ fn run(
                 let elapsed = now - stat_since;
                 if elapsed >= Duration::from_secs(5) {
                     tracing::info!(
-                        "compositor: {:.1} fps rendered (target {}), worst render {:.1}ms",
+                        "compositor: {:.1} fps published of {:.1} polled (target {}), worst render {:.1}ms",
+                        stat_published as f64 / elapsed.as_secs_f64(),
                         stat_count as f64 / elapsed.as_secs_f64(),
                         (1_000_000 / state.frame_interval.as_micros().max(1)),
                         stat_render_max.as_secs_f64() * 1000.0,
                     );
                     stat_count = 0;
+                    stat_published = 0;
                     stat_render_max = Duration::ZERO;
                     stat_since = now;
                 }
@@ -746,6 +781,8 @@ fn run(
         pool_idx: 0,
         zero_copy,
         damage_tracker,
+        dirty: true,
+        last_published: std::time::Instant::now(),
         frame_tx,
         allocator,
         modifiers,
@@ -783,6 +820,7 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        self.dirty = true;
         if !is_sync_subsurface(surface) {
             let mut root = surface.clone();
             while let Some(parent) = get_parent(&root) {

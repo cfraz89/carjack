@@ -168,10 +168,11 @@ async fn backoff_or_ctrl_c() -> bool {
 /// `source = app`: run `[app] command` in carjack's own headless compositor and stream that.
 async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
     let render_node = carjack::config::resolve_render_node(&config.graphics.drm_device)?;
+    // Provisional: `auto` settles on a codec once the accessory says what it decodes, below.
     let backend = encode::resolve_backend(
         config.graphics.zerocopy,
         &render_node,
-        config.graphics.codec,
+        encode::resolve_codec(config.graphics.codec, false),
     )?;
     tracing::info!(
         "Render node: {render_node}, encode backend: {}",
@@ -549,6 +550,7 @@ async fn run_session(
     // `reconfigure`. Channels are shallow - a real-time stream wants low latency, not buffering.
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(4);
     let (keyframe_tx, keyframe_rx) = mpsc::channel::<()>(1);
+    let backend = backend.with_codec(encode::resolve_codec(config.graphics.codec, conn.hevc_expected));
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_h264_to_channel(
         frame_rx,
         video_tx,
@@ -626,6 +628,7 @@ async fn run_desktop_session(
         handover,
     } = establish_carplay(host.clone(), bt_device, wifi).await?;
     let (width, height) = (conn.width, conn.height);
+    let codec = encode::resolve_codec(codec, conn.hevc_expected);
     tracing::info!("Streaming desktop to accessory at {width}x{height}");
 
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(4);
@@ -647,7 +650,7 @@ async fn run_desktop_session(
     )));
     let video = libcarjack::airplay::run_video_stream(
         conn,
-        encode::resolve_codec(codec),
+        codec,
         video_rx,
         touch_tx,
         keyframe_tx,

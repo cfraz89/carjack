@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
-use catplay_carplay::video::{AnnexBIter, AvccConfig, HevcNalType, NalType};
+use catplay_carplay::video::{AvccConfig, avcc_config_deserialize, hvcc_config_deserialize};
 use eyre::{Result, eyre};
 use futures::StreamExt;
 use gstreamer as gst;
@@ -122,6 +122,24 @@ impl EncodeBackend {
         }
     }
 
+    /// The same backend encoding a different codec, for once the accessory has said what it takes.
+    pub fn with_codec(&self, codec: VideoCodec) -> Self {
+        match self {
+            Self::Hw {
+                backend,
+                #[cfg(feature = "cuda")]
+                importer,
+                ..
+            } => Self::Hw {
+                backend,
+                codec,
+                #[cfg(feature = "cuda")]
+                importer: importer.clone(),
+            },
+            Self::Software { .. } => Self::Software { codec },
+        }
+    }
+
     /// Short human-readable name of the selected backend, for logging.
     pub fn describe(&self) -> String {
         match self {
@@ -150,13 +168,8 @@ pub fn init_gstreamer() -> Result<()> {
 ///
 /// `render_node` is the GPU the compositor renders on; a zero-copy backend must live on the same
 /// GPU (the CUDA importer opens exactly this node).
-pub fn resolve_backend(
-    mode: ZeroCopyMode,
-    render_node: &str,
-    codec: CodecChoice,
-) -> Result<EncodeBackend> {
+pub fn resolve_backend(mode: ZeroCopyMode, render_node: &str, codec: VideoCodec) -> Result<EncodeBackend> {
     let _ = gst::init();
-    let codec = resolve_codec(codec);
     match mode {
         ZeroCopyMode::Off => Ok(EncodeBackend::Software { codec }),
         ZeroCopyMode::Force => try_zero_copy(render_node, codec).ok_or_else(|| {
@@ -179,17 +192,17 @@ pub fn resolve_backend(
     }
 }
 
-/// Settle the configured codec against what this machine can actually encode.
+/// Settle the configured codec against what the accessory declares and what this machine can
+/// encode.
 ///
-/// `auto` means HEVC: it is what an iPhone sends every unit captured so far, and no accessory has
-/// been seen to advertise the choice - the `hevcInfo`/`SUPPORTS_SCREEN_MULTI_CODEC` declarations
-/// are absent even on a unit that takes HEVC from a phone, so they can confirm the choice but
-/// never rule it out (see `libcarjack::airplay::AirPlayConnection::hevc_declared`). H264 remains a
-/// config away for an accessory that turns out to need it.
-pub fn resolve_codec(choice: CodecChoice) -> VideoCodec {
+/// `auto` sends HEVC only to an accessory that declares it: one that does not shows black for
+/// HEVC while decoding H264 perfectly well, whatever an iPhone sends it.
+pub fn resolve_codec(choice: CodecChoice, accessory_declares_hevc: bool) -> VideoCodec {
     let wanted = match choice {
         CodecChoice::H264 => VideoCodec::H264,
-        CodecChoice::Hevc | CodecChoice::Auto => VideoCodec::Hevc,
+        CodecChoice::Hevc => VideoCodec::Hevc,
+        CodecChoice::Auto if accessory_declares_hevc => VideoCodec::Hevc,
+        CodecChoice::Auto => VideoCodec::H264,
     };
     if wanted == VideoCodec::H264 || encoder_installed(VideoCodec::Hevc) {
         return wanted;
@@ -504,14 +517,13 @@ pub async fn encode_pipewire_to_channel(
     width: u32,
     height: u32,
     zerocopy: ZeroCopyMode,
-    codec: CodecChoice,
+    codec: VideoCodec,
     bitrate: Bitrate,
     video_tx: mpsc::Sender<EncodedFrame>,
     desktop_size_tx: tokio::sync::watch::Sender<Option<(u32, u32)>>,
     keyframe_rx: mpsc::Receiver<()>,
 ) -> Result<()> {
     gst::init()?;
-    let codec = resolve_codec(codec);
     let pipeline = gst::Pipeline::new();
     let src = gst::ElementFactory::make("pipewiresrc")
         .name("source")
@@ -683,12 +695,14 @@ async fn drive_video_pipeline(
             .build()
             .map_err(|_| eyre!("failed to create {label} ({name})"))
     };
-    let (media_type, parser_name) = match codec {
-        VideoCodec::H264 => ("video/x-h264", "h264parse"),
-        VideoCodec::Hevc => ("video/x-h265", "h265parse"),
+    // `avc`/`hvc1` is the wire form: length-prefixed NALs, with the decoder configuration record
+    // in `codec_data`. One `au`-aligned buffer is one frame.
+    let (media_type, parser_name, stream_format) = match codec {
+        VideoCodec::H264 => ("video/x-h264", "h264parse", "avc"),
+        VideoCodec::Hevc => ("video/x-h265", "h265parse", "hvc1"),
     };
     let output_caps = gst::Caps::builder(media_type)
-        .field("stream-format", "byte-stream")
+        .field("stream-format", stream_format)
         .field("alignment", "au")
         .build();
 
@@ -754,10 +768,14 @@ async fn drive_video_pipeline(
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                // The parser knows which frames are keyframes; only those carry the configuration.
+                let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
+                let config = keyframe
+                    .then(|| sample.caps().and_then(|caps| codec_config(caps, codec)))
+                    .flatten();
                 let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-                let au = normalize_annexb_4byte(map.as_slice());
-                let config = extract_codec_config(&au, codec);
-                match video_tx.blocking_send(EncodedFrame { data: au, config }) {
+                let data = coded_slices(map.as_slice(), codec);
+                match video_tx.blocking_send(EncodedFrame { data, config }) {
                     Ok(()) => Ok(gst::FlowSuccess::Ok),
                     Err(_) => Err(gst::FlowError::Eos),
                 }
@@ -870,10 +888,10 @@ const HW_BACKENDS: &[HwBackend] = &[
         // nvenc emits an IDR every frame at gop-size=30 specifically when fed system memory. 60 is
         // the one value that behaves on every path this row appears on.
         encoder: "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=vbr bitrate={kbps} \
-                  gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true aud=true",
+                  gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true",
         encoder_hevc: Some(
             "nvh265enc preset=p4 tune=ultra-low-latency rc-mode=vbr bitrate={kbps} \
-             gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true aud=true",
+             gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true",
         ),
         // The CUDA importer already hands the encoder what it wants.
         encoder_input: None,
@@ -906,10 +924,10 @@ const HW_BACKENDS: &[HwBackend] = &[
         desktop_memory: "memory:DMABuf",
         // Under VBR `bitrate` is the ceiling and `target-percentage` (default 66) sets the target.
         encoder: "vah264enc rate-control=vbr bitrate={kbps} b-frames=0 ref-frames=1 \
-                  target-usage=6 key-int-max=30 aud=true",
+                  target-usage=6 key-int-max=30",
         encoder_hevc: Some(
             "vah265enc rate-control=vbr bitrate={kbps} b-frames=0 ref-frames=1 \
-             target-usage=6 key-int-max=30 aud=true",
+             target-usage=6 key-int-max=30",
         ),
         encoder_input: Some("video/x-raw(memory:VAMemory), format=NV12"),
     },
@@ -1054,9 +1072,9 @@ fn build_backend(
 /// are tuned for *file* encoding and would add seconds of lag: `ultrafast`/`zerolatency` and
 /// `bframes=0` remove reordering/lookahead delay, `key-int-max=30` matches the hardware backends'
 /// ~1s keyframes, `pass=qual` is x264's bitrate-targeted VBR (`cbr` would pad a static screen to
-/// the full rate), and `byte-stream`/`aud` match what the AirPlay screen sink consumes.
+/// the full rate).
 const DEFAULT_SW_ENCODER: &str = "x264enc speed-preset=ultrafast tune=zerolatency pass=qual \
-    bitrate={kbps} key-int-max=30 bframes=0 byte-stream=true aud=true";
+    bitrate={kbps} key-int-max=30 bframes=0 byte-stream=true";
 
 /// Tried in order when [`DEFAULT_SW_ENCODER`] isn't installed. openh264enc is the usual stand-in
 /// where gst-plugins-ugly is absent; baseline-only, so there's no B-frame reordering to disable.
@@ -1301,88 +1319,66 @@ fn parse_encoder_string(s: &str) -> Result<(String, Vec<(String, String)>)> {
     Ok((name, props))
 }
 
-/// Extract the parameter sets from a keyframe's Annex-B access unit: SPS/PPS for H264,
-/// VPS/SPS/PPS for HEVC.
-///
-/// They stay Annex-B with their start codes, in decode order, which is the form catplay's
-/// `avcc_config_serialize`/`hvcc_config_serialize` parse to build the config frame's atom.
-fn extract_codec_config(data: &[u8], codec: VideoCodec) -> Option<AvccConfig> {
-    let mut sets: [Vec<u8>; 3] = Default::default();
+/// The NAL length prefix `avc`/`hvc1` uses, and the only width gstreamer's parsers emit.
+const NAL_SIZE_LEN: usize = 4;
 
-    for chunk in AnnexBIter::annexb(data) {
-        let chunk = chunk.ok()?;
-        if chunk.data_size == 0 {
-            continue;
-        }
-        let nal_start = chunk.prefix_start + chunk.prefix_len;
-        let slot = match codec {
-            VideoCodec::H264 => match NalType::from_byte(data[nal_start]) {
-                NalType::Sps => 1,
-                NalType::Pps => 2,
-                _ => continue,
-            },
-            VideoCodec::Hevc => match HevcNalType::from_byte(data[nal_start]) {
-                HevcNalType::VpsNut => 0,
-                HevcNalType::SpsNut => 1,
-                HevcNalType::PpsNut => 2,
-                _ => continue,
-            },
-        };
-        sets[slot].extend_from_slice(&data[chunk.prefix_start..nal_start + chunk.data_size]);
+/// Is this NAL a coded slice? Everything else - parameter sets, access unit delimiters, SEI - is
+/// carried by the decoder configuration record or not at all.
+fn is_vcl(nal_header: u8, codec: VideoCodec) -> bool {
+    match codec {
+        VideoCodec::Hevc => (nal_header >> 1) & 0x3f < 32,
+        VideoCodec::H264 => matches!(nal_header & 0x1f, 1..=5),
     }
-
-    // No SPS means this is not the keyframe that carries the configuration.
-    if sets[1].is_empty() {
-        return None;
-    }
-    if codec.is_hevc() && sets[0].is_empty() {
-        return None;
-    }
-
-    Some(AvccConfig {
-        nal_size_len: 4,
-        sps_pps: sets.concat(),
-    })
 }
 
-/// Rewrite every NAL in an Annex-B access unit behind a 4-byte (`00 00 00 01`) start code.
-/// gstreamer emits a mix of 3- and 4-byte prefixes; the AirPlay screen sink only accepts
-/// 4-byte ones.
-fn normalize_annexb_4byte(buf: &[u8]) -> Vec<u8> {
-    let mut cores: Vec<usize> = Vec::new();
-    let mut i = 0;
-    while i + 3 <= buf.len() {
-        if buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 1 {
-            cores.push(i);
-            i += 3;
-        } else {
-            i += 1;
-        }
-    }
-    if cores.is_empty() {
-        return buf.to_vec();
-    }
-
-    let true_start = |p: usize| -> usize {
-        let mut s = p;
-        while s > 0 && buf[s - 1] == 0 {
-            s -= 1;
-        }
-        s
-    };
-
-    let mut out = Vec::with_capacity(buf.len() + cores.len());
-    for k in 0..cores.len() {
-        let payload_start = cores[k] + 3;
-        let payload_end = if k + 1 < cores.len() {
-            true_start(cores[k + 1])
-        } else {
-            buf.len()
+/// Keep only the coded slices of a length-prefixed access unit: a receiver reads the first NAL of
+/// a sample to decide whether the stream can open there.
+fn coded_slices(data: &[u8], codec: VideoCodec) -> Vec<u8> {
+    let mut sample = Vec::with_capacity(data.len());
+    let mut pos = 0;
+    while pos + NAL_SIZE_LEN < data.len() {
+        let len = u32::from_be_bytes(data[pos..pos + NAL_SIZE_LEN].try_into().unwrap()) as usize;
+        let start = pos + NAL_SIZE_LEN;
+        let Some(nal) = data.get(start..start + len) else {
+            tracing::warn!(pos, len, "Truncated NAL from the parser; passing the sample through");
+            return data.to_vec();
         };
-        out.extend_from_slice(&[0, 0, 0, 1]);
-        out.extend_from_slice(&buf[payload_start..payload_end]);
+        if nal.first().is_some_and(|&header| is_vcl(header, codec)) {
+            sample.extend_from_slice(&data[pos..start + len]);
+        }
+        pos = start + len;
     }
-    out
+    sample
+}
+
+/// The parser's `avcC`/`hvcC`, as the Annex-B parameter sets catplay writes the config frame from.
+fn codec_config(caps: &gst::CapsRef, codec: VideoCodec) -> Option<AvccConfig> {
+    let record = caps.structure(0)?.get::<gst::Buffer>("codec_data").ok()?;
+    let record = record.map_readable().ok()?;
+    codec_config_from_record(record.as_slice(), codec)
+}
+
+/// The parameter sets inside an `avcC`/`hvcC`, Annex-B with start codes and in decode order -
+/// which is the form catplay's config frame writer parses.
+fn codec_config_from_record(record: &[u8], codec: VideoCodec) -> Option<AvccConfig> {
+    let config = match codec {
+        VideoCodec::Hevc => {
+            let hvcc = hvcc_config_deserialize(record)?;
+            AvccConfig {
+                nal_size_len: hvcc.nal_size_len,
+                sps_pps: hvcc.vps_sps_pps,
+            }
+        }
+        VideoCodec::H264 => avcc_config_deserialize(record)?,
+    };
+    if config.nal_size_len != NAL_SIZE_LEN {
+        tracing::warn!(
+            len = config.nal_size_len,
+            "Parser chose a NAL length prefix the screen stream cannot carry"
+        );
+        return None;
+    }
+    Some(config)
 }
 
 #[cfg(test)]
@@ -1397,38 +1393,87 @@ mod tests {
         &[0x26, 0x01, 0xaf, 0xe0, 0xfa, 0x20, 0xab, 0x43],       // 19, IDR slice
     ];
 
-    fn annexb(nals: &[&[u8]]) -> Vec<u8> {
+    fn length_prefixed(nals: &[&[u8]]) -> Vec<u8> {
         let mut out = Vec::new();
         for nal in nals {
-            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(&(nal.len() as u32).to_be_bytes());
             out.extend_from_slice(nal);
         }
         out
     }
 
-    /// HEVC needs VPS as well as SPS/PPS, and its NAL type lives in different bits than H264's -
-    /// reading it the H264 way finds nothing and the accessory gets a config frame with no parameter
-    /// sets at all.
+    /// The sample must open on its slice: a receiver reads the first NAL to decide whether the
+    /// frame opens the stream, and the parser leaves an access unit delimiter and the parameter
+    /// sets in front of every keyframe.
     #[test]
-    fn hevc_config_collects_vps_sps_pps_in_order() {
-        let au = annexb(HEVC_KEYFRAME_HEAD);
-        let config = super::extract_codec_config(&au, VideoCodec::Hevc).expect("config extracted");
+    fn the_sample_keeps_only_the_slices() {
+        let au = length_prefixed(HEVC_KEYFRAME_HEAD);
+        assert_eq!(
+            super::coded_slices(&au, VideoCodec::Hevc),
+            length_prefixed(&HEVC_KEYFRAME_HEAD[4..])
+        );
+
+        let delta: &[&[u8]] = &[&[0x46, 0x01, 0x10], &[0x02, 0x01, 0xd0, 0x09]]; // AUD, then TrailR
+        assert_eq!(
+            super::coded_slices(&length_prefixed(delta), VideoCodec::Hevc),
+            length_prefixed(&delta[1..])
+        );
+    }
+
+    /// HEVC and H264 keep their NAL type in different bits, and reading one as the other drops
+    /// every slice - an empty sample, and a stream the accessory has nothing to decode.
+    #[test]
+    fn slices_are_recognised_per_codec() {
+        let hevc = length_prefixed(&HEVC_KEYFRAME_HEAD[4..]);
+        assert!(super::coded_slices(&hevc, VideoCodec::H264).is_empty());
+
+        let h264: &[&[u8]] = &[&[0x09, 0x10], &[0x67, 0x42, 0xe0], &[0x68, 0xce], &[0x65, 0x88, 0x84]];
+        assert_eq!(
+            super::coded_slices(&length_prefixed(h264), VideoCodec::H264),
+            length_prefixed(&h264[3..])
+        );
+    }
+
+    /// A real `hvcC` from this pipeline's own parser (`vah265enc ! h265parse`, 800x1280), and the
+    /// VPS/SPS/PPS inside it. The config frame is written from these, so what the accessory sees
+    /// is the same sample entry the old path built by scraping them out of the bitstream - the one
+    /// verified against the iPhone's.
+    const HVCC_RECORD: &str = "01016000000090000000000078f000fcfdf8f800000f0320000100184001\
+        0c01ffff016000000300900000030000030078130240210001002e4201010160000003009000000300000300\
+        78a0064200501684e491b6affc0004000404000003000400000300782022000100074401c0764c0890";
+    const HVCC_PARAMETER_SETS: &str = "0000000140010c01ffff0160000003009000000300000300781302\
+        4000000001420101016000000300900000030000030078a0064200501684e491b6affc000400040400000300\
+        04000003007820000000014401c0764c0890";
+
+    fn hex(s: &str) -> Vec<u8> {
+        s.as_bytes()
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn the_record_carries_the_parameter_sets_the_config_frame_needs() {
+        let config = super::codec_config_from_record(&hex(HVCC_RECORD), VideoCodec::Hevc)
+            .expect("the parser's own record parses");
+
         assert_eq!(config.nal_size_len, 4);
         assert_eq!(
             config.sps_pps,
-            annexb(&HEVC_KEYFRAME_HEAD[1..4]),
-            "expected VPS, SPS then PPS, with their start codes and nothing else"
+            hex(HVCC_PARAMETER_SETS),
+            "expected VPS, SPS then PPS, Annex-B, in decode order"
         );
-        // The same bytes read as H264 are not parameter sets, so nothing should come back.
-        assert!(super::extract_codec_config(&au, VideoCodec::H264).is_none());
+        // An HEVC record is not an H264 one, and must not be read as if it were.
+        assert!(super::codec_config_from_record(&hex(HVCC_RECORD), VideoCodec::H264).is_none());
     }
 
-    /// A frame that carries no parameter sets is a delta frame, and must not be announced as a
-    /// keyframe carrying configuration.
+    /// A truncated buffer must not silently lose the frame; passing it through leaves the decision
+    /// to the accessory rather than sending it an empty sample.
     #[test]
-    fn a_frame_without_parameter_sets_has_no_config() {
-        let au = annexb(&[&[0x02, 0x01, 0xd0, 0x09]]); // type 1, TrailR
-        assert!(super::extract_codec_config(&au, VideoCodec::Hevc).is_none());
+    fn a_truncated_nal_passes_through() {
+        let mut au = length_prefixed(&HEVC_KEYFRAME_HEAD[4..]);
+        au.truncate(au.len() - 2);
+        assert_eq!(super::coded_slices(&au, VideoCodec::Hevc), au);
     }
 
     use super::*;

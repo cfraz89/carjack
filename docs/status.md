@@ -4,6 +4,235 @@
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
 
+## Damage-driven frames, and one config frame again (2026-08-13)
+
+Both changes follow from the iPhone capture below.
+
+**One config frame per stream** (`80d131e`), reverting the per-keyframe config of 2026-08-12. A
+phone sends exactly one, and one `0x10` marker with it; the reasoning for repeating them - that the
+bike could not recognise the keyframe it asked for - now looks wrong, because the bike wanted HEVC
+and was getting it. If a unit ever needs a config to recover, the place to put it back is a
+keyframe that answers a `ForceKeyFrame`, not every keyframe.
+
+**The compositor publishes on damage** rather than on its 30 Hz timer. Any client commit marks the
+frame dirty; the timer renders and publishes only when it is, with a one-second floor so a still
+screen still feeds the accessory's decoder and a keyframe request has a buffer to ride out on.
+Clients get their frame callbacks on every tick either way, so nothing that wants to animate is
+left waiting. Measured on the bench, app path:
+
+```
+compositor: 30.0 fps published of 30.0 polled     <- waydroid animating
+compositor:  1.0 fps published of 30.0 polled     <- screen still
+Streaming heartbeat: 1.0 fps (5 frames / 5.2s), 0 dropped to backpressure
+```
+
+An iPhone is damage-driven too - 264 frames in 17.4 s with gaps up to 4 s. The desktop path
+(`pipewiresrc`) is untouched.
+
+## What an iPhone sends the bench: H264, and a bare `avcC` (2026-08-13)
+
+`logs/iphone-bench.pcapng`, phone -> AUTO BOX, 17 s of screen socket. The phone sends this unit
+**H264**, and its config frame is a different shape from the one it sends the bike:
+
+| | bike (CFMOTO) | bench (AUTO BOX) |
+| --- | --- | --- |
+| codec | HEVC | **H264** |
+| config body | 247 b `hvc1` sample entry | **41 b bare `avcC`** |
+| flags | `0x011e` (incl. `UseFormatDescription`) | **`0x0116`** (no `UseFormatDescription`) |
+
+`01 64 00 1f ff e1 0016 <SPS> 01 0004 <PPS> 02 00 00 00` - High profile, level 3.1, 4-byte
+lengths, one SPS and one PPS. That is the shape catplay already writes for H264, so our config
+frame matches the phone's but for four trailing bytes (`02 00 00 00`) it appends after the PPS and
+we do not; the bench decodes ours without them.
+
+**The phone picks per unit, and neither unit declares a codec.** Their `/info` `features` words are
+byte-identical (416679199360), `displays[].features` is 10 on both, and neither carries `hevcInfo`.
+The only meaningful difference between them is `sourceVersion`: **475.8.2 gets HEVC, 320.14 gets
+H264**. `auto` now reads that too (`expects_hevc`, threshold interpolated at 400), so both units
+get what a phone gives them. This is a two-sample rule: panel size (800x1280 vs 1080x600) fits the
+same evidence, and if a third unit contradicts it the threshold is one constant to change.
+
+Two more things the capture settles:
+
+- **One config frame and one `0x10` marker in the whole session** - 282 frames. Our config frame per
+  keyframe is therefore not what a phone does, though the capture cannot say how many keyframes the
+  phone sent (the bodies are encrypted), and the bench is happy with ours either way.
+- Its keep-alives carry the same stats plist we now send (`rttAvg: 21`, `encoderCurrentFPS: 30`,
+  `txCapacityAvg: 16193600`), so a 320.14 unit wants those too.
+- The phone is damage-driven: 264 frames in 17.4 s (~15 fps), 257 b to 135 kB, where we send a flat
+  30.
+
+## The bench unit shows a picture again: HEVC was the regression (2026-08-13)
+
+With a webcam on the bench unit (see `.claude/skills/webcam`) the loop finally closes - a log
+cannot tell a decoded stream from an ignored one, a photograph can.
+
+| | picture? |
+| --- | --- |
+| idle, no session | the unit's own home menu |
+| `codec = hevc` (the default since 2026-08-12) | black |
+| `codec = h264` | **video** |
+| `codec = auto` after the fix (picks H264) | **video** |
+
+So the black bench screen was the HEVC default, not any of the wire-format work: every fix from
+the last two days - the AUD strip, the `hvcC` profile/level, a config frame per keyframe, the
+opening marker, `hvc1` from the parser - was in the stream that now displays.
+
+`auto` now sends HEVC only to an accessory that declares it (`hevcInfo` or
+`SUPPORTS_SCREEN_MULTI_CODEC`), and the declaration is settled after `/info` rather than at
+startup, so the backend is re-stamped with the codec once the accessory has spoken. The bench
+declares neither and decodes H264 perfectly; the earlier reasoning - that an iPhone sends HEVC to
+units that declare nothing, so the declaration can confirm but never veto - was exactly backwards
+for at least one real unit. `codec = "hevc"` still forces it, which is the setting to try on the
+bike, whose iPhone capture does show HEVC.
+
+Two things this run of experiments also settled:
+
+- **The bench never displayed anything through the HEVC period.** Its 1822-frame run with zero
+  keyframe requests was a black screen the whole time. Silence from a head unit means nothing.
+- **The unit does not always switch to the CarPlay surface.** Three runs out of five showed video;
+  the other two sat on the unit's own home menu with identical logs and a healthy 30 fps stream. A
+  blank screen is worth photographing twice before believing it.
+
+## The encoder now produces the wire form directly (2026-08-13)
+
+The screen stream carries length-prefixed NALs and a decoder configuration record, which is exactly
+what gstreamer's `avc`/`hvc1` stream formats mean - so the parser is asked for them instead of for
+byte-stream, and its `codec_data` is the record. That deletes `normalize_annexb_4byte` (a shim for
+`AnnexBIter::annexb` requiring 4-byte start codes), the Annex-B scan in `split_access_unit`, and
+catplay's Annex-B -> HVCC conversion per frame. Keyframes come from the parser's `DELTA_UNIT` flag
+rather than from looking for parameter sets.
+
+What the parser does **not** do is take the parameter sets out of the sample: they arrive in
+`codec_data` *and* in front of the slice. So `coded_slices` still keeps only the coded slices, for
+the reason below.
+
+catplay gained `EncodedVideoFrame::length_prefixed` (`fc15449`) so a sender whose encoder already
+emits the wire form skips the conversion.
+
+Verified, in order of how much they prove:
+
+- The parameter sets in gstreamer's `codec_data` are **byte-identical** to the ones the old path
+  scraped out of the bitstream, so the config frame is unchanged - and the sample entry it produces
+  still matches the iPhone's field for field, `ffff` dataRefIndex through `0x200` quality to the
+  `hvcC` PTL. `tests/wire_format.rs` builds both frames from real encoder output and asserts it,
+  including that the sample opens on an IRAP and carries nothing but slices.
+- A **full 75 s run against the bench unit**: 1822 frames at 30 fps, 61 config frames (one per
+  keyframe), zero keyframe requests, zero drops, zero errors. It accepted everything.
+- H264 still encodes and decodes (`avc`, High, yuv420p), though no unit has been given one since.
+
+The bench cannot be seen from here, so this still does not prove a picture - and no capture was
+taken, because `dumpcap` needs a privilege this session does not have.
+
+## Progress: the bike now asks for a keyframe on every frame (2026-08-12, late evening)
+
+`logs/cfmogo-12-08-2053.log` + capture. Still black, but the behaviour changed for the first time
+in the whole investigation: **407 `ForceKeyFrame` requests, one per frame at 30/s**, where every
+previous run produced exactly one. The unit is now looking at our frames and rejecting each one,
+rather than ignoring the stream.
+
+The capture says what it is rejecting. Frame by frame, off the wire:
+
+```
+#0 op=1 (config)  sp=001e01  226 b
+#1 op=0 sp=100000  24139 b   <- the opening keyframe, marked, config in front of it
+#2..#5 op=0 sp=000000  71, 142, 240, 572 b     deltas
+#6 op=0 sp=000000  21528 b   <- the keyframe it asked for: unmarked, no config
+```
+
+...and the flood starts right after #6. The unit asked for a keyframe, we sent one, and on the wire
+it was **indistinguishable from a delta frame**: no config frame, no `0x10` marker. Only the first
+keyframe of a session ever carried either, because catplay deduplicated the config against the last
+one it sent - and the config is what the marker follows.
+
+Fixed in the fork (`1bbb452`): the config frame is no longer deduplicated, so it accompanies every
+keyframe, and because the session re-arms the opening marker on each config, every keyframe now
+carries `0x10` as well. The sample entry itself is already byte-identical to the phone's apart from
+the parameter-set lengths and one constraint-flag byte our encoder sets differently (`90` vs `b0`,
+`non_packed_constraint`).
+
+The remaining reading of that capture, if this is still black: the phone's single marked frame was
+also its only keyframe in 86 frames, so "`0x10` marks a keyframe" and "`0x10` marks the first frame"
+fit the reference equally well. We now do both.
+
+## Every frame we ever sent opened with an access unit delimiter (2026-08-12, late)
+
+The `hvcC` fix below changed nothing on the bike (`logs/cfmoto-12-08-1830.log`), so the question
+became what a receiver looks at to decide a frame is worth decoding. catplay's own receiver - the
+one real iPhones talk to - reads **the first NAL of the sample** and asks whether it is an IRAP:
+
+```rust
+let nal_byte = self.data.get(nal_size_len).copied().unwrap_or(0);
+let is_keyframe = HevcNalType::from_byte(nal_byte).is_irap();
+```
+
+Dumping what our encoder actually produces (`tests/encode_dump.rs`, 60 access units) settles it:
+
+```
+AUD, VPS, SPS, PPS, IDR_W_RADL,   AUD, TRAIL_R,   AUD, TRAIL_R,   ...
+```
+
+**Every access unit starts with an access unit delimiter**, so by that rule no frame we have ever
+sent - in any codec, to any unit - has read as a keyframe. A head unit waiting for one before it
+starts its decoder waits forever, which is precisely the failure: it ACKs the SETUP, asks for a
+keyframe once, gets another "delta", and shows black while feeding back happily. Our own dumps
+always decoded because ffmpeg is not looking for permission to start.
+
+The parameter sets sat in the same sample, which an `hvc1`/`avc1` entry also forbids - they belong
+in the sample entry, which is where we already send them.
+
+Fixed in `split_access_unit` (src/encode.rs): the sample keeps its coded slices and nothing else,
+so a keyframe now opens on `IDR_W_RADL` and a delta on `TRAIL_R`. `encode_dump` puts the parameter
+sets back in front of each keyframe so the dumped file still decodes; it comes back Main / yuv420p
+/ 800x1280 as before.
+
+**Untested against either unit.** It is the first explanation that covers the whole history - both
+codecs, both units, every run - rather than the bike alone.
+
+## The `hvcC` described a stream at no level (2026-08-12, evening)
+
+Two more bike runs, both black (`logs/cfmoto-12-08-1942.*` with a capture, `cfmoto-12-08-1945.log`
+at trace). Nothing in either log is wrong: HEVC picked, VBR, view rect sent, first keyframe 88 ms
+in, the unit acknowledges the screen SETUP, asks for one keyframe, then feeds back happily for the
+rest of the run. It even moves iAP2 onto the AirPlay control channel two seconds after the WiFi
+handover and completes the link there (detect, SYN, SYN+ACK, ACK).
+
+Comparing our screen stream against the iPhone's, frame header by frame header, is what found it.
+The decoder configuration record we send is not the one the phone sends:
+
+| | iPhone | ours |
+| --- | --- | --- |
+| `general_profile_compatibility_flags` | `60000000` | `00000000` |
+| `general_constraint_indicator_flags` | `b00000000000` | `000000000000` |
+| `general_level_idc` | `78` (level 4.0) | `00` |
+| `numTemporalLayers` | 1 | 0 |
+| config frame timestamp (`params[0]`) | the first frame's PTS | 0 |
+| first video frame `small_param[0]` | `0x10`, on that frame alone | 0 |
+
+catplay wrote a fixed `hvcC` skeleton and never looked at the SPS, so **every HEVC stream we have
+ever sent claimed no profile and no level** - which is a decoder that has no reason to start, on a
+receiver that configures itself from this record rather than from the parameter sets. Our own dumps
+never showed it because ffmpeg reads the in-band VPS/SPS/PPS and ignores the broken record. The
+`avcC` path took profile and level straight from the SPS all along, so this is HEVC-only.
+
+Fixed in the fork (`5001cec`): the twelve profile/tier/level bytes and the sub-layer count now come
+from the SPS, the config frame carries its frame's timestamp, and the sample entry's `dataRefIndex`
+and quality fields match the phone's. A round-trip test feeds the phone's own record through our
+writer and demands the bytes back unchanged.
+
+Keep-alives now match too (`68cadb9`). The phone sends `KeepAliveWithBody` carrying a binary plist
+of its own stream stats - `rttAvg`, `txUsageAvg`, `encoderCurrentFPS`, `sentFramesAvg`,
+`queuedFramesAvg`, `txCapacityAvg`, `lossAvg` - with the body length repeated in `params[14]`,
+where we sent an empty `KeepAlive`. We send the same frame with the five we can measure honestly;
+`rttAvg` and `txCapacityAvg` are omitted rather than sent as a flattering zero, since nothing here
+measures round-trip time or link capacity.
+
+**Untested against either unit.** Still-known deltas, neither explained: the phone puts the video
+view one pixel above the panel's declared origin (223 vs 224), and its PTS domain is device uptime
+where ours starts near zero. And on the tunnelled iAP2 link both sides go quiet - the accessory
+sent `StartIdentification` within 80 ms over Bluetooth, but over the tunnel nobody speaks, because
+that is the one thing we do not drive there.
+
 ## Bench regression after the HEVC switch (2026-08-12): no regression on the wire
 
 `logs/bench-hevc-regression.log`, AUTO BOX, 100 s to the `test-run` timeout. The whole flow held

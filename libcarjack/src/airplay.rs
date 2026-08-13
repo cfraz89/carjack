@@ -53,6 +53,22 @@ impl VideoCodec {
     }
 }
 
+/// Would an iPhone send this accessory HEVC?
+///
+/// A declaration settles it, but neither unit captured so far declares anything - the phone keys
+/// off something else, and the only thing that separates them is how new the accessory's AirPlay
+/// implementation is: `475.8.2` gets HEVC from a phone, `320.14` gets H264 and shows black for
+/// HEVC. The threshold between the two is interpolated, not observed.
+pub fn expects_hevc(hevc_info: bool, multi_codec: bool, source_version: &str) -> bool {
+    const HEVC_FROM_SOURCE_VERSION: u32 = 400;
+    let major = source_version
+        .split('.')
+        .next()
+        .and_then(|m| m.parse::<u32>().ok())
+        .unwrap_or(0);
+    hevc_info || multi_codec || major >= HEVC_FROM_SOURCE_VERSION
+}
+
 pub struct AirPlayConnection {
     tx: AirPlayTransmitterProxyRef,
     pub width: u32,
@@ -60,9 +76,8 @@ pub struct AirPlayConnection {
     pub max_fps: u32,
     /// Where our stream sits on the accessory's panel, when it reserves part of it for itself.
     pub view: Option<VideoView>,
-    /// Whether the accessory declared multi-codec (HEVC) support. Informational: the CFMOTO unit
-    /// declares neither `hevcInfo` nor the feature bit and takes HEVC from an iPhone regardless.
-    pub hevc_declared: bool,
+    /// Whether an iPhone would send this accessory HEVC - see [`expects_hevc`].
+    pub hevc_expected: bool,
 }
 
 /// HomeKit pairings for the whole process, so an accessory that has met us before can take
@@ -163,18 +178,19 @@ pub async fn connect_airplay(
         None => tracing::debug!("Accessory gave no panel geometry; video covers the display"),
     }
 
-    // Confirmation only, never a veto: the CFMOTO unit declares neither and takes HEVC from an
-    // iPhone, so absence says nothing about what it can decode.
-    let hevc_declared = info.hevc_info.is_some()
-        || info
-            .features
-            .contains(AirPlayFeature::SUPPORTS_SCREEN_MULTI_CODEC);
+    let multi_codec = info
+        .features
+        .contains(AirPlayFeature::SUPPORTS_SCREEN_MULTI_CODEC);
+    let hevc_expected = expects_hevc(
+        info.hevc_info.is_some(),
+        multi_codec,
+        &info.source_version,
+    );
     tracing::info!(
-        hevc_declared,
+        hevc_expected,
         hevc_info = info.hevc_info.is_some(),
-        multi_codec = info
-            .features
-            .contains(AirPlayFeature::SUPPORTS_SCREEN_MULTI_CODEC),
+        multi_codec,
+        source_version = %info.source_version,
         "Accessory codec declaration"
     );
 
@@ -184,7 +200,7 @@ pub async fn connect_airplay(
         height,
         max_fps,
         view,
-        hevc_declared,
+        hevc_expected,
     })
 }
 
@@ -232,7 +248,7 @@ pub async fn run_video_stream(
         height,
         max_fps,
         view,
-        hevc_declared: _,
+        hevc_expected: _,
     } = conn;
 
     // CarPlay resource arbitration: claim the main screen for us (the controller) via a
@@ -375,6 +391,9 @@ pub async fn run_video_stream(
             }),
             nal_offsets: None,
             is_keyframe: Some(is_keyframe),
+            // The encoder emits the wire form already; converting it again would read the length
+            // prefixes as start codes.
+            length_prefixed: true,
             header_buf: BytesMut::new(),
             chacha_tag_buf: BytesMut::new(),
         };
@@ -582,6 +601,20 @@ fn abort_on_drop(handle: tokio::task::JoinHandle<()>) -> impl Drop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two units captured from a real iPhone: neither declares a codec, and only the
+    /// implementation version separates the one that gets HEVC from the one that gets H264.
+    #[test]
+    fn hevc_follows_the_accessory_not_the_default() {
+        assert!(expects_hevc(false, false, "475.8.2"), "CFMOTO takes HEVC from a phone");
+        assert!(!expects_hevc(false, false, "320.14"), "AUTO BOX gets H264 from a phone");
+
+        // A declaration settles it whatever the version says, and an unparseable version is not
+        // evidence of anything.
+        assert!(expects_hevc(true, false, "320.14"));
+        assert!(expects_hevc(false, true, "320.14"));
+        assert!(!expects_hevc(false, false, ""));
+    }
 
     fn delta() -> EncodedFrame {
         EncodedFrame {

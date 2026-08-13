@@ -45,13 +45,14 @@ drm_device = "auto"
 zerocopy = "auto"
 
 # Which codec the screen stream carries:
-#   "auto"   - HEVC, which is what a real iPhone sends every head unit captured so far
-#   "hevc"   - the same, explicitly
-#   "h264"   - for an accessory that turns out to need the older codec
-# Nothing an accessory sends reliably declares this: the CFMOTO unit advertises neither `hevcInfo`
-# nor the multi-codec feature bit and still takes HEVC from a phone, so "auto" cannot do better
-# than the phone's own choice. Falls back to H264 if the machine has no HEVC encoder installed.
-# Also settable as CARJACK.GRAPHICS.CODEC.
+#   "auto"   - HEVC if the accessory declares it (`hevcInfo` or the multi-codec feature bit),
+#              otherwise H264
+#   "hevc"   - HEVC whatever the accessory declares. An iPhone sends HEVC to units that declare
+#              nothing, so this is worth trying on one that shows black
+#   "h264"   - H264 always
+# A unit that declares no HEVC may still decode it - or may show a black screen while accepting
+# every frame without complaint, which is what the bench unit does. Falls back to H264 if the
+# machine has no HEVC encoder installed. Also settable as CARJACK.GRAPHICS.CODEC.
 codec = "auto"
 
 # Target video bitrate in kbit/s, applied as VBR to whichever encoder is selected (hardware or
