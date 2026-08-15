@@ -1,5 +1,4 @@
 set dotenv-load
-mod armbian
 
 [script]
 setcap:

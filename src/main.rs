@@ -6,8 +6,10 @@ use std::time::Duration;
 use backon::{ConstantBuilder, Retryable};
 use eyre::{Result, eyre};
 use libcarjack::carplay_session::{TouchEvent, WifiCredentials};
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::Pid;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
@@ -79,9 +81,8 @@ impl DesktopApp {
         let Some(mut child) = self.child.take() else {
             return;
         };
-        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-        let _ = child.kill(); // fallback if the group signal missed the leader
-        let _ = child.wait();
+        child.kill().ok();
+        child.wait().ok();
     }
 }
 
@@ -138,29 +139,44 @@ async fn main() -> Result<()> {
 }
 
 /// Make a second Ctrl-C always kill carjack, even if the graceful path is stuck.
-///
-/// Awaiting `ctrl_c()` replaces the process's default SIGINT disposition for good, so if the task
-/// polling it stalls (a blocking GStreamer/DRM call, or teardown with no listener left), Ctrl-C
-/// stops doing anything. One `signal()` stream means a SIGINT between two awaits is never missed.
 fn spawn_sigint_watchdog() -> Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
     tokio::spawn(async move {
-        sigint.recv().await;
-        tracing::info!("Ctrl-C received, shutting down - press again to exit immediately");
-        sigint.recv().await;
+        tokio::select! {
+            _ = sigint.recv() => {}
+            _ = sigterm.recv() => {}
+        }
+        tracing::info!("Stop requested, shutting down - signal again to exit immediately");
+        tokio::select! {
+            _ = sigint.recv() => {}
+            _ = sigterm.recv() => {}
+        }
         tracing::warn!("Second Ctrl-C, forcing exit");
         std::process::exit(130);
     });
     Ok(())
 }
 
-/// Await Ctrl-C or the retry backoff between sessions; returns `true` if Ctrl-C fired (stop).
+async fn shutdown_requested() {
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("No SIGTERM handler ({e}); Ctrl-C only");
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => tracing::info!("Ctrl-C received, shutting down"),
+        _ = term.recv() => tracing::info!("SIGTERM received, shutting down"),
+    }
+}
+
+/// Await a stop request or the retry backoff between sessions; returns `true` if we should stop.
 async fn backoff_or_ctrl_c() -> bool {
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Ctrl-C received, shutting down");
-            true
-        }
+        _ = shutdown_requested() => true,
         _ = tokio::time::sleep(Duration::from_secs(2)) => false,
     }
 }
@@ -215,7 +231,7 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
     // fresh Bluetooth connection instead of exiting.
     let exit = loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            _ = shutdown_requested() => {
                 tracing::info!("Ctrl-C received, shutting down");
                 break Ok(());
             }
@@ -270,7 +286,7 @@ async fn run_desktop(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
 
     let exit = loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            _ = shutdown_requested() => {
                 tracing::info!("Ctrl-C received, shutting down");
                 break Ok(());
             }
@@ -307,7 +323,7 @@ struct Established {
     /// The accessory's Bluetooth MAC (for the display cache and accessory settings); resolves during
     /// the handshake. A `watch`, not a `oneshot`: `establish_carplay` reads it early (to look up
     /// accessory settings before WiFi connects) and the caller reads it again afterward.
-    accessory_addr_rx: tokio::sync::watch::Receiver<Option<String>>,
+    accessory_addr_rx: watch::Receiver<Option<String>>,
     /// Ends the Bluetooth iAP2 session on our terms; fired when the accessory sends `disableBluetooth`
     /// over the AirPlay control channel.
     handover: CancellationToken,
@@ -379,7 +395,8 @@ async fn establish_carplay(
     let (touch_tx, touch_rx) = mpsc::channel::<TouchEvent>(64);
     let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCredentials>(4);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
-    let (accessory_addr_tx, accessory_addr_rx) = tokio::sync::watch::channel::<Option<String>>(None);
+    let (accessory_addr_tx, accessory_addr_rx) =
+        tokio::sync::watch::channel::<Option<String>>(None);
     let handover = CancellationToken::new();
 
     tracing::info!("Starting CarPlay session");
@@ -463,12 +480,19 @@ async fn establish_carplay(
     let bluetooth_id = host.bluetooth_address().await?;
     let picked = match airplay_hint {
         Some(hint) => {
-            tracing::info!("Accessory named its AirPlay receiver over iAP2 at {}", hint.0);
+            tracing::info!(
+                "Accessory named its AirPlay receiver over iAP2 at {}",
+                hint.0
+            );
             Some(hint)
         }
         None => {
-            tracing::info!("Accessory WiFi connected, waiting for the accessory's CarPlay invite...");
-            match wait_for_carplay_ctrl_probe(&accessory_wifi.iface, &bluetooth_id, INVITE_WAIT).await {
+            tracing::info!(
+                "Accessory WiFi connected, waiting for the accessory's CarPlay invite..."
+            );
+            match wait_for_carplay_ctrl_probe(&accessory_wifi.iface, &bluetooth_id, INVITE_WAIT)
+                .await
+            {
                 Ok((addr, pi)) => {
                     tracing::info!("Got CarPlay ctrl invite; AirPlay peer at {addr}");
                     Some((addr, pi))
@@ -480,8 +504,8 @@ async fn establish_carplay(
             }
         }
     };
-    let (endpoint, remote_homekit_id) =
-        picked.ok_or_else(|| eyre!("Accessory neither invited us nor named an AirPlay receiver"))?;
+    let (endpoint, remote_homekit_id) = picked
+        .ok_or_else(|| eyre!("Accessory neither invited us nor named an AirPlay receiver"))?;
     // Either source's address comes from the accessory itself, so it can be link-local.
     let endpoint = with_scope_id(endpoint, &accessory_wifi.iface);
 
@@ -517,8 +541,12 @@ async fn run_session(
         mut touch_rx,
         accessory_addr_rx,
         handover,
-    } = establish_carplay(host.clone(), config.bluetooth_device().unwrap_or_default(), wifi)
-        .await?;
+    } = establish_carplay(
+        host.clone(),
+        config.bluetooth_device().unwrap_or_default(),
+        wifi,
+    )
+    .await?;
 
     // Reconfigure the already-running compositor to exactly match the accessory's size and rate.
     let resized = compositor.reconfigure(conn.width, conn.height, conn.max_fps)?;
@@ -538,20 +566,14 @@ async fn run_session(
         }
     }
 
-    // A resizable app already resizes itself. A non-resizable one is (re)launched here at the
-    // now-known resolution, and only if it wasn't already running at the right size.
     if !config.app.resizable && (resized || !app.is_running()) {
         tracing::info!("launching desktop app at {}x{}", conn.width, conn.height);
         app.launch();
     }
     let frame_rx = compositor.subscribe_frames();
 
-    // Built here, not at launch time: the appsrc latches its caps once, so this must follow
-    // `reconfigure`. Channels are shallow - a real-time stream wants low latency, not buffering.
     let (video_tx, video_rx) = mpsc::channel::<libcarjack::airplay::EncodedFrame>(4);
     let (keyframe_tx, mut keyframe_rx) = mpsc::channel::<()>(1);
-    // A keyframe request has to reach the compositor as well as the encoder: with damage-driven
-    // publishing a still screen produces no frame for the keyframe to ride out on.
     let (encoder_keyframe_tx, encoder_keyframe_rx) = mpsc::channel::<()>(1);
     let frame_requester = compositor.frame_requester();
     let _keyframe_relay = AbortOnDropHandle::new(tokio::spawn(async move {
@@ -560,7 +582,10 @@ async fn run_session(
             let _ = encoder_keyframe_tx.try_send(());
         }
     }));
-    let backend = backend.with_codec(encode::resolve_codec(config.graphics.codec, conn.hevc_expected));
+    let backend = backend.with_codec(encode::resolve_codec(
+        config.graphics.codec,
+        conn.hevc_expected,
+    ));
     let mut encoder = AbortOnDropHandle::new(tokio::spawn(encode::encode_h264_to_channel(
         frame_rx,
         video_tx,

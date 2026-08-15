@@ -25,7 +25,11 @@ fn resolve_gpu() -> Result<(String, EncodeBackend, Bitrate)> {
     // Empty CLI: config comes from defaults + CARJACK_* env vars (see the test's env).
     let cfg = Config::load(&Cli::parse_from(["carjack"]))?;
     let node = carjack::config::resolve_render_node(&cfg.graphics.drm_device)?;
-    let backend = resolve_backend(cfg.graphics.zerocopy, &node, carjack::encode::resolve_codec(cfg.graphics.codec, true))?;
+    let backend = resolve_backend(
+        cfg.graphics.zerocopy,
+        &node,
+        carjack::encode::resolve_codec(cfg.graphics.codec, true),
+    )?;
     Ok((node, backend, Bitrate::from_kbps(cfg.graphics.bitrate)))
 }
 

@@ -85,7 +85,10 @@ pub(crate) fn build(kind: WifiBackendKind) -> Box<dyn WifiBackend> {
 
 /// Shared by both backends' `live_connection` checks: log and unwrap the "are we already on this
 /// accessory's network" query the same way, so `connect_to_accessory_wifi` only has to decide whether to ask.
-fn reuse_if_live(ssid: impl std::fmt::Display, checked: Result<Option<AccessoryWifi>>) -> Option<AccessoryWifi> {
+fn reuse_if_live(
+    ssid: impl std::fmt::Display,
+    checked: Result<Option<AccessoryWifi>>,
+) -> Option<AccessoryWifi> {
     match checked {
         Ok(Some(accessory_wifi)) => {
             tracing::info!("Already connected to {ssid}; reusing the live connection");
@@ -99,7 +102,10 @@ fn reuse_if_live(ssid: impl std::fmt::Display, checked: Result<Option<AccessoryW
     }
 }
 
-async fn connect_with_known_settings<F, Fut>(accessory_mac: Option<&str>, attempt: F) -> Result<AccessoryWifi>
+async fn connect_with_known_settings<F, Fut>(
+    accessory_mac: Option<&str>,
+    attempt: F,
+) -> Result<AccessoryWifi>
 where
     F: Fn(bool) -> Fut,
     Fut: Future<Output = Result<AccessoryWifi>>,

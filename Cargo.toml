@@ -65,9 +65,9 @@ gstreamer-video = { version = "0.24", features = ["v1_24"] }
 # builds on non-NVIDIA machines without the cuda-dmabuf native libs (libcuda, libgstcuda).
 cuda-dmabuf = { path = "cuda-dmabuf", optional = true }
 serde = { version = "1", features = ["derive"] }
+quick-xml = { version = "0.41", features = ["serialize"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }
-libc = "0.2"
-nix = { version = "0.29", features = ["net"] }
+nix = { version = "0.29", features = ["net", "signal"] }
 mac_address = "1.1.7"
 socket2 = "0.6"
 xdg = "3.0.0"

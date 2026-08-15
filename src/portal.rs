@@ -260,7 +260,10 @@ impl RemoteDesktopStream {
         let frame = frame_size.map(|(w, h)| (f64::from(w), f64::from(h)));
         self.warn_on_scale_mismatch(frame);
         let target = self.stream_size.or(frame);
-        let (x, y) = clamp_inside(scale_touch(event.x, event.y, target, accessory_size), target);
+        let (x, y) = clamp_inside(
+            scale_touch(event.x, event.y, target, accessory_size),
+            target,
+        );
         debug!(
             "touch {:?} slot={} accessory=({:.0},{:.0}) accessory_size={accessory_size:?} target={target:?} \
              -> ({x:.0},{y:.0})",

@@ -271,13 +271,15 @@ async fn current_ssid(device: &DeviceProxy<'_>) -> Result<Option<Ssid>> {
 }
 
 /// What the rest of carjack needs from an activated connection to the accessory.
-async fn accessory_wifi(device: &DeviceProxy<'_>, active: &ActiveProxy<'_>) -> Result<AccessoryWifi> {
+async fn accessory_wifi(
+    device: &DeviceProxy<'_>,
+    active: &ActiveProxy<'_>,
+) -> Result<AccessoryWifi> {
     // Absent until NetworkManager has finished the IPv4 stage, which is what `wait_for_activation`
     // gates on - so reaching here without one means the activation is still in flight.
-    active
-        .ip4_config()
-        .await?
-        .ok_or(eyre!("The accessory's connection has no IPv4 configuration yet"))?;
+    active.ip4_config().await?.ok_or(eyre!(
+        "The accessory's connection has no IPv4 configuration yet"
+    ))?;
     Ok(AccessoryWifi {
         iface: device.interface().await?,
     })

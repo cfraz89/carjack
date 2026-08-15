@@ -22,6 +22,7 @@ use carjack::encode::{Bitrate, encode_h264_to_channel, resolve_backend};
 use clap::Parser;
 use eyre::{Result, eyre};
 use libcarjack::airplay::EncodedFrame;
+use nix::sys::signal::killpg;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -80,8 +81,8 @@ async fn dump_encoded_stream() -> Result<()> {
         30,
     )?;
 
-    let cmd = std::env::var("CARJACK_DESKTOP_CMD")
-        .unwrap_or_else(|_| cfg.desktop_command().to_string());
+    let cmd =
+        std::env::var("CARJACK_DESKTOP_CMD").unwrap_or_else(|_| cfg.desktop_command().to_string());
     println!("client: {cmd}");
     let mut child = std::process::Command::new("sh")
         .arg("-c")
@@ -123,9 +124,8 @@ async fn dump_encoded_stream() -> Result<()> {
         written += 1;
     }
     file.flush()?;
-    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-    let _ = child.kill();
-    let _ = child.wait();
+    child.kill().ok();
+    child.wait().ok();
 
     println!("wrote {written} AUs ({bytes} bytes, {keyframes} keyframes) to {path}");
     assert!(written > 0, "the encoder produced nothing");

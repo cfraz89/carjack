@@ -298,7 +298,10 @@ fn network_file_name(ssid: &Ssid) -> String {
 
 /// The accessory's network object, scanning if the last scan didn't find it. Must run after
 /// provisioning - only then does iwd know to probe for a hidden SSID.
-async fn accessory_network(station: &StationProxy<'_>, ssid: &Ssid) -> Result<NetworkProxy<'static>> {
+async fn accessory_network(
+    station: &StationProxy<'_>,
+    ssid: &Ssid,
+) -> Result<NetworkProxy<'static>> {
     if let Some(network) = find_network(station, ssid).await? {
         return Ok(network);
     }

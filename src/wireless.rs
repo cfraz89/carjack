@@ -12,14 +12,16 @@ use bluer::{
 };
 use eyre::{Result, eyre};
 use iap2_proto::{error::Iap2Error, iap2::Iap2};
-use libcarjack::carplay;
+use libcarjack::{carplay, sdp::iap::iap_service_record};
 use libcarjack::{
     carplay_session::{DeviceIdentity, WifiCredentials},
-    uuid::{CARPLAY_DEVICE_UUID, IAP_DEVICE_UUID},
+    sdp::iap_service_record,
+    uuid::{CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID},
 };
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::wifi_connect::WifiBackend;
 
@@ -37,8 +39,12 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 const PAGE_ATTEMPTS: usize = 3;
 const PAGE_RETRY_DELAY: Duration = Duration::from_secs(2);
 
-/// How long to wait for a unit to offer its iAP channel before cycling the link.
-const OFFER_WAIT: Duration = Duration::from_secs(5);
+/// How long to wait for a unit to offer its iAP channel before cycling the link, and the ceiling
+/// that wait backs off to. The unit opens the channel on its own schedule - at power-up, or when
+/// the rider picks us on screen - so cycling eagerly tears down the link it was about to use, and
+/// enough of that walks it out of page scan altogether.
+const OFFER_WAIT: Duration = Duration::from_secs(20);
+const OFFER_WAIT_MAX: Duration = Duration::from_secs(60);
 
 /// BlueZ session, pairing agent, CarPlay advertisement and iAP profile registrations.
 ///
@@ -50,6 +56,8 @@ pub struct IapHost {
     _session: Session,
     /// The iAP profile the head unit connects in to; a session takes exclusive use of its stream.
     iap_profile: Mutex<ProfileHandle>,
+    /// The accessory's own iAP service, dialled outbound when it will not dial us.
+    iap_client: Mutex<ProfileHandle>,
     _agent: bluer::agent::AgentHandle,
 }
 
@@ -61,6 +69,20 @@ fn device_profile() -> rfcomm::Profile {
         name: Some(String::from("Wireless iAP")),
         role: Some(Role::Server),
         channel: Some(IAP_CHANNEL),
+        require_authentication: Some(true),
+        require_authorization: Some(false),
+        service_record: Some(iap_service_record(IAP_CHANNEL as u8).to_xml()),
+        ..Default::default()
+    }
+}
+
+/// The accessory's iAP service, client side. Registered so we can dial the unit's own iAP server
+/// rather than only wait to be dialled; BlueZ resolves its RFCOMM channel from the unit's SDP.
+fn accessory_profile() -> rfcomm::Profile {
+    rfcomm::Profile {
+        uuid: IAP_ACCESSORY_UUID,
+        name: Some(String::from("Wireless iAP client")),
+        role: Some(Role::Client),
         require_authentication: Some(true),
         require_authorization: Some(false),
         ..Default::default()
@@ -115,6 +137,11 @@ impl IapHost {
         let agent = session.register_agent(Agent::default()).await?;
         let adapter = session.default_adapter().await?;
         adapter.set_alias(String::from("carjack")).await?;
+        // The unit opens the iAP channel itself, so it has to be able to find us for as long as we
+        // are waiting - a timeout of zero is "no timeout", not "off".
+        adapter.set_pairable(true).await?;
+        adapter.set_discoverable_timeout(0).await?;
+        adapter.set_discoverable(true).await?;
         let identity = DeviceIdentity {
             name: String::from("carjack"),
             transport_identifier: transport_identifier(adapter.address().await?),
@@ -122,6 +149,7 @@ impl IapHost {
         };
 
         let iap_profile = Mutex::new(session.register_profile(device_profile()).await?);
+        let iap_client = Mutex::new(session.register_profile(accessory_profile()).await?);
         // Registered only so bluetoothd puts the CarPlay UUID in the adapter's EIR. The drain task
         // owns the handle for the process lifetime and rejects anything that arrives, so an
         // unanswered request can't pin its fd.
@@ -142,6 +170,7 @@ impl IapHost {
             identity,
             _session: session,
             iap_profile,
+            iap_client,
             _agent: agent,
         })
     }
@@ -151,7 +180,11 @@ impl IapHost {
 /// device we relink so the unit offers a fresh channel.
 struct LinkCtx {
     host: Arc<IapHost>,
-    device: Device,
+    /// Resolved in the background: the unit can open its channel before discovery has produced a
+    /// `Device`, and paging is the only thing that needs one.
+    device: tokio::sync::watch::Receiver<Option<Device>>,
+    target: String,
+    wanted: Option<Address>,
     connect_attempt: Arc<Semaphore>,
 }
 
@@ -201,35 +234,80 @@ async fn relink(device: &Device, gate: &Arc<Semaphore>) {
     });
 }
 
+/// Dial the accessory's own iAP service. Spawned, because `ConnectProfile` blocks for the whole
+/// SDP lookup and connect; the stream it wins arrives on the client profile.
+fn dial_accessory(device: &Device) {
+    let device = device.clone();
+    tokio::spawn(async move {
+        let res = device.connect_profile(&IAP_ACCESSORY_UUID).await;
+        tracing::debug!(?res, "Outbound iAP dial result");
+    });
+}
+
+/// Whether a connection that arrived on our profile came from the configured head unit.
+async fn request_is_target(
+    adapter: &Adapter,
+    from: Address,
+    target: &str,
+    wanted: Option<Address>,
+) -> bool {
+    match wanted {
+        Some(addr) => from == addr,
+        None => match adapter.device(from) {
+            Ok(device) => device_matches(&device, target, None).await,
+            Err(_) => false,
+        },
+    }
+}
+
 /// Accept an iAP connection from the configured head unit and bring the iAP2 link up on it.
 ///
 /// One channel per attempt; the caller's retry loop re-arms on failure.
 async fn attempt_iap2_link(
     ctx: &mut LinkCtx,
 ) -> Result<Iap2<bluer::rfcomm::Stream>, LinkAttemptError> {
-    let target = ctx.device.address();
     let mut profile = ctx.host.iap_profile.lock().await;
+    let mut client = ctx.host.iap_client.lock().await;
 
     loop {
         tracing::debug!("Waiting for iAP2 connection requests");
         // Re-checked on every wait, not just a startup sample - a link can appear after that (e.g.
         // BlueZ auto-connecting a trusted device) and we'd never have cycled it.
+        let mut wait = OFFER_WAIT;
+        let mut round = 0u32;
         let rq = loop {
-            match tokio::time::timeout(OFFER_WAIT, profile.next()).await {
-                Ok(rq) => break rq.ok_or(LinkAttemptError::ProfilesClosed)?,
-                Err(_) => {
-                    if ctx.device.is_connected().await.unwrap_or(false) {
-                        tracing::info!("Linked but no iAP channel offered; cycling the link");
-                        relink(&ctx.device, &ctx.connect_attempt).await;
+            tokio::select! {
+                rq = profile.next() => break rq.ok_or(LinkAttemptError::ProfilesClosed)?,
+                rq = client.next() => break rq.ok_or(LinkAttemptError::ProfilesClosed)?,
+                _ = tokio::time::sleep(wait) => {
+                    round += 1;
+                    // Alternate: dialling the unit's own iAP service is the one move that does not
+                    // wait on its schedule, and cycling must not tear down the link it needs.
+                    // Off by default - the unit withdrew its iAP SDP record seconds after the one
+                    // dial that connected, and without that record no path works in either
+                    // direction.
+                    let device = ctx.device.borrow().clone();
+                    let Some(device) = device else {
+                        tracing::debug!("No iAP channel offered; head unit not resolved yet");
+                        continue;
+                    };
+                    if round % 2 == 1 && std::env::var("CARJACK_DIAL_IAP").as_deref() == Ok("1") {
+                        tracing::info!("No iAP channel offered; dialling the accessory");
+                        dial_accessory(&device);
+                    } else {
+                        tracing::info!(?wait, "No iAP channel offered; cycling the link");
+                        relink(&device, &ctx.connect_attempt).await;
+                        wait = (wait * 2).min(OFFER_WAIT_MAX);
                     }
                 }
             }
         };
         let from = rq.device();
-        // Our profiles are registered adapter-wide, so any bonded head unit lands here.
-        if from != target {
+        // Our profiles are registered adapter-wide, so any bonded head unit lands here. Matched
+        // against the configured selector, not a resolved device - there may not be one yet.
+        if !request_is_target(&ctx.host.adapter, from, &ctx.target, ctx.wanted).await {
             tracing::warn!(
-                %from, %target,
+                %from, target = %ctx.target,
                 "Rejecting iAP2 connection from a device that is not the configured head unit"
             );
             rq.reject(ReqError::Rejected);
@@ -254,26 +332,46 @@ pub async fn wireless_carplay(
     let adapter = &host.adapter;
     let identity = host.identity.clone();
 
-    let device = find_target_device(adapter, &target).await?;
-    // Surface the accessory's MAC early - so the caller can look up its accessory settings before WiFi
-    // connects, and size the compositor / launch the app from its cached display before AirPlay
-    // reports the real one. A `watch`, not a `oneshot`: both readers need the value independently.
-    let _ = accessory_addr_tx.send(Some(device.address().to_string()));
-
     // Gate on relinks: one at a time.
     let connect_attempt = Arc::new(tokio::sync::Semaphore::new(1));
 
-    // Cycles any stale link so the unit offers a fresh channel.
-    relink(&device, &connect_attempt).await;
+    // Resolving the head unit must not gate accepting. It opens its channel seconds after bonding,
+    // and discovery can still be running then - a request nobody reads is a session thrown away.
+    let (device_tx, device_rx) = tokio::sync::watch::channel::<Option<Device>>(None);
+    let _resolver = AbortOnDropHandle::new(tokio::spawn({
+        let adapter = adapter.clone();
+        let target = target.clone();
+        let connect_attempt = connect_attempt.clone();
+        async move {
+            match find_target_device(&adapter, &target).await {
+                Ok(device) => {
+                    // Surface the accessory's MAC early - so the caller can look up its accessory
+                    // settings before WiFi connects, and size the compositor / launch the app from
+                    // its cached display before AirPlay reports the real one.
+                    let _ = accessory_addr_tx.send(Some(device.address().to_string()));
+                    // Page only if there is no link. A healthy one is left alone - tearing it down
+                    // costs a page the unit may not answer, and the accept loop cycles it anyway.
+                    if !device.is_connected().await.unwrap_or(false) {
+                        relink(&device, &connect_attempt).await;
+                    }
+                    let _ = device_tx.send(Some(device));
+                }
+                Err(e) => tracing::warn!(?e, "Could not resolve the configured head unit"),
+            }
+        }
+    }));
 
-    let task_device = device.clone();
+    let wanted: Option<Address> = target.parse().ok();
 
     let iap2 = ({
         |mut ctx: LinkCtx| async move {
             let res = attempt_iap2_link(&mut ctx).await;
             if let Err(LinkAttemptError::Iap2(e)) = &res {
                 tracing::warn!(?e, "No channel carried the iAP2 handshake");
-                relink(&ctx.device, &ctx.connect_attempt).await;
+                let device = ctx.device.borrow().clone();
+                if let Some(device) = device {
+                    relink(&device, &ctx.connect_attempt).await;
+                }
             }
             (ctx, res)
         }
@@ -286,7 +384,9 @@ pub async fn wireless_carplay(
     )
     .context(LinkCtx {
         host: host.clone(),
-        device: task_device,
+        device: device_rx,
+        target: target.clone(),
+        wanted,
         connect_attempt,
     })
     .when(|e| !matches!(e, LinkAttemptError::ProfilesClosed))

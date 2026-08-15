@@ -1,7 +1,7 @@
 use std::os::fd::AsFd;
-use std::str::FromStr;
 #[cfg(feature = "cuda")]
 use std::os::fd::AsRawFd;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -169,7 +169,11 @@ pub fn init_gstreamer() -> Result<()> {
 ///
 /// `render_node` is the GPU the compositor renders on; a zero-copy backend must live on the same
 /// GPU (the CUDA importer opens exactly this node).
-pub fn resolve_backend(mode: ZeroCopyMode, render_node: &str, codec: VideoCodec) -> Result<EncodeBackend> {
+pub fn resolve_backend(
+    mode: ZeroCopyMode,
+    render_node: &str,
+    codec: VideoCodec,
+) -> Result<EncodeBackend> {
     let _ = gst::init();
     match mode {
         ZeroCopyMode::Off => Ok(EncodeBackend::Software { codec }),
@@ -958,8 +962,7 @@ impl HwBackend {
 
     /// The encoder to build for this backend, with the configured `bitrate` substituted in.
     fn encoder_desc(&self, codec: VideoCodec, bitrate: Bitrate) -> Option<String> {
-        self.encoder_template(codec)
-            .map(|t| bitrate.apply(&t))
+        self.encoder_template(codec).map(|t| bitrate.apply(&t))
     }
 
     /// Whether this backend can encode `codec` on this machine at all.
@@ -1349,7 +1352,11 @@ fn coded_slices(data: &[u8], codec: VideoCodec) -> Vec<u8> {
         let len = u32::from_be_bytes(data[pos..pos + NAL_SIZE_LEN].try_into().unwrap()) as usize;
         let start = pos + NAL_SIZE_LEN;
         let Some(nal) = data.get(start..start + len) else {
-            tracing::warn!(pos, len, "Truncated NAL from the parser; passing the sample through");
+            tracing::warn!(
+                pos,
+                len,
+                "Truncated NAL from the parser; passing the sample through"
+            );
             return data.to_vec();
         };
         if nal.first().is_some_and(|&header| is_vcl(header, codec)) {
@@ -1395,11 +1402,11 @@ mod tests {
     /// The head of a real `vah265enc` access unit (`/tmp/enc-hevc3.h265`, 800x1280 Main): an AUD,
     /// then VPS/SPS/PPS, then the IDR slice. Truncated - only the parameter sets matter here.
     const HEVC_KEYFRAME_HEAD: &[&[u8]] = &[
-        &[0x46, 0x01, 0x10],                                     // 35, AUD
-        &[0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60],       // 32, VPS
-        &[0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03],       // 33, SPS
-        &[0x44, 0x01, 0xc0, 0x76, 0x4c, 0x08, 0x90],             // 34, PPS
-        &[0x26, 0x01, 0xaf, 0xe0, 0xfa, 0x20, 0xab, 0x43],       // 19, IDR slice
+        &[0x46, 0x01, 0x10],                               // 35, AUD
+        &[0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60], // 32, VPS
+        &[0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03], // 33, SPS
+        &[0x44, 0x01, 0xc0, 0x76, 0x4c, 0x08, 0x90],       // 34, PPS
+        &[0x26, 0x01, 0xaf, 0xe0, 0xfa, 0x20, 0xab, 0x43], // 19, IDR slice
     ];
 
     fn length_prefixed(nals: &[&[u8]]) -> Vec<u8> {
@@ -1436,7 +1443,12 @@ mod tests {
         let hevc = length_prefixed(&HEVC_KEYFRAME_HEAD[4..]);
         assert!(super::coded_slices(&hevc, VideoCodec::H264).is_empty());
 
-        let h264: &[&[u8]] = &[&[0x09, 0x10], &[0x67, 0x42, 0xe0], &[0x68, 0xce], &[0x65, 0x88, 0x84]];
+        let h264: &[&[u8]] = &[
+            &[0x09, 0x10],
+            &[0x67, 0x42, 0xe0],
+            &[0x68, 0xce],
+            &[0x65, 0x88, 0x84],
+        ];
         assert_eq!(
             super::coded_slices(&length_prefixed(h264), VideoCodec::H264),
             length_prefixed(&h264[3..])
@@ -1519,12 +1531,9 @@ mod tests {
     #[test]
     fn an_available_dmabuf_backend_reports_its_modifiers() {
         let _ = gst::init();
-        let Some(hw) = HW_BACKENDS
-            .iter()
-            .find(|b| {
-                b.import == Import::DmaBuf && b.postproc.is_some() && b.available(VideoCodec::Hevc)
-            })
-        else {
+        let Some(hw) = HW_BACKENDS.iter().find(|b| {
+            b.import == Import::DmaBuf && b.postproc.is_some() && b.available(VideoCodec::Hevc)
+        }) else {
             return;
         };
         let backend = EncodeBackend::Hw {
@@ -1609,8 +1618,7 @@ mod tests {
         let desc = v4l2
             .encoder_desc(VideoCodec::H264, Bitrate::from_kbps(3000))
             .expect("the v4l2 row has an H264 encoder");
-        let (name, props) =
-            parse_encoder_string(&desc).expect("v4l2 encoder description parses");
+        let (name, props) = parse_encoder_string(&desc).expect("v4l2 encoder description parses");
         assert_eq!(name, "v4l2h264enc");
         assert_eq!(
             props,

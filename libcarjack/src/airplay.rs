@@ -8,11 +8,11 @@ use catplay_carplay::carplay_tx::{
     AirPlayTransmitter, AirPlayTransmitterBootstrap, AirPlayTransmitterProxy,
     AirPlayTransmitterProxyRef,
 };
+use catplay_carplay::common::AirPlayFeature;
 use catplay_carplay::modes::{
     EntityEnum, Resource, ResourceConstraint, ResourceController, ResourceID,
     ResourceTransferPriority,
 };
-use catplay_carplay::common::AirPlayFeature;
 use catplay_carplay::msg::Command;
 use catplay_carplay::rtsp_frame::HttpStatus;
 use catplay_carplay::screen::tx::{ScreenTransmitError, ScreenTransmitSink};
@@ -181,11 +181,7 @@ pub async fn connect_airplay(
     let multi_codec = info
         .features
         .contains(AirPlayFeature::SUPPORTS_SCREEN_MULTI_CODEC);
-    let hevc_expected = expects_hevc(
-        info.hevc_info.is_some(),
-        multi_codec,
-        &info.source_version,
-    );
+    let hevc_expected = expects_hevc(info.hevc_info.is_some(), multi_codec, &info.source_version);
     tracing::info!(
         hevc_expected,
         hevc_info = info.hevc_info.is_some(),
@@ -210,11 +206,15 @@ pub async fn connect_airplay(
 /// accessory that keeps a strip for its own instruments gives an origin below the top; the size is
 /// what is left of the panel. (An iPhone sends one pixel less for the origin than the panel
 /// declares - the reason is unknown, so the declared value is used.)
-fn panel_view(info: &catplay_carplay::msg::InfoMessageResponse, display_uuid: &str) -> Option<VideoView> {
-    let panel = info
-        .display_panels
-        .iter()
-        .find(|p| p.initial_video_streams.iter().any(|s| s.uuid == display_uuid))?;
+fn panel_view(
+    info: &catplay_carplay::msg::InfoMessageResponse,
+    display_uuid: &str,
+) -> Option<VideoView> {
+    let panel = info.display_panels.iter().find(|p| {
+        p.initial_video_streams
+            .iter()
+            .any(|s| s.uuid == display_uuid)
+    })?;
     let stream = panel
         .initial_video_streams
         .iter()
@@ -606,8 +606,14 @@ mod tests {
     /// implementation version separates the one that gets HEVC from the one that gets H264.
     #[test]
     fn hevc_follows_the_accessory_not_the_default() {
-        assert!(expects_hevc(false, false, "475.8.2"), "CFMOTO takes HEVC from a phone");
-        assert!(!expects_hevc(false, false, "320.14"), "AUTO BOX gets H264 from a phone");
+        assert!(
+            expects_hevc(false, false, "475.8.2"),
+            "CFMOTO takes HEVC from a phone"
+        );
+        assert!(
+            !expects_hevc(false, false, "320.14"),
+            "AUTO BOX gets H264 from a phone"
+        );
 
         // A declaration settles it whatever the version says, and an unparseable version is not
         // evidence of anything.

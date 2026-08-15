@@ -483,7 +483,12 @@ fn pick_region<'a>(
 /// Map an accessory-space touch into `region`: scale by the region's size, offset by its position, and keep
 /// the result inside it - out-of-region coordinates are *silently discarded* by the EIS
 /// implementation, and an accessory reports touch right at the edge of its display.
-fn region_position(region: &event::Region, x: f64, y: f64, accessory_size: (u32, u32)) -> (f32, f32) {
+fn region_position(
+    region: &event::Region,
+    x: f64,
+    y: f64,
+    accessory_size: (u32, u32),
+) -> (f32, f32) {
     let (accessory_w, accessory_h) = (f64::from(accessory_size.0), f64::from(accessory_size.1));
     let (rw, rh) = (f64::from(region.width), f64::from(region.height));
     let (sx, sy) = if accessory_w > 0.0 && accessory_h > 0.0 {

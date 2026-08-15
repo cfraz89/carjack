@@ -434,6 +434,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "btuuid"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5f48f1e9b0aad0a4f05d17bdeae0fa20ff798e272a03a6940ca27ad9c5a6ae7"
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -510,12 +516,12 @@ dependencies = [
  "gstreamer-video",
  "iap2-proto",
  "iwd-automata",
- "libc",
  "libcarjack",
  "mac_address",
  "netlink-packet-route",
  "nix 0.29.0",
  "nm-automata",
+ "quick-xml",
  "reis",
  "ring",
  "rtnetlink",
@@ -2238,6 +2244,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 name = "libcarjack"
 version = "0.1.0"
 dependencies = [
+ "btuuid",
  "bytes",
  "catplay_carplay",
  "catplay_hap",
@@ -2246,6 +2253,8 @@ dependencies = [
  "deku",
  "eyre",
  "iap2-proto",
+ "quick-xml",
+ "serde",
  "tap",
  "tokio",
  "tokio-util",
@@ -2874,6 +2883,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
  "memchr",
+ "serde",
 ]
 
 [[package]]

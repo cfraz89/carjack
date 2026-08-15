@@ -58,7 +58,12 @@ async fn run() -> Result<()> {
         .name()
         .strip_prefix("hci")
         .and_then(|index| index.parse().ok())
-        .ok_or_else(|| eyre!("unexpected adapter name {:?}, expected `hci<N>`", adapter.name()))?;
+        .ok_or_else(|| {
+            eyre!(
+                "unexpected adapter name {:?}, expected `hci<N>`",
+                adapter.name()
+            )
+        })?;
     send_mgmt_command(index, MGMT_OP_SET_DEV_CLASS, &CARPLAY_DEV_CLASS)
 }
 

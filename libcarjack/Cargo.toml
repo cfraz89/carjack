@@ -8,6 +8,7 @@ name = "libcarjack"
 path = "src/lib.rs"
 
 [dependencies]
+btuuid = "0.1.1"
 bytes = "1.12.1"
 catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "feat/hevc-and-view-rect", default-features = false, features = ["tx"]}
 catplay_hap = { git = "https://github.com/cfraz89/catplay.git", branch = "feat/hevc-and-view-rect", default-features=false, features = ["std"] }
@@ -16,6 +17,8 @@ deku = "0.20.3"
 eyre = "0.6.12"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 iap2-proto = { version = "0.1.0", path = "../iap2-proto" }
+quick-xml = { version = "0.41", features = ["serialize"] }
+serde = { version = "1", features = ["derive"] }
 tap = "1.0.1"
 tokio = { version = "1.52.3", features = ["rt", "sync", "time"] }
 tokio-util = "0.7"

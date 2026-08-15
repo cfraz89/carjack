@@ -14,9 +14,7 @@ use carjack::config::{Cli, Config};
 use carjack::encode::{Bitrate, encode_h264_to_channel, resolve_backend};
 use catplay_carplay::clock::MediaClockSession;
 use catplay_carplay::screen::{ScreenFrame, ScreenOpCode};
-use catplay_carplay::video::{
-    AvccConfigExtended, EncodedVideoFrame, HevcNalType, Pts, VideoView,
-};
+use catplay_carplay::video::{AvccConfigExtended, EncodedVideoFrame, HevcNalType, Pts, VideoView};
 use clap::Parser;
 use eyre::{Result, eyre};
 use libcarjack::airplay::EncodedFrame;
@@ -37,7 +35,12 @@ fn nal_headers(sample: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Run the encoder, handing back the frame channel and the keyframe request channel.
-async fn encoder() -> Result<(mpsc::Receiver<EncodedFrame>, mpsc::Sender<()>, AbortOnDropHandle<Result<()>>, Compositor)> {
+async fn encoder() -> Result<(
+    mpsc::Receiver<EncodedFrame>,
+    mpsc::Sender<()>,
+    AbortOnDropHandle<Result<()>>,
+    Compositor,
+)> {
     let cfg = Config::load(&Cli::parse_from(["carjack"]))?;
     let node = carjack::config::resolve_render_node(&cfg.graphics.drm_device)?;
     // `true`: no accessory here to declare a codec, so `auto` keeps its preference.
@@ -75,17 +78,29 @@ async fn a_requested_keyframe_carries_the_config() -> Result<()> {
     let (mut frames, keyframe_tx, _task, _comp) = encoder().await?;
 
     let opening = frames.recv().await.ok_or_else(|| eyre!("no frames"))?;
-    assert!(opening.config.is_some(), "the stream opens on a configured keyframe");
+    assert!(
+        opening.config.is_some(),
+        "the stream opens on a configured keyframe"
+    );
 
     // Natural keyframes keep coming (key-int-max=30) and must not repeat it.
     for _ in 0..45 {
-        let frame = frames.recv().await.ok_or_else(|| eyre!("encoder stopped"))?;
-        assert!(frame.config.is_none(), "only a requested keyframe repeats the config");
+        let frame = frames
+            .recv()
+            .await
+            .ok_or_else(|| eyre!("encoder stopped"))?;
+        assert!(
+            frame.config.is_none(),
+            "only a requested keyframe repeats the config"
+        );
     }
 
     keyframe_tx.send(()).await?;
     for _ in 0..45 {
-        let frame = frames.recv().await.ok_or_else(|| eyre!("encoder stopped"))?;
+        let frame = frames
+            .recv()
+            .await
+            .ok_or_else(|| eyre!("encoder stopped"))?;
         if frame.config.is_some() {
             return Ok(());
         }
@@ -137,7 +152,10 @@ async fn the_config_frame_matches_the_iphones() -> Result<()> {
 
     let config = AvccConfigExtended {
         hevc: true,
-        avcc: keyframe.config.clone().expect("keyframe carries its config"),
+        avcc: keyframe
+            .config
+            .clone()
+            .expect("keyframe carries its config"),
         video_latency: std::time::Duration::ZERO,
         width: 800,
         height: 1280,
@@ -162,7 +180,11 @@ async fn the_config_frame_matches_the_iphones() -> Result<()> {
 
     assert_eq!(&entry[4..8], b"hvc1");
     assert_eq!(&entry[14..16], &[0xff, 0xff], "dataRefIndex");
-    assert_eq!(&entry[24..32], &[0, 0, 2, 0, 0, 0, 2, 0], "temporal/spatial quality");
+    assert_eq!(
+        &entry[24..32],
+        &[0, 0, 2, 0, 0, 0, 2, 0],
+        "temporal/spatial quality"
+    );
     assert_eq!(&entry[32..36], &[0x03, 0x20, 0x05, 0x00], "800x1280");
     assert_eq!(&entry[50..55], b"\x04HEVC");
     assert_eq!(&entry[82..86], &[0, 0x18, 0xff, 0xff], "depth and clut id");
@@ -182,7 +204,11 @@ async fn the_config_frame_matches_the_iphones() -> Result<()> {
     assert_ne!(entry[hvcc + 12], 0, "general_level_idc");
     assert_eq!(entry[hvcc + 21] & 0x03, 3, "4-byte NAL length prefixes");
 
-    println!("sample entry ({} bytes): {:02x?}", entry.len(), &entry[..96]);
+    println!(
+        "sample entry ({} bytes): {:02x?}",
+        entry.len(),
+        &entry[..96]
+    );
     Ok(())
 }
 
@@ -220,9 +246,7 @@ async fn a_keyframe_sample_opens_on_its_slice() -> Result<()> {
         HevcNalType::from_byte(headers[0])
     );
     assert!(
-        headers
-            .iter()
-            .all(|&h| ((h >> 1) & 0x3f) < 32),
+        headers.iter().all(|&h| ((h >> 1) & 0x3f) < 32),
         "samples carry coded slices and nothing else, got {:?}",
         headers.iter().map(|h| (h >> 1) & 0x3f).collect::<Vec<_>>()
     );

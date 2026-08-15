@@ -4,6 +4,263 @@
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
 
+## Who starts the iAP channel, and why it looked random (2026-08-13, night)
+
+The unit hosts the iAP accessory service (`...decacaff`); we host the device side (`...decacafe`)
+and can only wait. So the channel opens on the unit's schedule - but "its schedule" is not
+arbitrary, and 17 successful bike runs split cleanly in two:
+
+| how the channel arrived | runs | timing |
+| --- | --- | --- |
+| within a second of **our** page completing | 9 | 0.00 - 0.86 s after `Connection result` |
+| with no page of ours anywhere near it | 8 | the unit initiating by itself |
+
+So paging *is* a trigger, and when it works it works immediately. Nothing waits 20 s and then
+succeeds. That makes a run easy to read: if the channel has not arrived a second after the ACL is
+up, that page was refused, and waiting longer is not going to change it.
+
+**The three initiation paths had been switched off** in the working tree - `PAGE_RETRY_DELAY` 2 s ->
+10000 s, `OFFER_WAIT` 5 s -> 50000 s, and the startup `relink` commented out. A baseline run
+confirmed the effect: carjack found the unit, printed `Waiting for iAP2 connection requests`, and
+sat idle for 45 s. Only a unit that initiated on its own could ever connect, which is exactly the
+randomness that prompted this.
+
+**Cycling harder is the wrong lever.** Restored at 5 s, the unit accepted every page
+(`res=Ok(())`, ~1 s each) and offered nothing; after five rapid cycles `connect()` began hanging
+outright - the unit had stopped answering pages, which is the "aggressive reconnect" degradation in
+the hardware-quirks list, and we were causing it. At 20 s backing off to 60 s, ten cycles over nine
+minutes drew no degradation and one recovered page timeout.
+
+What the run could not do is matter, because **the unit sat in its Phone settings page the whole
+time** (`Now discoverable as "CFMOTO-G2Y70E"`, `My Devices > carjack` ticked). Photographed at
+21:19 and again at 21:34, unchanged across every run. A unit parked in its own Bluetooth settings
+does not start CarPlay on link-up; the rider backing out of that screen, pressing the device, or
+power-cycling the bike is what restores the path that works in under a second.
+
+Changed in `wireless.rs`: `OFFER_WAIT` 20 s backing off to 60 s; the startup page fires only when
+the link is *down*, so a healthy one is never torn down; the timeout branch now also pages a link
+that has gone away, where before it only cycled one that was up and so waited forever after a drop;
+and the adapter is left discoverable and pairable while waiting, which it was not.
+
+Untested: a successful initiation under the new timing. Nine minutes of runs never got one,
+because of the screen the unit was on.
+
+### What HCI says the unit is actually doing (`logs/bike-hci.btsnoop`)
+
+`btmon -w` over three page cycles, read back with `btmon -r` (no privileges needed for the read).
+Two things settle:
+
+**The unit never asks us about iAP or CarPlay.** Every Service Search Request it sent us was for a
+classic profile - Handsfree AG, Audio Source, AVRCP Target, Phonebook Access, OBEX Push, Headset -
+and it is running HFP AT commands at us (`AT+CLIP=1`). Not one query for `...decacafe` or
+`2d8d2466-...`. Our records are fine: when it browses us we do answer with both, five times each.
+So this is not our SDP, and no amount of paging will provoke a unit that is not looking.
+
+**The unit hosts its iAP service on RFCOMM channel 2**, record handle `0x00010009`, and it will
+take a connection there. Registering the accessory UUID client-side and calling `ConnectProfile`
+(`dial_accessory`) got a channel **43 ms after the dial** on the first attempt - the fastest any
+channel has ever arrived. It then reset it 20 ms into the handshake, while iAP2 was waiting for the
+accessory's SYN:
+
+```
+12:09:41.020  dialling the accessory
+12:09:41.063  Got connect request from=B6:5D:B5:04:8E:FC
+12:09:41.063  Waiting for SYN from accessory
+12:09:41.083  Error performing syn: Connection reset by peer (104)
+```
+
+So the reverse direction is reachable and the unit answers on it instantly - it just will not carry
+iAP2 while it is in plain-phone mode. Whether it completes once the unit is in CarPlay mode is the
+open question, and the one worth testing next. Later dials in the same run return
+`br-connection-not-supported`, which needs explaining before the path can be relied on.
+
+`dial_accessory` alternates with the relink on each timeout, but is **off unless
+`CARJACK_DIAL_IAP=1`** - see below.
+
+### The unit withdraws its iAP record, and that is what "random" was
+
+The same SDP query, seventeen minutes apart, from the same capture:
+
+| | t=1040 (22:09:41) | t=2067 (22:26:48) |
+| --- | --- | --- |
+| query | `SSA Request` for `...decacaff` | identical |
+| response | `Attribute bytes: 68` - handle `0x00010009`, RFCOMM channel 2 | **`Attribute bytes: 2`**, empty |
+| outcome | dial connected in 43 ms | `record_cb() No SDP records found` -> `br-connection-not-supported` |
+
+The record was published at 21:53 and at 22:09:41, and **gone by 22:10:02** - within about twenty
+seconds of the one dial that connected and had its handshake reset. `bluetoothctl info` still lists
+the UUID, but that is BlueZ's cached list from when the record was live; the unit itself now answers
+the query empty.
+
+With no record there is no iAP path in **either** direction - nothing to dial, and nothing that
+would make the unit dial us. That is a better explanation of "it connects randomly" than anything
+before it: the record is only up sometimes, and a session can only start while it is. Both triggers
+that are known to work - power-cycling the bike, pressing the device on screen - are things that
+would republish it.
+
+Moving the bike to its home screen changed nothing, which rules the screen out as the mechanism on
+its own; the record being absent is upstream of it.
+
+**The dial is gated off by default** (`CARJACK_DIAL_IAP=1` to enable), but the suspicion that it
+*caused* the withdrawal is now **wrong** - see below.
+
+## A restart buys exactly one session (2026-08-13, night)
+
+Restarting the bike republishes the record, and the whole chain then completes:
+
+```
+13:18:01  Preparing configured head unit
+13:18:21  cycle 1 -> Connection result Ok    <- refused, no channel
+13:19:02  cycle 2 -> Connection result Ok  (13:19:46.530)
+13:19:46.758  Got connect request           <- 228 ms later
+13:19:47.286  iAP2 link established
+13:19:51.905  AirPlay bootstrap complete!
+          Streaming heartbeat: 1.0 fps, 0 dropped to backpressure
+```
+
+Bluetooth -> iAP2 -> WiFi -> AirPlay -> video, first success under the new timing, and the <1 s rule
+held exactly. Note it still took two pages: the first was refused even on a freshly restarted unit.
+
+**The next run failed.** Three cycles, every page accepted, no channel - and a dial probe
+immediately after returned `br-connection-not-supported`, so the record had already gone again.
+That withdrawal happened with the dial **disabled** for the whole preceding run, which exonerates
+it: the record goes away when a *session ends*, not when we dial.
+
+So the pattern is one restart, one session. Every previously "random" success fits it.
+
+**Candidate cause, unproven:** carjack handled `SIGINT` only, and `just test-run` kills it with
+`timeout(1)`, which sends `SIGTERM` - whose default disposition killed us outright, leaving the
+accessory holding a session we never ended. Every timed run tonight died that way. `main.rs` now
+treats SIGTERM like Ctrl-C (`shutdown_requested`, and the watchdog arms both), which is right
+regardless of whether it is what the unit is reacting to.
+
+To test: restart the bike, run once and let it end **gracefully**, then run again without touching
+the bike. If the second run connects, the abrupt kill was the cause.
+
+## Why the unit shows no CarPlay icon for us: the record has no `0x1101` (2026-08-14)
+
+`logs/cfmoto-to-iphone.pklg`, an iPhone-side PacketLogger capture of CarPlay being started from the
+bike repeatedly without a restart. `btmon -r` reads it directly. The bike's probe is a fixed
+sequence, repeated once per initiation - 26 service searches across the capture, 9 for the iAP UUID
+and 16 for Serial Port:
+
+```
+tid 5358  ->  00000000-deca-fade-deca-deafdecacafe
+tid 5359  ->  Serial Port (0x1101)
+tid 5360  ->  Serial Port (0x1101)
+tid 5361  ->  00000000-deca-fade-deca-deafdecacafe
+...
+```
+
+The iPhone answers **all** of them from one record, because its iAP record declares SPP in its
+profile descriptor list:
+
+| attribute | iPhone's iAP record |
+| --- | --- |
+| `0x0001` Service Class ID List | `...decacafe` |
+| `0x0004` Protocol Descriptor List | L2CAP + RFCOMM channel 1 |
+| `0x0005` Browse Group List | Public Browse Root |
+| `0x0006` Language Base | en / fr / de / ja |
+| `0x0008` Service Availability | `0xff` |
+| **`0x0009` Profile Descriptor List** | **Serial Port (0x1101), 0x0102** |
+| `0x0100` Service Name | `Wireless iAP` |
+
+**Our record carries none of that.** "Serial Port" appears 32 times in the iPhone capture and
+**zero** times in ours - BlueZ's default record for an external profile is the service class, the
+RFCOMM channel and little else. So a search for `0x1101` finds nothing on us however correct our
+service class UUID is, and the unit never concludes we do CarPlay. No icon, no probe, no session.
+
+This also explains the shape of what the unit does to us: it browses, reads attribute `0x0001` off
+each record, and stops. It never sends us the `0x1101` search it sends an iPhone, and never the
+targeted `...decacafe` search either.
+
+**The icon is a cached verdict, not a live probe** - the unit shows it for the iPhone even with the
+phone out of range. So the sequence above is what CarPlay *initiation* looks like once a device is
+already classified; the classification itself happened earlier and stuck. Two consequences:
+
+- fixing the record is necessary but may not be sufficient - the unit is still holding "carjack does
+  not do CarPlay" from whenever it last decided, and has to be made to re-evaluate;
+- the decision point is most likely the bond, when a unit browses a new device in full. carjack's
+  profiles only exist while it runs, so any pairing done with carjack stopped taught the unit the
+  wrong thing.
+
+Not the device identity: we already present as Apple in the Device ID record - `Vendor: Apple, Inc.
+(76)`, product `0x761d`, version `26.5.0`.
+
+**The profile API cannot express this record**, so the manual XML is not laziness. BlueZ's
+`get_generic_record()` fills attribute `0x0001` from `svc_str` (`Service` *or* the profile UUID -
+it replaces, never both) and attribute `0x0009` from `uuid_str` (the profile UUID), emitted only
+when `Version` is set. So `Version = 0x0102` yields a descriptor carrying our 128-bit UUID and a
+`0x1101` search still misses, while `Service = 0x1101` puts SPP in the service class list and the
+unit's `...decacafe` search misses instead. The iPhone's record needs both at once. Registering a
+second, standalone SPP profile does not help either: the unit's `0x1101` search must resolve to the
+iAP record itself - its answer to `tid 5360` is a record whose service class is the 128-bit UUID.
+
+`device_profile()` now supplies `service_record` by hand - the iPhone's record, field for field.
+The function carjack used to have for this (`generate_iap2_sdp`, commented out and then deleted in
+`0bfcf85`) built the same shape, `0x1101`/`0x0102` included; deleting it is when this was lost.
+
+### Confirmed on the wire: the record works, and we then failed to answer
+
+A re-bond with the new record produced the furthest the bike has ever got. It walked our iAP record
+attribute by attribute and got everything an iPhone gives it:
+
+```
+0x0001 -> 00000000-deca-fade-deca-deafdecacafe
+0x0004 -> L2CAP + RFCOMM
+0x0009 -> Serial Port (0x1101), 0x0102
+0x0100 -> "Wireless iAP"
+```
+
+10 ms later it opened PSM 3, then RFCOMM **dlci 0x02 - channel 1, our iAP channel** - and began
+sending iAP2 SYN:
+
+```
+BIKE->us  ff 55 02 00 ee 10    x50, once per second
+us->BIKE  (nothing)
+```
+
+**Fifty SYNs, zero replies.** So the SDP record is settled: the unit classifies us, opens the
+channel, and speaks. The failure moved to our side.
+
+The cause was ordering. `wireless_carplay` awaited `find_target_device` *before* anything read the
+profile stream, and with the bond just removed that falls into discovery for up to `DISCOVERY_WAIT`
+(60 s). BlueZ answered the SABM - the profile is registered from `IapHost::start`, so the channel
+opens - but nothing was polling for the `ConnectRequest`, so it was neither accepted nor rejected.
+The unit talked into a socket no one was reading, for the whole discovery window, on every retry.
+
+Resolution now runs in a background task feeding a `watch<Option<Device>>`: the accept loop arms
+immediately and filters incoming requests against the configured *selector* rather than a resolved
+address, while paging and the MAC hand-off wait on the resolved device. Confirmed by log order -
+`Waiting for iAP2 connection requests` at 12.227, `Waiting for the configured head unit` at 12.232.
+
+The bond is currently removed, so the next test is: start carjack, then pair from the unit.
+
+### The unit asks nothing else, and it decides 240 ms after bonding
+
+The same capture contains the bond, so the whole classification is visible:
+
+```
+95.672 - 96.040   phone browses the UNIT (all attributes, PnP, SDP server class)
+96.144 - 99.613   pairing: IO capability, user confirmation, link key, auth complete
+99.850            UNIT -> phone: search 00000000-deca-fade-deca-deafdecacafe
+99.904 / 99.929   UNIT -> phone: search Serial Port (0x1101), twice
+100.162           UNIT -> phone: search A/V Remote Control Target (0x110c)
+102.094 ...       the same three-query probe again, per initiation
+123.123           iAP2 SYN (ff 55 02 00 ee 10) - the session finally starts
+```
+
+**Those three UUIDs are the only things the unit ever asks the phone for**, across the entire
+capture. It never browses the phone's full service list, never reads its PnP/Device ID record,
+sends no Apple HFP extension (no `AT+XAPL`, no `AT+IPHONEACCEV` - only stock HF commands), and no
+vendor-specific exchange. Nothing the phone volunteers is involved either: the first probe lands
+**240 ms after the link key**, and iAP2 does not start for another 23 seconds, so no in-session
+identification can be the source.
+
+So the memorised fact is built from SDP alone, at bond time, and the only query of the three we
+cannot answer is `0x1101`. That also fixes when the fix has to be in place: the record must be
+registered **before the unit bonds**, because that is the moment it decides.
+
 ## Answering `ForceKeyFrame` properly (2026-08-13)
 
 A request from the accessory now moves three things instead of one:

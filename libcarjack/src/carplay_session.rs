@@ -524,8 +524,12 @@ impl<S: Stream> CarplaySession<S> {
                 // when the accessory asks (`RequestAppLaunch`/`StatusExternalAccessoryProtocolSession`).
                 if !matches!(self.phase, SessionPhase::EaReady) {
                     let (secs, offset_minutes, dst) = local_time();
-                    self.send_ctrl(ControlMessage::device_time_update(secs, offset_minutes, dst))
-                        .await?;
+                    self.send_ctrl(ControlMessage::device_time_update(
+                        secs,
+                        offset_minutes,
+                        dst,
+                    ))
+                    .await?;
                     self.send_ctrl(ControlMessage::device_language_update("en"))
                         .await?;
                     self.send_ctrl(ControlMessage::wireless_carplay_update(true))

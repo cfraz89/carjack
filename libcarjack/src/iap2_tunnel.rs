@@ -13,13 +13,13 @@
 
 use catplay_carplay::carplay_tx::{AirPlayTransmitter, AirPlayTransmitterProxyRef};
 use catplay_carplay::msg::{Command, CommandIApSendMessage};
-use iap2_proto::iap2::Iap2;
 use deku::prelude::*;
+use iap2_proto::iap2::Iap2;
 use iap2_proto::ops::control::ControlMessage;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
-use std::sync::Arc;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{mpsc, Notify};
 
 /// How long catplay may take to hand an outgoing command to the accessory before we give up on it.
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
