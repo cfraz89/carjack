@@ -15,7 +15,6 @@ use iap2_proto::{error::Iap2Error, iap2::Iap2};
 use libcarjack::{carplay, sdp::iap::iap_service_record};
 use libcarjack::{
     carplay_session::{DeviceIdentity, WifiCredentials},
-    sdp::iap_service_record,
     uuid::{CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID},
 };
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};

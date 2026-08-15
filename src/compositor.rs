@@ -368,22 +368,17 @@ impl State {
             drop(fb);
         }
 
-        // Tell clients to draw their next frame, then flush.
-        let now = self.start_time.elapsed();
-        let output = self.output.clone();
-        self.space.elements().for_each(|window| {
-            window.send_frame(&output, now, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            })
-        });
-        self.space.refresh();
-        self.popups.cleanup();
-        let _ = self.display_handle.flush_clients();
+        self.finish_frame();
     }
 
     /// A tick with nothing to publish: clients still get their frame callbacks, so one that wants
     /// to animate is never left waiting on us.
     fn idle_tick(&mut self) {
+        self.finish_frame();
+    }
+
+    /// Tell clients to draw their next frame, then flush - the shared tail of a render tick.
+    fn finish_frame(&mut self) {
         let now = self.start_time.elapsed();
         let output = self.output.clone();
         self.space.elements().for_each(|window| {

@@ -280,22 +280,7 @@ impl Config {
     /// there - else all-defaults), then apply overrides: environment variables, then CLI flags
     /// (highest precedence).
     pub fn load(cli: &Cli) -> Result<Config> {
-        let path = match &cli.config {
-            Some(p) => {
-                if !p.exists() {
-                    return Err(eyre!("config file {} does not exist", p.display()));
-                }
-                Some(p.clone())
-            }
-            None => xdg::BaseDirectories::with_prefix("carjack")
-                .get_config_home()
-                .map(|home| home.join("config.toml"))
-                .filter(|p| p.exists())
-                .or_else(|| {
-                    let etc = PathBuf::from("/etc/carjack/config.toml");
-                    etc.exists().then_some(etc)
-                }),
-        };
+        let path = config_file(cli)?;
 
         let mut builder = config::Config::builder();
         if let Some(p) = &path {
@@ -314,43 +299,7 @@ impl Config {
             .try_deserialize()
             .map_err(|e| eyre!("parse config: {e}"))?;
 
-        // CLI flag overrides (highest precedence).
-        if let Some(v) = &cli.source {
-            cfg.source = Source::parse(v)?;
-        }
-        if let Some(v) = &cli.drm_device {
-            cfg.graphics.drm_device = v.clone();
-        }
-        if let Some(v) = &cli.zerocopy {
-            cfg.graphics.zerocopy = ZeroCopyMode::parse(v)?;
-        }
-        if let Some(v) = cli.bitrate {
-            cfg.graphics.bitrate = v;
-        }
-        if let Some(v) = cli.width {
-            cfg.display.width = v;
-        }
-        if let Some(v) = cli.height {
-            cfg.display.height = v;
-        }
-        if let Some(v) = cli.fps {
-            cfg.display.fps = v;
-        }
-        if let Some(v) = &cli.command {
-            cfg.app.command = v.clone();
-        }
-        if let Some(v) = cli.resizable {
-            cfg.app.resizable = v;
-        }
-        if let Some(v) = &cli.bt_device {
-            cfg.bluetooth.device = v.clone();
-        }
-        if let Some(v) = &cli.wifi_backend {
-            cfg.wifi.backend = Some(WifiBackendKind::parse(v)?);
-        }
-        if cfg.graphics.bitrate == 0 {
-            return Err(eyre!("[graphics] bitrate must be greater than 0 (kbit/s)"));
-        }
+        apply_cli_overrides(&mut cfg, cli)?;
         Ok(cfg)
     }
 
@@ -364,6 +313,69 @@ impl Config {
         let device = self.bluetooth.device.trim();
         (!device.is_empty()).then_some(device)
     }
+}
+
+/// The config file to read: an explicit `--config` (which must exist), else the user's
+/// `~/.config/carjack/config.toml`, else `/etc/carjack/config.toml` (the systemd service's `HOME`
+/// has no `.config`, so it lands there), else none (all defaults).
+fn config_file(cli: &Cli) -> Result<Option<PathBuf>> {
+    match &cli.config {
+        Some(p) => {
+            if !p.exists() {
+                return Err(eyre!("config file {} does not exist", p.display()));
+            }
+            Ok(Some(p.clone()))
+        }
+        None => Ok(xdg::BaseDirectories::with_prefix("carjack")
+            .get_config_home()
+            .map(|home| home.join("config.toml"))
+            .filter(|p| p.exists())
+            .or_else(|| {
+                let etc = PathBuf::from("/etc/carjack/config.toml");
+                etc.exists().then_some(etc)
+            })),
+    }
+}
+
+/// Apply `--*` flags over a loaded config, highest precedence of the override chain.
+fn apply_cli_overrides(cfg: &mut Config, cli: &Cli) -> Result<()> {
+    if let Some(v) = &cli.source {
+        cfg.source = Source::parse(v)?;
+    }
+    if let Some(v) = &cli.drm_device {
+        cfg.graphics.drm_device = v.clone();
+    }
+    if let Some(v) = &cli.zerocopy {
+        cfg.graphics.zerocopy = ZeroCopyMode::parse(v)?;
+    }
+    if let Some(v) = cli.bitrate {
+        cfg.graphics.bitrate = v;
+    }
+    if let Some(v) = cli.width {
+        cfg.display.width = v;
+    }
+    if let Some(v) = cli.height {
+        cfg.display.height = v;
+    }
+    if let Some(v) = cli.fps {
+        cfg.display.fps = v;
+    }
+    if let Some(v) = &cli.command {
+        cfg.app.command = v.clone();
+    }
+    if let Some(v) = cli.resizable {
+        cfg.app.resizable = v;
+    }
+    if let Some(v) = &cli.bt_device {
+        cfg.bluetooth.device = v.clone();
+    }
+    if let Some(v) = &cli.wifi_backend {
+        cfg.wifi.backend = Some(WifiBackendKind::parse(v)?);
+    }
+    if cfg.graphics.bitrate == 0 {
+        return Err(eyre!("[graphics] bitrate must be greater than 0 (kbit/s)"));
+    }
+    Ok(())
 }
 
 /// The kernel driver of the GPU that renders the desktop - the driver of the card with a connected
