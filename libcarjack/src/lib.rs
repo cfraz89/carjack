@@ -1,9 +1,8 @@
 pub mod airplay;
 pub mod bluetooth;
-pub mod carplay;
 pub mod carplay_ctrl;
 pub mod carplay_peripheral;
-pub mod carplay_session;
+pub mod carplay_init;
 pub mod iap2_tunnel;
 pub mod sdp;
 pub mod usb_schema;

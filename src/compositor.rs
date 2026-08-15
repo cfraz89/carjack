@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use eyre::{Result, eyre};
-use libcarjack::carplay_session::{TouchEvent, TouchEventType};
+use libcarjack::carplay_init::{TouchEvent, TouchEventType};
 use smithay::backend::allocator::dmabuf::{AsDmabuf, Dmabuf};
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::{Allocator, Fourcc};

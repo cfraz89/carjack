@@ -7,7 +7,7 @@ use ashpd::desktop::{
     screencast::{Screencast, SelectSourcesOptions, SourceType},
 };
 use eyre::{Result, eyre};
-use libcarjack::carplay_session::{TouchEvent, TouchEventType};
+use libcarjack::carplay_init::{TouchEvent, TouchEventType};
 
 use crate::libei::EiTouch;
 use tracing::debug;
@@ -454,7 +454,7 @@ mod tests {
     /// Inject a real tap and confirm libei *accepted* it - a protocol violation makes the EIS
     /// implementation hang up, closing the command channel and failing the next send.
     async fn inject_tap(stream: &super::RemoteDesktopStream) -> eyre::Result<()> {
-        use libcarjack::carplay_session::TouchEventType::{Down, Up};
+        use libcarjack::carplay_init::TouchEventType::{Down, Up};
         let accessory_size = (1080u32, 600u32);
         let tap = |event_type| TouchEvent {
             event_type,

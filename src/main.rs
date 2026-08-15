@@ -204,8 +204,7 @@ async fn run_desktop(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
 
     let host = Arc::new(IapHost::start(wifi.as_ref()).await?);
 
-    // ScreenCast + RemoteDesktop access, asked for once - a consent dialog appears on first run
-    // (`PersistMode::Application` remembers it after). Persists across CarPlay reconnects.
+    // ScreenCast + RemoteDesktop access, asked once (a consent dialog on first run).
     let rd = portal::start_remote_desktop().await?;
     tracing::info!("Desktop source ready (PipeWire node {})", rd.node_id());
     let zerocopy = config.graphics.zerocopy;

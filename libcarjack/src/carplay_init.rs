@@ -17,11 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-/// Wall clock for `DeviceTimeUpdate`: seconds since the Unix epoch, minutes east of UTC, and the
-/// DST flag - the three parameters an iPhone sends. The offset is signed on the wire (16-bit two's
-/// complement), so zones west of UTC wrap rather than saturate. The DST flag is sent as 0: the
-/// reference capture has 0 in a zone that does not observe DST, so its encoding elsewhere is a
-/// guess we have no capture for.
+/// Epoch seconds, minutes east of UTC, DST flag (0; nothing else observed).
 fn local_time() -> (u64, u16, u8) {
     let now = chrono::Local::now();
     let secs = now.timestamp().max(0) as u64;
@@ -57,16 +53,14 @@ pub struct TouchEvent {
     pub y: f64,
 }
 
-/// Apple auth coprocessor 3.0 signs a 32-byte SHA-256 digest; 2.0C signs a 20-byte SHA-1 one.
+/// Auth coprocessor 3.0 (ECC) signs a 32-byte SHA-256 digest; 2.0C (RSA) a 20-byte SHA-1 one.
 const SHA256_CHALLENGE_LEN: usize = 32;
 const SHA1_CHALLENGE_LEN: usize = 20;
 
-/// OID prefix 1.2.840.10045 (ansi-X9-62, elliptic curve), as it appears in a DER OID body.
+/// OID prefix 1.2.840.10045 (ansi-X9-62, elliptic curve), as encoded in a DER OID body.
 const OID_ANSI_X962_EC: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d];
 
-/// Pick the challenge digest length from the accessory's certificate.
-///
-/// Need to match challenge length with certificate type otherwise the connection conks out
+/// The challenge length must match the certificate's key type, or the link dies.
 fn challenge_len_for_certificate(certificate: &[u8]) -> usize {
     if certificate
         .windows(OID_ANSI_X962_EC.len())
@@ -86,32 +80,24 @@ pub struct WifiCredentials {
     pub ssid: String,
     pub passphrase: Option<String>,
     pub bssid: Option<String>,
-    /// Where to reach the accessory's AirPlay receiver once we are on its AP, when it tells us
-    /// (0x4301 carries an address and port; the older flat 0x5703 does not).
-    ///
-    /// Worth using rather than discovering: the CFMOTO unit hands this over and then simply
-    /// waits - it never browses mDNS for our `_carplay-ctrl._tcp` and never sends the
-    /// `ctrl-int/1/connect` invite, so whoever waits for the other to speak first waits
-    /// forever. A link-local address here still needs a scope id, which only the caller (who
-    /// knows the interface) can attach.
+    /// AirPlay receiver for when we're on its AP; 0x4301 names one, the flat 0x5703 dialect
+    /// doesn't. Handed over rather than discovered: some accessories never browse for ours. Missing
+    /// the interface's scope id, which only the caller can attach.
     pub airplay: Option<SocketAddr>,
-    /// The accessory's HomeKit pairing id, when it names one beside the address - the same value
-    /// an invite carries as `pi`, and the only route to one on a unit that never invites. Only
-    /// selects `/pair-verify` once we have actually paired with it; see `airplay::connect_airplay`.
+    /// HomeKit pairing id when named; the invitation equivalent, and the only route to
+    /// pair-verify with an accessory that never invites.
     pub pairing_id: Option<Uuid>,
 }
 
 /// Port to reach AirPlay on when the accessory named an address but no port.
 const DEFAULT_AIRPLAY_PORT: u16 = 7000;
 
-/// Who we tell the accessory we are, once authentication has succeeded.
+/// Who we tell the accessory we are: name for `DeviceInformationUpdate` (0x4E09), the Bluetooth
+/// transport id for WiFi-config requests, and the MAC that joins its AP.
 #[derive(Debug, Clone)]
 pub struct DeviceIdentity {
-    /// Sent as `DeviceInformationUpdate` (0x4E09); an iPhone sends its device name here.
     pub name: String,
-    /// Identifies our Bluetooth transport in `RequestAccessoryWiFiConfigurationInformation`.
     pub transport_identifier: String,
-    /// The station address that will join the accessory's AP.
     pub wifi_mac: String,
 }
 
@@ -121,25 +107,25 @@ enum SessionPhase {
     EaReady,
 }
 
-pub struct CarplaySession<S: Stream> {
+/// The iAP2 side of wireless CarPlay bring-up: identify, authenticate, exchange WiFi credentials,
+/// open the EA session, then hold the link (keepalives, control traffic) until handover.
+pub struct CarplayInit<S: Stream> {
     pub iap2: Iap2<S>,
     pub wifi_tx: mpsc::Sender<WifiCredentials>,
     identity: DeviceIdentity,
     phase: SessionPhase,
     ea_session_id: u8,
-    /// `MessagesReceivedFromDevice` from the accessory's IdentificationInformation. Empty
-    /// when it didn't declare one, in which case we fall back to the older dialect.
+    /// Messages the accessory declared it receives; empty means fall back to the older dialect.
     accepted_messages: Vec<u16>,
-    /// Length of the authentication challenge we sent, so a rejection names it.
+    /// How long a shot we sent, so a rejection can name it.
     challenge_len: usize,
     ready_tx: Option<oneshot::Sender<()>>,
-    /// Fired once the handover is done (WiFi associated, or the accessory said `disableBluetooth`).
-    /// Nothing is sent on it - an iPhone keeps acknowledging and lets the accessory drop the link -
-    /// it only marks the point after which losing the link is the expected ending, not a fault.
+    /// Fired once handover is done: the point after which a link going away is the expected
+    /// ending rather than a fault.
     handover: CancellationToken,
 }
 
-impl<S: Stream> CarplaySession<S> {
+impl<S: Stream> CarplayInit<S> {
     pub fn new(
         iap2: Iap2<S>,
         wifi_tx: mpsc::Sender<WifiCredentials>,
@@ -147,7 +133,7 @@ impl<S: Stream> CarplaySession<S> {
         identity: DeviceIdentity,
         handover: CancellationToken,
     ) -> Self {
-        CarplaySession {
+        CarplayInit {
             iap2,
             wifi_tx,
             identity,
@@ -166,10 +152,8 @@ impl<S: Stream> CarplaySession<S> {
 
     pub async fn run(&mut self) -> Result<(), Iap2Error> {
         let result = self.run_inner().await;
-        // Say goodbye properly. Without this the accessory sits waiting out its own retransmit
-        // timeout before it will re-SYN, which shows up as a slow reconnect. Skipped when the
-        // accessory is the one that reset - echoing it back would be noise - and past the
-        // handover, where the link is already gone and a phone would not have sent one anyway.
+        // A proper goodbye, or the accessory waits out its retransmit timeout before it will
+        // re-SYN. Skipped when it reset or after handover, where the link is already gone.
         if !matches!(&result, Err(Iap2Error::LinkReset)) && !self.handover.is_cancelled() {
             let _ = self.iap2.send_reset().await;
         }
@@ -185,22 +169,19 @@ impl<S: Stream> CarplaySession<S> {
                 packet = self.iap2.receive_packet() => {
                     let packet = match packet {
                         Ok(packet) => packet,
-                        // Past the handover the link going away *is* the ending, however it
-                        // goes: the AUTO BOX drops the RFCOMM channel within a millisecond of
-                        // AirPlay connecting (an ECONNRESET, not an iAP2 reset), the bike a few
-                        // seconds later. Reporting it made a normal teardown read like a fault.
+                        // After handover the link going away *is* the ending, however it goes - the accessory
+                        // drops the RFCOMM channel when AirPlay connects (ECONNRESET, not an iAP2
+                        // reset). Reporting it would make a normal teardown look like a fault.
                         Err(e) if handed_over => {
                             tracing::info!("Accessory closed the iAP2 link after the handover ({e})");
                             return Ok(());
                         }
                         Err(e) => return Err(e),
                     };
-                    // `receive_packet` has already absorbed the link-layer traffic - bare
-                    // acknowledgements, duplicates, extended acks - and turned a reset into an
-                    // error, so anything arriving here is session data.
+                    // `receive_packet` absorbed the link-layer traffic (acknowledgements, resets);
+                    // what's left here is all session data.
                     if packet.header.control.syn {
-                        // The accessory wants to renegotiate the link. That cannot be done
-                        // underneath a running session, so fold it back to a full restart.
+                        // Renegotiation can't happen under a running session; fold back to a restart.
                         tracing::warn!("Accessory re-sent SYN mid-session; restarting");
                         return Err(Iap2Error::LinkReset);
                     }
@@ -208,16 +189,13 @@ impl<S: Stream> CarplaySession<S> {
                         tracing::warn!("Dispatch error: {e}");
                     }
                 }
-                // Retransmits, the cumulative-ack timer and the idle keepalive, all paced by
-                // what the SYN negotiated. Only the *wait* goes in the `select!` - the work
-                // itself transmits, and must not be cancelled half-done.
+                // Keepalives paced by the SYN negotiation; only the wait lives in the `select!`, so
+                // the work isn't cancelled half-done.
                 _ = self.iap2.wait_for_link_work() => {
                     self.iap2.maintain().await?;
                 }
-                // Handover reached. Deliberately no action: an iPhone stops initiating here but
-                // stays on the link acknowledging until the accessory drops it, so all this does is
-                // stop that drop being reported as a failure. The arm disables itself, since a
-                // cancelled token is ready forever.
+                // Only stops the post-handover drop being reported as a failure; the arm disables
+                // itself, since a cancelled token is ready forever.
                 _ = self.handover.cancelled(), if !handed_over => {
                     handed_over = true;
                     tracing::info!("Handover complete; the accessory drops Bluetooth from here");
@@ -231,8 +209,7 @@ impl<S: Stream> CarplaySession<S> {
         self.send_ctrl(ControlMessage::start_identification()).await
     }
 
-    /// Send an authentication challenge of `len` bytes, remembering the size so a rejection
-    /// can name it. Pick `len` with [`challenge_len_for_certificate`].
+    /// Send a challenge of `len` bytes and remember the size so a rejection can name it.
     async fn send_challenge(&mut self, len: usize) -> Result<(), Iap2Error> {
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -310,9 +287,7 @@ impl<S: Stream> CarplaySession<S> {
                     })
                     .unwrap_or_else(|| String::from("Unknown"));
                 tracing::info!("Accessory identified: {}", name);
-                // Head units disagree about which WiFi-config dialect they speak, so take the
-                // accessory at its word instead of guessing. Absent the declaration we keep the
-                // 0x5702 behaviour that the AUTO BOX bench unit is known to answer.
+                // The WiFi-config dialect is per-accessory; empty list means the flat 0x5702 behaviour.
                 self.accepted_messages = msg
                     .parameters
                     .get_param::<Vec<u16>>(ParameterId::MESSAGES_RECEIVED_FROM_DEVICE)
@@ -351,10 +326,8 @@ impl<S: Stream> CarplaySession<S> {
                 self.send_challenge(len).await?;
             }
             ControlMessageId::AuthenticationResponse => {
-                // An accessory that could not sign our challenge answers with an empty
-                // AuthenticationResponse rather than AuthenticationFailed. Acknowledging that
-                // with AuthenticationSucceeded leaves the accessory unauthenticated and
-                // silent, which looks exactly like a hang - so check before proceeding.
+                // An empty reply means the accessory couldn't sign; acknowledging it would leave it
+                // unauthenticated and silent - looks exactly like a hang - so bail.
                 let signature = msg
                     .parameters
                     .get_param::<Vec<u8>>(ParameterId::AUTH_DATA)
@@ -373,16 +346,13 @@ impl<S: Stream> CarplaySession<S> {
                 );
                 self.send_ctrl(ControlMessage::authentication_succeeded())
                     .await?;
-                // Only the CFMOTO-style units want a DeviceInformationUpdate here; sending one
-                // to a unit that never asked for it is the sort of thing that gets a session
-                // dropped, so gate it on the declared list.
+                // Only declared accessories want a DeviceInformationUpdate; unsolicited, it drops the session.
                 if self.accepts(MSG_DEVICE_INFORMATION_UPDATE) {
                     self.send_ctrl(ControlMessage::device_information_update(
                         &self.identity.name,
                     ))
                     .await?;
                 }
-                // Ask for the AP credentials in whichever dialect this accessory speaks.
                 if self.accepts(MSG_REQUEST_WIFI_CONFIG_GROUPED) {
                     tracing::debug!("Requesting WiFi config (0x4300, grouped)");
                     self.send_ctrl(ControlMessage::request_accessory_wifi_config_grouped(
@@ -412,9 +382,7 @@ impl<S: Stream> CarplaySession<S> {
                 tracing::info!("Started EA session");
                 self.phase = SessionPhase::EaReady;
                 if let Some(tx) = self.ready_tx.take() {
-                    // The identification/auth/wifi-config exchange is finished, so the link is
-                    // about to go quiet for the whole AirPlay phase - start the keepalives that
-                    // were held back to avoid interleaving packets into that exchange.
+                    // Exchange over; the link goes quiet for AirPlay, so keepalives start now.
                     self.iap2.set_keepalive_enabled(true).await;
                     let _ = tx.send(());
                 }
@@ -425,8 +393,8 @@ impl<S: Stream> CarplaySession<S> {
                 let grouped = msg.message_id
                     == ControlMessageId::AccessoryWiFiConfigurationInformationGrouped;
                 let creds = if grouped {
-                    // 0x4301: credentials nested in the group at top-level parameter 1, with
-                    // the accessory's MAC, AirPlay port and firmware version beside it.
+                    // 0x4301: credentials nested at top-level parameter 1, the accessory's MAC,
+                    // AirPlay port and firmware version beside it.
                     let group = msg
                         .parameters
                         .get_param::<Vec<Parameter>>(ParameterId::WIFI_CONFIG_GROUP)
@@ -436,9 +404,8 @@ impl<S: Stream> CarplaySession<S> {
                         .get_param::<u32>(ParameterId::WIFI_CONFIG_PORT)
                         .and_then(|p| u16::try_from(p).ok())
                         .unwrap_or(DEFAULT_AIRPLAY_PORT);
-                    // The address lives inside the group, as a text link-local (e.g.
-                    // "fe80::9083:8eff:feef:a7d3"). Parsing it here keeps the wire format in
-                    // one place; the scope id gets attached once we know the interface.
+                    // The address is a text link-local inside the group; scope id is attached once the
+                    // caller knows the interface.
                     let airplay = group
                         .get_param::<String>(ParameterId::WIFI_CONFIG_IPV6)
                         .and_then(|a| match a.parse::<IpAddr>() {
@@ -480,17 +447,15 @@ impl<S: Stream> CarplaySession<S> {
                             pairing_id,
                         })
                 } else {
-                    // 0x5703: flat parameters. Parameters 3 and 4 are a single byte each and
-                    // are not a BSSID (the AUTO BOX sends 0x02 and 0x24); nothing downstream
-                    // uses one, so don't invent it.
+                    // 0x5703: flat. Parameters 3/4 are one byte each and not a BSSID; nothing
+                    // downstream consumes one, so don't invent it.
                     msg.parameters
                         .get_param::<String>(ParameterId::SSID)
                         .map(|ssid| WifiCredentials {
                             ssid,
                             passphrase: msg.parameters.get_param::<String>(ParameterId::PASSPHRASE),
                             bssid: None,
-                            // This dialect carries no address, so the AUTO BOX path keeps
-                            // discovering the receiver over mDNS exactly as before.
+                            // No address in this dialect; the receiver gets discovered over mDNS.
                             airplay: None,
                             pairing_id: None,
                         })
@@ -515,13 +480,9 @@ impl<S: Stream> CarplaySession<S> {
                         );
                     }
                 }
-                // What an iPhone sends the moment it has the configuration, in this order
-                // (`iphone-first-pair.pklg` t=123.544-124.605). Only the first time: the accessory
-                // repeats its WiFi configuration every ~3s until we show up on its AP.
-                //
-                // Note what is *not* here: `StartExternalAccessoryProtocolSession`. carjack used to
-                // send one unprompted, which no iPhone ever does - the EA session is started only
-                // when the accessory asks (`RequestAppLaunch`/`StatusExternalAccessoryProtocolSession`).
+                // Eager handshake once it has the configuration; only the first time. Nothing else goes here -
+                // we don't start the EA session unprompted; that happens only when the accessory
+                // asks (`RequestAppLaunch`/`StatusExternalAccessoryProtocolSession`).
                 if !matches!(self.phase, SessionPhase::EaReady) {
                     let (secs, offset_minutes, dst) = local_time();
                     self.send_ctrl(ControlMessage::device_time_update(
@@ -538,9 +499,7 @@ impl<S: Stream> CarplaySession<S> {
                     self.phase = SessionPhase::EaReady;
                 }
                 if let Some(tx) = self.ready_tx.take() {
-                    // The identification/auth/wifi-config exchange is finished, so the link is
-                    // about to go quiet for the whole AirPlay phase - start the keepalives that
-                    // were held back to avoid interleaving packets into that exchange.
+                    // Exchange over; the link goes quiet for AirPlay, so keepalives start now.
                     self.iap2.set_keepalive_enabled(true).await;
                     let _ = tx.send(());
                 }
@@ -600,9 +559,8 @@ impl<S: Stream> CarplaySession<S> {
     }
 
     async fn handle_ea(&mut self, payload: &[u8]) -> Result<(), Iap2Error> {
-        // Receive EA (External Accessory) session frames. Touch used to be decoded here, but it
-        // actually arrives over the AirPlay HID channel (see libcarjack::airplay), so these
-        // frames are currently just parsed and acknowledged.
+        // EA frames once carried touch, but touch actually arrives over the AirPlay HID channel
+        // (see libcarjack::airplay); these are now parsed and acknowledged, nothing more.
         let _ = EaFrame::from_bytes(payload);
         Ok(())
     }
@@ -619,10 +577,8 @@ mod tests {
             .collect()
     }
 
-    /// First 142 bytes of the AUTO BOX bench unit's AuthenticationCertificate (0xAA01),
-    /// captured in `bench_1.pcapng` frame 386. RSA-1024 / `sha1WithRSAEncryption`, issued by
-    /// the "Apple iPod Accessories Certification Authority" - an auth coprocessor 2.0C.
-    const BENCH_CERTIFICATE_PREFIX: &str = concat!(
+    /// A captured RSA-1024 / `sha1WithRSAEncryption` certificate prefix (auth coprocessor 2.0C).
+    const RSA_CERTIFICATE_PREFIX: &str = concat!(
         "3082038806092a864886f70d010702a0820379308203750201013100300b",
         "06092a864886f70d010701a082035d3082035930820241a003020102020f2222",
         "aa180511aa06aa5392aa151525300d06092a864886f70d010105050030818331",
@@ -630,10 +586,8 @@ mod tests {
         "2e31263024060355040b131d4170706c",
     );
 
-    /// The same prefix of the CFMOTO bike's certificate, from `cfmoto_7.pcapng` frame 829.
-    /// ECC / `ecdsa-with-SHA256`, issued by "Apple Accessories Certification Authority -
-    /// 00000002" - an auth coprocessor 3.0.
-    const BIKE_CERTIFICATE_PREFIX: &str = concat!(
+    /// A captured ECC / `ecdsa-with-SHA256` certificate prefix (auth coprocessor 3.0).
+    const ECC_CERTIFICATE_PREFIX: &str = concat!(
         "3082025d06092a864886f70d010702a082024e3082024a0201013100300b",
         "06092a864886f70d010701a08202303082022c308201d1a003020102021024fb",
         "0606902e707205d314b0059a193d300a06082a8648ce3d040302308189310b30",
@@ -644,17 +598,16 @@ mod tests {
     #[test]
     fn challenge_length_follows_certificate_key_type() {
         assert_eq!(
-            challenge_len_for_certificate(&unhex(BENCH_CERTIFICATE_PREFIX)),
+            challenge_len_for_certificate(&unhex(RSA_CERTIFICATE_PREFIX)),
             SHA1_CHALLENGE_LEN
         );
         assert_eq!(
-            challenge_len_for_certificate(&unhex(BIKE_CERTIFICATE_PREFIX)),
+            challenge_len_for_certificate(&unhex(ECC_CERTIFICATE_PREFIX)),
             SHA256_CHALLENGE_LEN
         );
     }
 
-    /// A unit whose certificate we failed to read at all must not get the length that hangs
-    /// the older hardware.
+    /// A certificate we failed to read must not get the length that hangs the older hardware.
     #[test]
     fn missing_certificate_falls_back_to_the_shorter_challenge() {
         assert_eq!(challenge_len_for_certificate(&[]), SHA1_CHALLENGE_LEN);

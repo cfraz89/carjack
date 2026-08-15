@@ -17,7 +17,7 @@ use ashpd::desktop::{
 };
 use eyre::{Result, eyre};
 use futures::StreamExt;
-use libcarjack::carplay_session::{TouchEvent, TouchEventType};
+use libcarjack::carplay_init::{TouchEvent, TouchEventType};
 use reis::event::{DeviceCapability, EiEvent};
 use reis::{ei, event};
 use tokio::sync::{mpsc, oneshot};

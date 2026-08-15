@@ -1,9 +1,7 @@
 //! One CarPlay connection: bring the Bluetooth -> WiFi -> AirPlay handshake up, then stream a
-//! source to the accessory and feed its touches back for the life of that connection. The two
-//! entry points [`run_session`] (carjack's own compositor, `source = app`) and
-//! [`run_desktop_session`] (the user's desktop via portal, `source = desktop`) share the handshake
-//! in [`establish_carplay`] and the streaming pump in [`pump_session`]; the caller re-invokes the
-//! entry points on failure, fresh from Bluetooth.
+//! source to the accessory and feed its touches back. [`run_session`] (carjack's own compositor)
+//! and [`run_desktop_session`] (the user's desktop via portal) share the handshake in
+//! [`establish_carplay`] and the pump in [`pump_session`]; the caller re-runs them on failure.
 
 use std::ffi::OsString;
 use std::future::Future;
@@ -17,7 +15,7 @@ use backon::{ConstantBuilder, Retryable};
 use eyre::{Result, eyre};
 use libcarjack::airplay::{AirPlayConnection, EncodedFrame, VideoCodec};
 use libcarjack::carplay_ctrl::wait_for_carplay_ctrl_probe;
-use libcarjack::carplay_session::{TouchEvent, WifiCredentials};
+use libcarjack::carplay_init::{TouchEvent, WifiCredentials};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -29,10 +27,10 @@ use carjack::encode::{self, Bitrate, EncodeBackend};
 
 use crate::portal::RemoteDesktopStream;
 use crate::wifi_connect::{AccessoryWifi, WifiBackend};
-use crate::wireless::{IapHost, wireless_carplay};
+use crate::wireless::{IapHost, WifiOffhand, wireless_carplay};
 
-/// The desktop app streamed into the compositor. Owns the child process so it's killed on exit
-/// (Drop) and can be relaunched on a resize.
+/// The app streamed into the compositor. Owns the child process so it's killed on exit and can be
+/// relaunched on a resize.
 pub struct DesktopApp {
     command: String,
     socket: OsString,
@@ -48,12 +46,11 @@ impl DesktopApp {
         }
     }
 
-    /// (Re)launch the app: kill any running instance first, then spawn a fresh one pointed at the
-    /// compositor socket.
+    /// Kill any running instance, then spawn a fresh one pointed at the compositor socket.
     pub fn launch(&mut self) {
         self.kill();
         tracing::info!("Launching desktop app: {0}", self.command);
-        // `exec` so the child *is* the app, in its own process group so `kill` reaches the tree.
+        // `exec` so the child *is* the app and runs in its own group, so `kill` reaches the tree.
         match std::process::Command::new("sh")
             .arg("-c")
             .arg(format!("exec {0}", self.command))
@@ -89,25 +86,20 @@ impl Drop for DesktopApp {
     }
 }
 
-/// Result of the shared Bluetooth -> WiFi -> AirPlay handshake, common to both source modes.
+/// Result of the Bluetooth -> WiFi -> AirPlay handshake, common to both source modes.
 struct Established {
     conn: AirPlayConnection,
     carplay_handle: AbortOnDropHandle<Result<()>>,
-    /// Sent to `run_video_stream` (the AirPlay/HID side pushes decoded touch events into it).
+    /// Fill by the AirPlay/HID side, drained by the caller into the compositor or portal.
     touch_tx: mpsc::Sender<TouchEvent>,
-    /// Read in the session loop and injected into the compositor or the portal.
     touch_rx: mpsc::Receiver<TouchEvent>,
-    /// The accessory's Bluetooth MAC (for the display cache and accessory settings); resolves during
-    /// the handshake. A `watch`, not a `oneshot`: `establish_carplay` reads it early (to look up
-    /// accessory settings before WiFi connects) and the caller reads it again afterward.
+    /// The accessory's Bluetooth MAC, resolved during the handshake; read before and after WiFi.
     accessory_addr_rx: watch::Receiver<Option<String>>,
-    /// Ends the Bluetooth iAP2 session on our terms; fired when the accessory sends `disableBluetooth`
-    /// over the AirPlay control channel.
+    /// Ends the Bluetooth iAP2 session on our terms (fired on the accessory's `disableBluetooth`).
     handover: CancellationToken,
 }
 
-/// Bind an IPv6 link-local address to the interface it has to be used on - link-local is
-/// ambiguous on a multi-interface host, and connecting without a scope id just fails.
+/// Link-local addresses need the interface's scope id; without one, connecting fails.
 fn with_scope_id(addr: SocketAddr, iface: &str) -> SocketAddr {
     let SocketAddr::V6(mut v6) = addr else {
         return addr;
@@ -127,13 +119,12 @@ fn with_scope_id(addr: SocketAddr, iface: &str) -> SocketAddr {
     }
 }
 
-/// How hard to try the AirPlay endpoint the accessory invited us to before giving up (which costs a
-/// full Bluetooth teardown and reconnect).
+/// How hard to try the AirPlay endpoint before giving up (giving up costs a full Bluetooth teardown
+/// and reconnect).
 const AIRPLAY_CONNECT_ATTEMPTS: usize = 4;
 const AIRPLAY_CONNECT_DELAY: Duration = Duration::from_millis(500);
 
-/// How long to wait for the accessory's invite before giving up on it and trying the receiver it named
-/// (if any) instead.
+/// How long to wait for the accessory's invite before falling back to the receiver it named.
 const INVITE_WAIT: Duration = Duration::from_secs(15);
 
 /// Connect to the endpoint the accessory's invite pointed at.
@@ -162,10 +153,9 @@ async fn connect_airplay_endpoint(
     .map_err(|e| eyre!("AirPlay endpoint {addr} never came up: {e}"))
 }
 
-/// Run-up to the accessory's WiFi being up, accumulated while the EA session comes online: its
-/// credentials as they arrive, the in-flight join if one was started, and wherever it named its
-/// AirPlay receiver (0x4301). Joining is a task because the iAP2 link must keep being serviced
-/// while it runs.
+/// Run-up to the accessory's WiFi being up: its credentials as they arrive, the in-flight join, and
+/// wherever it named its AirPlay receiver (0x4301). Joining is a task so the iAP2 link keeps being
+/// serviced while it runs.
 struct WifiJoin {
     wifi: Arc<dyn WifiBackend>,
     join: Option<tokio::task::JoinHandle<Result<AccessoryWifi>>>,
@@ -174,7 +164,7 @@ struct WifiJoin {
 }
 
 impl WifiJoin {
-    /// Record the accessory's credentials and, on first receipt, kick off joining its AP.
+    /// Record the credentials and, on first receipt, kick off joining its AP.
     fn offer(&mut self, creds: WifiCredentials) {
         self.airplay_hint = self
             .airplay_hint
@@ -194,8 +184,8 @@ impl WifiJoin {
         }
     }
 
-    /// Await the join [`WifiJoin::offer`] started - or, when the EA session beat the credentials
-    /// here so no join was started, take them straight off the channel and start one.
+    /// Await the join [`WifiJoin::offer`] started - or, if the EA session beat the credentials here,
+    /// take them straight off the channel and start one.
     async fn finish(
         &mut self,
         creds_rx: &mut mpsc::Receiver<WifiCredentials>,
@@ -231,16 +221,17 @@ async fn establish_carplay(
 
     tracing::info!("Starting CarPlay session");
 
-    // Its own task so the runtime keeps servicing the iAP2 link (keep-alives, ACKs) continuously
-    // through WiFi connect and AirPlay setup, rather than being starved by the loops below.
-    // AbortOnDropHandle tears the task (and its BlueZ resources) down when dropped, not detached.
+    // Its own task so the runtime keeps servicing the iAP2 link through WiFi connect and AirPlay
+    // setup; AbortOnDropHandle tears it down when dropped, not detached.
     let mut carplay_handle = AbortOnDropHandle::new(tokio::spawn(wireless_carplay(
         host.clone(),
         bt_device.to_owned(),
-        wifi_tx,
+        WifiOffhand {
+            creds_tx: wifi_tx,
+            handover: handover.clone(),
+        },
         ready_tx,
         accessory_addr_tx,
-        handover.clone(),
     )));
 
     let mut wifi_join = WifiJoin {

@@ -23,17 +23,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::carplay_session::{TouchEvent, TouchEventType};
+use crate::carplay_init::{TouchEvent, TouchEventType};
 
-/// A single encoded access unit with optional codec configuration (present on keyframes,
-/// extracted by the encoder): SPS/PPS for H264, VPS/SPS/PPS for HEVC.
 pub struct EncodedFrame {
     pub data: Vec<u8>,
     pub config: Option<AvccConfig>,
 }
 
-/// Which codec the screen stream carries. An iPhone sends HEVC to every unit captured so far;
-/// H264 is what carjack sent before and what an older accessory may need.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
     H264,
@@ -53,12 +49,8 @@ impl VideoCodec {
     }
 }
 
-/// Would an iPhone send this accessory HEVC?
-///
-/// A declaration settles it, but neither unit captured so far declares anything - the phone keys
-/// off something else, and the only thing that separates them is how new the accessory's AirPlay
-/// implementation is: `475.8.2` gets HEVC from a phone, `320.14` gets H264 and shows black for
-/// HEVC. The threshold between the two is interpolated, not observed.
+// Guessed from testing against two different units, one which only took h264, one which only took hevc.
+// Only thing we could see that differentiatedd them was source_version.
 pub fn expects_hevc(hevc_info: bool, multi_codec: bool, source_version: &str) -> bool {
     const HEVC_FROM_SOURCE_VERSION: u32 = 400;
     let major = source_version
@@ -83,10 +75,6 @@ pub struct AirPlayConnection {
 /// HomeKit pairings for the whole process, so an accessory that has met us before can take
 /// `/pair-verify` against stored keys instead of a full `/pair-setup`. Left unset (tests) each
 /// connection gets a throwaway identity.
-///
-/// Inert for now: catplay's transmitter bootstrap goes straight to SETUP - its `start_pair_task`
-/// and `start_auth_setup_task` calls are commented out - so nothing here is read or written until
-/// that flow is enabled. Units tested so far are happy with an unencrypted control channel.
 static HOMEKIT: OnceLock<HomekitStorageRef> = OnceLock::new();
 
 /// Point HomeKit storage at a file, loading any pairings already in it. Corrupt or unreadable
@@ -116,11 +104,6 @@ pub async fn connect_airplay(
         .cloned()
         .unwrap_or_else(HomekitStorageFile::memory);
 
-    // Only pass an id we have actually paired with. Then it selects `/pair-verify` against the
-    // stored keys; unknown, all it can do is make `/pair-setup` assert that the accessory's real
-    // identity matches - failing the session over a guess, since not every unit's advertised id
-    // is its HomeKit one. Filtering here also makes a first contact free to succeed and be
-    // remembered, which is what makes the *next* connection the fast one.
     let remote_homekit_id = remote_homekit_id.filter(|id| homekit.find_paired_by_id(id).is_some());
     match remote_homekit_id {
         Some(id) => tracing::info!("Known HomeKit accessory {id}; expecting pair-verify"),
@@ -130,12 +113,6 @@ pub async fn connect_airplay(
     let bootstrap = AirPlayTransmitterBootstrap {
         homekit,
         peer_ip: peer_addr,
-        // iAP2 over AirPlay (`iap2_tunnel`) is a negotiated feature - `ControllerFeature::IApChannel`
-        // is what claims it. Not claimed yet: the only unit we can test against advertises just
-        // `VocoderInfo` and never tunnels anything, so the claim is unexercised, and an unexercised
-        // claim is exactly what broke the bike's WiFi request (afd6605). The `Accessory AirPlay
-        // features` log below says whether a given unit supports it; add the feature here once one
-        // does.
         controller_features: vec![],
         remote_homekit_id,
         device_id,
@@ -146,8 +123,6 @@ pub async fn connect_airplay(
     let tx = AirPlayTransmitterProxy::connect(bootstrap).await?;
     tracing::info!("AirPlay bootstrap complete!");
     {
-        // Whether the accessory will tunnel iAP2 here at all is a property of *its* feature set,
-        // not just ours - log it so a silent tunnel can be told apart from an unsupported one.
         let info = tx.info_cached();
         tracing::info!(
             extended_features = ?info.extended_features,
@@ -267,13 +242,6 @@ pub async fn run_video_stream(
     tx.assert_modes(modes.serialize_to_state()).await?;
     tracing::info!("Asserted screen modes (controller owns screen)");
 
-    // Service the CarPlay control commands the accessory sends back over the AirPlay event
-    // channel (HID reports, mode changes, key-frame requests, ...). catplay queues each one
-    // and blocks its event server waiting for our response; if we never answer, the accessory
-    // tears the whole session down within ~100ms of the first command (it sends a
-    // HidSendReport right after RECORD). Runs for the session lifetime.
-    // iAP2 moves onto this channel when the accessory drops Bluetooth; without someone reading it
-    // the control channel simply ends at the handover.
     let (tunnel_stream, tunnel) = crate::iap2_tunnel::open(tx.clone());
     let tunnel_used = tunnel.when_used();
     let _tunnel_guard = abort_on_drop(tokio::spawn(async move {
