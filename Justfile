@@ -4,8 +4,8 @@ set dotenv-load
 setcap:
     binary="$(which carjack-hci-helper)"
     if [ -n "$binary" ]; then
-        echo "Giving cap_net_admin,cap_net_raw to ${binary}"
-        sudo setcap cap_net_admin,cap_net_raw+ep "$binary"
+        echo "Giving cap_net_admin to ${binary}"
+        sudo setcap cap_net_admin+ep "$binary"
     else
         echo "carjack-hci-helper not found in PATH, aborting"
         exit 1

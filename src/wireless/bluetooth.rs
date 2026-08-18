@@ -14,10 +14,7 @@ use eyre::{Result, eyre};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_stream::StreamExt;
 
-use libcarjack::uuid::{
-    APPLE_ACCESSORY_CLIENT_UUID, CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID,
-    IAP2_UUID, MESSAGE_ACCESS_UUID, NAP_UUID, PHONEBOOK_ACCESS_UUID,
-};
+use libcarjack::uuid::{CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID};
 use libcarjack::{carplay_init::DeviceIdentity, sdp::iap::iap_service_record};
 
 use carjack::config::Hfp;
@@ -77,17 +74,6 @@ fn carplay_profile() -> rfcomm::Profile {
     advertised_profile(CARPLAY_DEVICE_UUID, "CarPlay")
 }
 
-/// The rest of the service list an iPhone browses as. UUID only, never traffic.
-fn phone_role_profiles() -> [rfcomm::Profile; 5] {
-    [
-        advertised_profile(PHONEBOOK_ACCESS_UUID, "Phonebook Access"),
-        advertised_profile(MESSAGE_ACCESS_UUID, "Message Access"),
-        advertised_profile(IAP2_UUID, "iAP2"),
-        advertised_profile(NAP_UUID, "Network Access Point"),
-        advertised_profile(APPLE_ACCESSORY_CLIENT_UUID, "Apple Accessory Client"),
-    ]
-}
-
 fn advertised_profile(uuid: uuid::Uuid, name: &str) -> rfcomm::Profile {
     rfcomm::Profile {
         uuid,
@@ -131,7 +117,7 @@ impl IapHost {
         let iap_client = Mutex::new(session.register_profile(accessory_profile()).await?);
         // Rejecting connects so an unanswered request can't pin its fd. A collision means
         // bluetoothd or obexd already advertises the UUID, which is as good.
-        for profile in std::iter::once(carplay_profile()).chain(phone_role_profiles()) {
+        for profile in [carplay_profile()] {
             let name = profile.name.clone().unwrap_or_default();
             let handle = session.register_profile(profile).await;
             let mut handle = match handle {
