@@ -103,8 +103,8 @@ pub enum EncodeBackend {
         #[cfg(feature = "cuda")]
         importer: Option<Arc<cuda_dmabuf::CudaImporter>>,
     },
-    /// CPU path: the compositor reads frames back to system memory and a software encoder (or, if
-    /// the machine has none, a hardware one fed system memory) takes them.
+    /// System-memory path: the compositor reads frames back and a hardware encoder fed system
+    /// memory takes them, or a CPU one if the machine has none.
     Software { codec: VideoCodec },
 }
 
@@ -147,7 +147,7 @@ impl EncodeBackend {
             Self::Hw { backend, codec, .. } => {
                 format!("zero-copy hardware '{}' {}", backend.name, codec.describe())
             }
-            Self::Software { codec } => format!("software {}", codec.describe()),
+            Self::Software { codec } => format!("system-memory {}", codec.describe()),
         }
     }
 }
@@ -1107,30 +1107,32 @@ fn sw_encoder_candidates(codec: VideoCodec) -> impl Iterator<Item = &'static str
     std::iter::once(first).chain(rest.iter().copied())
 }
 
-/// The encoder for a software (non-zero-copy) chain, honouring `CARPLAY_ENCODER` first.
+/// The encoder for a non-zero-copy chain, honouring `CARPLAY_ENCODER` first.
 ///
-/// Last resort is a hardware encoder fed system memory: `zerocopy=false` rules out zero-copy
-/// import, not the GPU's encoder block, and plenty of machines ship a vendor encoder but no CPU
-/// one. Each row's `encoder` is tuned to hold up on system memory too, so it's usable as-is.
+/// A hardware encoder fed system memory is preferred over a CPU one: losing the zero-copy import
+/// does not lose the GPU's encoder block, and on an embedded board CPU encode is the difference
+/// between a stream and a slideshow. `CARJACK_SW_ENCODE=1` forces the CPU encoder instead. Each
+/// row's `encoder` is tuned to hold up on system memory too, so it's usable as-is.
 fn software_encoder_desc(codec: VideoCodec, bitrate: Bitrate) -> Result<String> {
     if let Some(desc) = encoder_override() {
         return Ok(bitrate.apply(&desc));
     }
     let sw = sw_encoder_candidates(codec);
-    if let Some(desc) = sw.clone().find(|d| element_available(encoder_name(d))) {
-        return Ok(bitrate.apply(desc));
-    }
-    if let Some(desc) = HW_BACKENDS
-        .iter()
-        .filter_map(|b| b.encoder_desc(codec, bitrate))
-        .find(|d| element_available(encoder_name(d)))
+    let force_sw = std::env::var("CARJACK_SW_ENCODE").as_deref() == Ok("1");
+    if !force_sw
+        && let Some(desc) = HW_BACKENDS
+            .iter()
+            .filter_map(|b| b.encoder_desc(codec, bitrate))
+            .find(|d| element_available(encoder_name(d)))
     {
-        tracing::warn!(
-            "no software {} encoder installed; using hardware '{}' on system memory",
-            codec.describe(),
+        tracing::info!(
+            "No zero-copy path; using hardware '{}' on system memory",
             encoder_name(&desc)
         );
         return Ok(desc);
+    }
+    if let Some(desc) = sw.clone().find(|d| element_available(encoder_name(d))) {
+        return Ok(bitrate.apply(desc));
     }
     Err(eyre!(
         "no {} encoder available (tried: {})",
