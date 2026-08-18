@@ -11,18 +11,17 @@ setcap:
         exit 1
     fi
 
-# Page the head unit; non-zero if it doesn't answer.
+# Is the head unit awake? Inquiry, not paging: this unit dials us and does not answer pages of
+# its own, so a page timeout says nothing about whether it is there.
 [script('bash')]
 reachable device=env('CARJACK.BLUETOOTH.DEVICE', ''):
     set -uo pipefail
-    mac=$(bluetoothctl devices | awk -v n="{{device}}" '$3==n {print $2; exit}')
-    mac=${mac:-{{device}}}
-    if [ -z "$mac" ]; then echo "no head unit configured" >&2; exit 2; fi
-    echo "Paging $mac ..." >&2
-    if timeout 20s bluetoothctl connect "$mac" 2>&1 | grep -qiE "Connection successful|already connected"; then
-        echo "reachable" >&2
+    if [ -z "{{device}}" ]; then echo "no head unit configured" >&2; exit 2; fi
+    echo "Scanning for {{device}} ..." >&2
+    if timeout 25s bluetoothctl --timeout 18 scan on 2>/dev/null | grep -qiF "{{device}}"; then
+        echo "present" >&2
     else
-        echo "NOT reachable - off, asleep, or out of range" >&2
+        echo "NOT present - off, asleep, or out of range" >&2
         exit 1
     fi
 
