@@ -236,9 +236,11 @@ impl ParameterId {
     /// `DeviceLanguageUpdate`, `WirelessCarPlayUpdate`.
     pub const LANGUAGE: Self = Self(0x0000);
     pub const WIRELESS_CARPLAY: Self = Self(0x0000);
-    pub const REQUEST_TRANSPORT_GROUP: Self = Self(0x0000);
-    pub const REQUEST_WIFI_GROUP: Self = Self(0x0001);
-    pub const TRANSPORT_KIND: Self = Self(0x0000);
+    /// `CarPlayAvailability` groups: which bearers we have.
+    pub const WIRED_ATTRIBUTES: Self = Self(0x0000);
+    pub const WIRELESS_ATTRIBUTES: Self = Self(0x0001);
+    pub const AVAILABLE: Self = Self(0x0000);
+    /// USB in `WIRED_ATTRIBUTES`, Bluetooth in `WIRELESS_ATTRIBUTES`.
     pub const TRANSPORT_IDENTIFIER: Self = Self(0x0001);
     pub const WIFI_CONFIG_GROUP: Self = Self(0x0001);
     pub const WIFI_CONFIG_SSID: Self = Self(0x0000);
@@ -581,24 +583,22 @@ impl ControlMessage {
         )
     }
 
-    pub fn request_accessory_wifi_config_grouped(
-        transport_identifier: &str,
-        bluetooth_address: &str,
-    ) -> Self {
-        let transport = |id, identifier: &str| {
-            Parameter::new(
-                id,
-                vec![
-                    Parameter::new(ParameterId::TRANSPORT_KIND, 0x01u8),
-                    Parameter::new(ParameterId::TRANSPORT_IDENTIFIER, identifier),
-                ],
-            )
-        };
+    /// We have no USB bearer, so `WiredAttributes` says so and carries no identifier.
+    pub fn request_accessory_wifi_config_grouped(bluetooth_address: &str) -> Self {
         Self::new(
             ControlMessageId::RequestAccessoryWiFiConfigurationInformationGrouped,
             vec![
-                transport(ParameterId::REQUEST_TRANSPORT_GROUP, transport_identifier),
-                transport(ParameterId::REQUEST_WIFI_GROUP, bluetooth_address),
+                Parameter::new(
+                    ParameterId::WIRED_ATTRIBUTES,
+                    vec![Parameter::new(ParameterId::AVAILABLE, 0x00u8)],
+                ),
+                Parameter::new(
+                    ParameterId::WIRELESS_ATTRIBUTES,
+                    vec![
+                        Parameter::new(ParameterId::AVAILABLE, 0x01u8),
+                        Parameter::new(ParameterId::TRANSPORT_IDENTIFIER, bluetooth_address),
+                    ],
+                ),
             ],
         )
     }

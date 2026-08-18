@@ -87,7 +87,6 @@ const DEFAULT_AIRPLAY_PORT: u16 = 7000;
 #[derive(Debug, Clone)]
 pub struct DeviceIdentity {
     pub name: String,
-    pub transport_identifier: String,
     pub bluetooth_address: String,
 }
 
@@ -346,7 +345,6 @@ impl<S: Stream> CarplayInit<S> {
                 if self.accepts(MSG_REQUEST_WIFI_CONFIG_GROUPED) {
                     tracing::debug!("Requesting WiFi config (0x4300, grouped)");
                     self.send_ctrl(ControlMessage::request_accessory_wifi_config_grouped(
-                        &self.identity.transport_identifier,
                         &self.identity.bluetooth_address,
                     ))
                     .await?;

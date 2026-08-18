@@ -101,15 +101,6 @@ fn advertised_profile(uuid: uuid::Uuid, name: &str) -> rfcomm::Profile {
     }
 }
 
-/// Some units answer only the colon form, not the zero-padded 24-character one.
-fn transport_identifier(addr: bluer::Address) -> String {
-    if std::env::var("CARJACK_WIFI_ID").as_deref() == Ok("padded") {
-        let hex: String = addr.iter().map(|b| format!("{b:02X}")).collect();
-        return format!("{hex:0>24}");
-    }
-    colon_address(addr)
-}
-
 fn colon_address(addr: bluer::Address) -> String {
     addr.iter()
         .map(|b| format!("{b:02X}"))
@@ -133,7 +124,6 @@ impl IapHost {
         adapter.set_discoverable(true).await?;
         let identity = DeviceIdentity {
             name: String::from("carjack"),
-            transport_identifier: transport_identifier(adapter.address().await?),
             bluetooth_address: colon_address(adapter.address().await?).to_lowercase(),
         };
 
@@ -334,12 +324,4 @@ async fn prepare_device(device: Device) -> Result<Device> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::transport_identifier;
-
-    #[test]
-    fn transport_identifier_is_the_colon_bluetooth_address() {
-        let id = transport_identifier(bluer::Address::new([0x4c, 0x79, 0x6e, 0xda, 0x29, 0x4b]));
-        assert_eq!(id, "4C:79:6E:DA:29:4B");
-    }
-}
+mod tests {}

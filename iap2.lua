@@ -330,9 +330,15 @@ local GROUPED_PARAM_MESSAGES = {
     [0x4301] = true,
 }
 
+-- Apple's names for the groups these two messages nest their parameters in.
+local GROUP_NAMES = {
+    [0x4300] = { [0] = "WiredAttributes", [1] = "WirelessAttributes", [2] = "ThemeAssetsAttributes" },
+    [0x4301] = { [0] = "WiredAttributes", [1] = "WirelessAttributes", [7] = "AssetInformation" },
+}
+
 local dissect_parameters
 
-function dissect_parameters(tvb, tree, from, to, grouped)
+function dissect_parameters(tvb, tree, from, to, grouped, group_names)
     local param_offset = from
     while param_offset < to do
         if param_offset + 4 > to then break end
@@ -343,9 +349,12 @@ function dissect_parameters(tvb, tree, from, to, grouped)
         if p_len < 4 or param_offset + p_len > to then break end
 
         local p_data_len = p_len - 4
+        local named = grouped and group_names and group_names[p_id]
         local param_tree = tree:add(iap2_proto, tvb:range(param_offset, p_len),
-            string.format("%s 0x%04X (%d bytes)",
-                grouped and "Group" or "Parameter", p_id, p_data_len))
+            named
+                and string.format("Group 0x%04X %s (%d bytes)", p_id, named, p_data_len)
+                or string.format("%s 0x%04X (%d bytes)",
+                    grouped and "Group" or "Parameter", p_id, p_data_len))
 
         param_tree:add(f_cs_param_length, tvb:range(param_offset,     2))
         param_tree:add(f_cs_param_id,     tvb:range(param_offset + 2, 2))
@@ -422,7 +431,7 @@ local function dissect_control_session(tvb, pinfo, tree, offset, length)
         msg_tree:add(f_cs_msg_source, msg_src)
 
         dissect_parameters(tvb, msg_tree, offset + 6, offset + msg_len,
-            GROUPED_PARAM_MESSAGES[msg_id] or false)
+            GROUPED_PARAM_MESSAGES[msg_id] or false, GROUP_NAMES[msg_id])
 
         offset = offset + msg_len
     end
