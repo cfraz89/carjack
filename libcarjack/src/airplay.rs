@@ -271,6 +271,7 @@ pub async fn run_video_stream(
         keyframe_tx.clone(),
         tunnel,
         handover,
+        view,
     )));
 
     let latency = Duration::from_millis(100);
@@ -491,6 +492,7 @@ async fn handle_accessory_commands(
     keyframe_tx: mpsc::Sender<()>,
     tunnel: crate::iap2_tunnel::Tunnel,
     handover: CancellationToken,
+    view: Option<VideoView>,
 ) {
     let mut touching = false;
     while let Some(mut cmd) = tx.pop_command().await {
@@ -512,7 +514,13 @@ async fn handle_accessory_commands(
                 cmd.respond_ok();
             }
             Command::HidSendReport(r) => {
-                if let Some(event) = parse_touch_report(r.hid_report.as_ref(), &mut touching) {
+                if let Some(mut event) = parse_touch_report(r.hid_report.as_ref(), &mut touching) {
+                    // The touchscreen's logical maximum is the whole panel, so a reserved strip
+                    // offsets every report by the view's origin.
+                    if let Some(v) = &view {
+                        event.x -= v.origin_x as f64;
+                        event.y -= v.origin_y as f64;
+                    }
                     let _ = touch_tx.try_send(event);
                 }
                 cmd.respond_ok();
