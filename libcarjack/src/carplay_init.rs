@@ -62,7 +62,7 @@ fn challenge_len_for_certificate(certificate: &[u8]) -> usize {
 }
 
 const MSG_DEVICE_INFORMATION_UPDATE: u16 = 0x4E09;
-const MSG_REQUEST_WIFI_CONFIG_GROUPED: u16 = 0x4300;
+const MSG_CARPLAY_AVAILABILITY: u16 = 0x4300;
 
 #[derive(Debug, Clone)]
 pub struct WifiCredentials {
@@ -342,9 +342,9 @@ impl<S: Stream> CarplayInit<S> {
                     ))
                     .await?;
                 }
-                if self.accepts(MSG_REQUEST_WIFI_CONFIG_GROUPED) {
-                    tracing::debug!("Requesting WiFi config (0x4300, grouped)");
-                    self.send_ctrl(ControlMessage::request_accessory_wifi_config_grouped(
+                if self.accepts(MSG_CARPLAY_AVAILABILITY) {
+                    tracing::debug!("Declaring CarPlay availability (0x4300)");
+                    self.send_ctrl(ControlMessage::carplay_availability(
                         &self.identity.bluetooth_address,
                     ))
                     .await?;
@@ -376,10 +376,9 @@ impl<S: Stream> CarplayInit<S> {
                 }
             }
             ControlMessageId::AccessoryWiFiConfigurationInformation
-            | ControlMessageId::AccessoryWiFiConfigurationInformationGrouped => {
+            | ControlMessageId::CarPlayStartSession => {
                 tracing::debug!("Received {:?}", msg.message_id);
-                let grouped = msg.message_id
-                    == ControlMessageId::AccessoryWiFiConfigurationInformationGrouped;
+                let grouped = msg.message_id == ControlMessageId::CarPlayStartSession;
                 let creds = if grouped {
                     // 0x4301: credentials nested at top-level parameter 1, the accessory's MAC,
                     // AirPlay port and firmware version beside it.

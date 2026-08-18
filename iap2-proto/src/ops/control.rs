@@ -178,9 +178,9 @@ pub enum ControlMessageId {
     #[deku(id = "0x5703")]
     AccessoryWiFiConfigurationInformation,
     #[deku(id = "0x4300")]
-    RequestAccessoryWiFiConfigurationInformationGrouped,
+    CarPlayAvailability,
     #[deku(id = "0x4301")]
-    AccessoryWiFiConfigurationInformationGrouped,
+    CarPlayStartSession,
     #[deku(id = "0x0B00")]
     StartBluetoothPairing,
     #[deku(id = "0x0B01")]
@@ -200,7 +200,7 @@ pub enum ControlMessageId {
     #[deku(id = "0x5201")]
     RouteGuidanceUpdate,
     #[deku(id = "0x5202")]
-    RouteGuidanceManeuverUpdate,
+    RouteGuidanceManeuverInformation,
     #[deku(id = "0x5203")]
     StopRouteGuidanceUpdates,
     #[deku(id_pat = "_")]
@@ -584,9 +584,9 @@ impl ControlMessage {
     }
 
     /// We have no USB bearer, so `WiredAttributes` says so and carries no identifier.
-    pub fn request_accessory_wifi_config_grouped(bluetooth_address: &str) -> Self {
+    pub fn carplay_availability(bluetooth_address: &str) -> Self {
         Self::new(
-            ControlMessageId::RequestAccessoryWiFiConfigurationInformationGrouped,
+            ControlMessageId::CarPlayAvailability,
             vec![
                 Parameter::new(
                     ParameterId::WIRED_ATTRIBUTES,
@@ -696,13 +696,59 @@ mod tests {
         );
     }
 
+    /// An iPhone declares both bearers; we have no USB one, so ours says so rather than
+    /// inventing an identifier for it.
     #[test]
-    fn wifi_config_request_matches_iphone() {
-        let msg = ControlMessage::request_accessory_wifi_config_grouped(
-            "0123456789ABCDEF01234567",
-            "02:00:00:00:00:01",
+    fn carplay_availability_declares_only_the_wireless_bearer() {
+        let bytes = ControlMessage::carplay_availability("4c:79:6e:da:29:4b")
+            .to_bytes()
+            .unwrap();
+        let (_, msg) = ControlMessage::from_bytes((&bytes, 0)).unwrap();
+        assert_eq!(msg.message_id, ControlMessageId::CarPlayAvailability);
+
+        let wired = msg
+            .parameters
+            .get_param::<Vec<Parameter>>(ParameterId::WIRED_ATTRIBUTES)
+            .expect("wired attributes");
+        assert_eq!(wired.get_param::<u8>(ParameterId::AVAILABLE), Some(0));
+        assert_eq!(
+            wired.get_param::<String>(ParameterId::TRANSPORT_IDENTIFIER),
+            None
         );
-        assert_eq!(msg.to_bytes().unwrap(), payload(IPHONE_WIFI_REQUEST));
+
+        let wireless = msg
+            .parameters
+            .get_param::<Vec<Parameter>>(ParameterId::WIRELESS_ATTRIBUTES)
+            .expect("wireless attributes");
+        assert_eq!(wireless.get_param::<u8>(ParameterId::AVAILABLE), Some(1));
+        assert_eq!(
+            wireless.get_param::<String>(ParameterId::TRANSPORT_IDENTIFIER),
+            Some(String::from("4c:79:6e:da:29:4b"))
+        );
+    }
+
+    /// The captured iPhone message, against Apple's names: the wireless bearer's identifier is
+    /// the phone's Bluetooth address, and the wired one's is a USB identifier.
+    #[test]
+    fn iphone_carplay_availability_parses_as_bearer_attributes() {
+        let bytes = payload(IPHONE_WIFI_REQUEST);
+        let (_, msg) = ControlMessage::from_bytes((&bytes, 0)).unwrap();
+        assert_eq!(msg.message_id, ControlMessageId::CarPlayAvailability);
+
+        for (group, identifier) in [
+            (ParameterId::WIRED_ATTRIBUTES, "0123456789ABCDEF01234567"),
+            (ParameterId::WIRELESS_ATTRIBUTES, "02:00:00:00:00:01"),
+        ] {
+            let attrs = msg
+                .parameters
+                .get_param::<Vec<Parameter>>(group)
+                .expect("bearer attributes");
+            assert_eq!(attrs.get_param::<u8>(ParameterId::AVAILABLE), Some(1));
+            assert_eq!(
+                attrs.get_param::<String>(ParameterId::TRANSPORT_IDENTIFIER),
+                Some(String::from(identifier))
+            );
+        }
     }
 
     /// The credentials sit in a nested group, not at the top level - reading them flat
@@ -711,10 +757,7 @@ mod tests {
     fn wifi_config_response_parses() {
         let bytes = payload(ACCESSORY_WIFI_CONFIG);
         let (_, msg) = ControlMessage::from_bytes((&bytes, 0)).unwrap();
-        assert_eq!(
-            msg.message_id,
-            ControlMessageId::AccessoryWiFiConfigurationInformationGrouped
-        );
+        assert_eq!(msg.message_id, ControlMessageId::CarPlayStartSession);
 
         let group = msg
             .parameters
@@ -812,7 +855,7 @@ mod tests {
                 .unwrap(),
             unhex("404000065702")
         );
-        let grouped = ControlMessage::request_accessory_wifi_config_grouped("a", "b");
+        let grouped = ControlMessage::carplay_availability("a");
         assert_eq!(grouped.message_id.deku_id().unwrap(), 0x4300);
     }
 
