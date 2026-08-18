@@ -305,6 +305,26 @@ end
 -- Control Session dissector
 -- ============================================================
 
+-- A NUL-terminated run of printable ASCII, which the length ladder below would otherwise render
+-- as an integer.
+local function is_text(tvb, offset, length)
+    if length < 2 then return false end
+    local raw = tvb:range(offset, length):bytes()
+    local terminated = false
+    for i = 0, length - 1 do
+        local b = raw:get_index(i)
+        if b == 0 then
+            terminated = i > 0
+            for j = i, length - 1 do
+                if raw:get_index(j) ~= 0 then return false end
+            end
+            break
+        end
+        if b < 0x20 or b > 0x7e then return false end
+    end
+    return terminated
+end
+
 local GROUPED_PARAM_MESSAGES = {
     [0x4300] = true,
     [0x4301] = true,
@@ -334,6 +354,8 @@ function dissect_parameters(tvb, tree, from, to, grouped)
             local data_off = param_offset + 4
             if grouped then
                 dissect_parameters(tvb, param_tree, data_off, data_off + p_data_len, false)
+            elseif is_text(tvb, data_off, p_data_len) then
+                param_tree:add(f_cs_param_str, tvb:range(data_off, p_data_len))
             elseif p_data_len == 1 then
                 param_tree:add(f_cs_param_uint8, tvb:range(data_off, 1))
             elseif p_data_len == 2 then
