@@ -3,6 +3,7 @@
 //! mechanics are in [`bluetooth`]; this is the glue.
 
 mod bluetooth;
+mod hfp;
 
 pub use bluetooth::IapHost;
 

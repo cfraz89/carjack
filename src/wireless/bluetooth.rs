@@ -14,10 +14,15 @@ use eyre::{Result, eyre};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_stream::StreamExt;
 
-use libcarjack::uuid::{CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID};
+use libcarjack::uuid::{
+    APPLE_ACCESSORY_CLIENT_UUID, CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID,
+    IAP2_UUID, MESSAGE_ACCESS_UUID, NAP_UUID, PHONEBOOK_ACCESS_UUID,
+};
 use libcarjack::{carplay_init::DeviceIdentity, sdp::iap::iap_service_record};
 
-use crate::wifi_connect::WifiBackend;
+use carjack::config::Hfp;
+
+use crate::wireless::hfp;
 
 const IAP_CHANNEL: u16 = 1;
 
@@ -69,9 +74,24 @@ fn accessory_profile() -> rfcomm::Profile {
 /// Only its UUID matters: bluetoothd advertises a registered profile's UUID in EIR, which units
 /// check while bonding.
 fn carplay_profile() -> rfcomm::Profile {
+    advertised_profile(CARPLAY_DEVICE_UUID, "CarPlay")
+}
+
+/// The rest of the service list an iPhone browses as. UUID only, never traffic.
+fn phone_role_profiles() -> [rfcomm::Profile; 5] {
+    [
+        advertised_profile(PHONEBOOK_ACCESS_UUID, "Phonebook Access"),
+        advertised_profile(MESSAGE_ACCESS_UUID, "Message Access"),
+        advertised_profile(IAP2_UUID, "iAP2"),
+        advertised_profile(NAP_UUID, "Network Access Point"),
+        advertised_profile(APPLE_ACCESSORY_CLIENT_UUID, "Apple Accessory Client"),
+    ]
+}
+
+fn advertised_profile(uuid: uuid::Uuid, name: &str) -> rfcomm::Profile {
     rfcomm::Profile {
-        uuid: CARPLAY_DEVICE_UUID,
-        name: Some(String::from("CarPlay")),
+        uuid,
+        name: Some(String::from(name)),
         role: Some(Role::Server),
         //Need this until bluer fixes None sending no channel, when it should send 0 == auto to bluez
         channel: Some(0),
@@ -83,7 +103,6 @@ fn carplay_profile() -> rfcomm::Profile {
 
 /// Some units answer only the colon form, not the zero-padded 24-character one.
 fn transport_identifier(addr: bluer::Address) -> String {
-    // Env override restores the padded form for a unit that wants it.
     if std::env::var("CARJACK_WIFI_ID").as_deref() == Ok("padded") {
         let hex: String = addr.iter().map(|b| format!("{b:02X}")).collect();
         return format!("{hex:0>24}");
@@ -103,7 +122,7 @@ impl IapHost {
         Ok(colon_address(self.adapter.address().await?))
     }
 
-    pub async fn start(wifi: &dyn WifiBackend) -> Result<Self> {
+    pub async fn start(hfp_identity: Hfp) -> Result<Self> {
         let session = Session::new().await?;
         let agent = session.register_agent(Agent::default()).await?;
         let adapter = session.default_adapter().await?;
@@ -115,19 +134,50 @@ impl IapHost {
         let identity = DeviceIdentity {
             name: String::from("carjack"),
             transport_identifier: transport_identifier(adapter.address().await?),
-            wifi_mac: wifi.get_wifi_mac().await?,
+            bluetooth_address: colon_address(adapter.address().await?).to_lowercase(),
         };
 
         let iap_profile = Mutex::new(session.register_profile(device_profile()).await?);
         let iap_client = Mutex::new(session.register_profile(accessory_profile()).await?);
-        // Registered only for its EIR UUID; rejecting connects so an unanswered request can't pin its fd.
-        let mut carplay_profile = session.register_profile(carplay_profile()).await?;
-        tokio::spawn(async move {
-            while let Some(rq) = carplay_profile.next().await {
-                tracing::debug!(from = %rq.device(), "Rejecting connection on the CarPlay profile");
-                rq.reject(ReqError::Rejected);
+        // Rejecting connects so an unanswered request can't pin its fd. A collision means
+        // bluetoothd or obexd already advertises the UUID, which is as good.
+        for profile in std::iter::once(carplay_profile()).chain(phone_role_profiles()) {
+            let name = profile.name.clone().unwrap_or_default();
+            let handle = session.register_profile(profile).await;
+            let mut handle = match handle {
+                Ok(handle) => handle,
+                Err(e) => {
+                    tracing::warn!(
+                        ?e,
+                        "Another process holds the {name} profile; leaving it to it"
+                    );
+                    continue;
+                }
+            };
+            // The task owns the handle, so the registration lives as long as the process.
+            tokio::spawn(async move {
+                while let Some(rq) = handle.next().await {
+                    tracing::debug!(from = %rq.device(), "Rejecting connection on the {name} profile");
+                    rq.reject(ReqError::Rejected);
+                }
+            });
+        }
+
+        match session.register_profile(hfp::profile()).await {
+            Ok(handle) => {
+                tracing::info!(
+                    manufacturer = %hfp_identity.manufacturer,
+                    model = %hfp_identity.model,
+                    "Serving the hands-free gateway"
+                );
+                hfp::serve(handle, hfp_identity)
             }
-        });
+            Err(e) => tracing::warn!(
+                ?e,
+                "Could not register the hands-free gateway; another process holds it, so the unit's \
+                 identity probe will go unanswered"
+            ),
+        }
 
         // Class of Device is pre-set by carjack-hci-helper.service, which runs before us.
         tracing::info!("Registered iAP and CarPlay profiles");
@@ -141,6 +191,11 @@ impl IapHost {
             _agent: agent,
         })
     }
+}
+
+fn page_timed_out(res: &Result<(), bluer::Error>) -> bool {
+    res.as_ref()
+        .is_err_and(|e| e.message.contains("page-timeout"))
 }
 
 /// Disconnect (or page if none) so the unit offers a fresh iAP channel. Teardown first: a
@@ -166,7 +221,14 @@ pub(crate) async fn relink(device: &Device, gate: &Arc<Semaphore>) {
                     .with_max_times(PAGE_ATTEMPTS),
             )
             .await;
-        tracing::debug!(?res, "Connection result")
+        if page_timed_out(&res) {
+            tracing::warn!(
+                address = %device.address(),
+                "Head unit did not answer {PAGE_ATTEMPTS} pages; it is off, asleep or out of range"
+            );
+        } else {
+            tracing::debug!(?res, "Connection result")
+        }
     });
 }
 
@@ -275,7 +337,6 @@ async fn prepare_device(device: Device) -> Result<Device> {
 mod tests {
     use super::transport_identifier;
 
-    /// 0x4300 answered only the colon form in a capture.
     #[test]
     fn transport_identifier_is_the_colon_bluetooth_address() {
         let id = transport_identifier(bluer::Address::new([0x4c, 0x79, 0x6e, 0xda, 0x29, 0x4b]));

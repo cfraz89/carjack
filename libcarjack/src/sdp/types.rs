@@ -11,6 +11,8 @@ pub enum SdpAttributeId {
     ServiceAvailability = 0x0008,
     BluetoothProfileDescriptorList = 0x0009,
     ServiceName = 0x0100,
+    Network = 0x0301,
+    SupportedFeatures = 0x0311,
 }
 
 impl serde::Serialize for SdpAttributeId {
@@ -29,6 +31,9 @@ pub const FULLY_AVAILABLE: u8 = 0xff;
 
 /// Serial Port profile v1.2, in `BluetoothProfileDescriptorList` as `(major, minor)`.
 pub const SERIAL_PORT_VERSION_1_2: u16 = 0x0102;
+
+/// Hands-Free profile v1.7, the version an iPhone publishes.
+pub const HANDS_FREE_VERSION_1_7: u16 = 0x0107;
 
 /// A value in an SDP record: a scalar carrying its bytes in a `value` attribute, or a `sequence`
 /// of more values. quick-xml writes each variant's name as the element tag and inlines `$value`

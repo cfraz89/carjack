@@ -1,16 +1,23 @@
 [Unit]
-Description=carjack HCI helper - sets the Bluetooth adapter's Class of Device
+Description=carjack HCI helper - keeps the Bluetooth adapter presenting as an iPhone
 After=bluetooth.target
 Wants=bluetooth.target
 Before=carjack.service
 
 [Service]
-Type=oneshot
+# Stays running: bluetoothd rewrites Class of Device and the inquiry response on every service
+# change, and this re-applies ours each time it sees one go out.
+Type=simple
 ExecStart=/usr/local/bin/carjack-hci-helper
+Restart=on-failure
+RestartSec=5
 
-# The one thing this needs elevated: setting the Bluetooth adapter's Class of Device over a raw
-# HCI mgmt socket (see src/bin/carjack-hci-helper.rs). Kept out of carjack.service entirely so the
+# The one thing this needs elevated: writing the adapter's Class of Device and inquiry response
+# over raw HCI (see src/bin/carjack-hci-helper.rs). Kept out of carjack.service entirely so the
 # main process never carries the capability.
-AmbientCapabilities=CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

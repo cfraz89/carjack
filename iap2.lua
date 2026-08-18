@@ -249,6 +249,8 @@ local CONTROL_MESSAGES = {
     [0x5701] = { "WiFiInformation",                            "Device"    },
     [0x5702] = { "RequestAccessoryWiFiConfigurationInformation","Device"   },
     [0x5703] = { "AccessoryWiFiConfigurationInformation",      "Accessory" },
+    [0x4300] = { "RequestAccessoryWiFiConfigurationInformationGrouped", "Device"    },
+    [0x4301] = { "AccessoryWiFiConfigurationInformationGrouped",        "Accessory" },
     [0x0B00] = { "StartBluetoothPairing",                      "Device"    },
     [0x0B01] = { "BluetoothPairingAccessoryInformation",       "Accessory" },
     [0x0B02] = { "BluetoothPairingStatus",                     "Accessory" },
@@ -303,6 +305,68 @@ end
 -- Control Session dissector
 -- ============================================================
 
+local GROUPED_PARAM_MESSAGES = {
+    [0x4300] = true,
+    [0x4301] = true,
+}
+
+local dissect_parameters
+
+function dissect_parameters(tvb, tree, from, to, grouped)
+    local param_offset = from
+    while param_offset < to do
+        if param_offset + 4 > to then break end
+
+        local p_len = tvb:range(param_offset,     2):uint()
+        local p_id  = tvb:range(param_offset + 2, 2):uint()
+
+        if p_len < 4 or param_offset + p_len > to then break end
+
+        local p_data_len = p_len - 4
+        local param_tree = tree:add(iap2_proto, tvb:range(param_offset, p_len),
+            string.format("%s 0x%04X (%d bytes)",
+                grouped and "Group" or "Parameter", p_id, p_data_len))
+
+        param_tree:add(f_cs_param_length, tvb:range(param_offset,     2))
+        param_tree:add(f_cs_param_id,     tvb:range(param_offset + 2, 2))
+
+        if p_data_len > 0 then
+            local data_off = param_offset + 4
+            if grouped then
+                dissect_parameters(tvb, param_tree, data_off, data_off + p_data_len, false)
+            elseif p_data_len == 1 then
+                param_tree:add(f_cs_param_uint8, tvb:range(data_off, 1))
+            elseif p_data_len == 2 then
+                param_tree:add(f_cs_param_uint16, tvb:range(data_off, 2))
+            elseif p_data_len == 4 then
+                param_tree:add(f_cs_param_uint32, tvb:range(data_off, 4))
+            elseif p_data_len == 8 then
+                param_tree:add(f_cs_param_uint64, tvb:range(data_off, 8))
+            else
+                local raw = tvb:range(data_off, p_data_len):bytes()
+                local is_printable = true
+                for i = 0, p_data_len - 1 do
+                    local b = raw:get_index(i)
+                    if b == 0 then
+                        break
+                    end
+                    if b < 0x20 and b ~= 0x09 and b ~= 0x0A and b ~= 0x0D then
+                        is_printable = false
+                        break
+                    end
+                end
+                if is_printable then
+                    param_tree:add(f_cs_param_str, tvb:range(data_off, p_data_len))
+                else
+                    param_tree:add(f_cs_param_data, tvb:range(data_off, p_data_len))
+                end
+            end
+        end
+
+        param_offset = param_offset + p_len
+    end
+end
+
 local function dissect_control_session(tvb, pinfo, tree, offset, length)
     local end_offset = offset + length
     while offset < end_offset do
@@ -335,57 +399,8 @@ local function dissect_control_session(tvb, pinfo, tree, offset, length)
         msg_tree:add(f_cs_msg_name,   msg_name)
         msg_tree:add(f_cs_msg_source, msg_src)
 
-        local param_offset = offset + 6
-        local param_end    = offset + msg_len
-        while param_offset < param_end do
-            if param_offset + 4 > param_end then break end
-
-            local p_len  = tvb:range(param_offset,     2):uint()
-            local p_id   = tvb:range(param_offset + 2, 2):uint()
-
-            if p_len < 4 or param_offset + p_len > param_end then break end
-
-            local p_data_len = p_len - 4
-            local param_tree = msg_tree:add(iap2_proto,
-                tvb:range(param_offset, p_len),
-                string.format("Parameter 0x%04X (%d bytes)", p_id, p_data_len))
-
-            param_tree:add(f_cs_param_length, tvb:range(param_offset,     2))
-            param_tree:add(f_cs_param_id,     tvb:range(param_offset + 2, 2))
-
-            if p_data_len > 0 then
-                local data_off = param_offset + 4
-                if p_data_len == 1 then
-                    param_tree:add(f_cs_param_uint8, tvb:range(data_off, 1))
-                elseif p_data_len == 2 then
-                    param_tree:add(f_cs_param_uint16, tvb:range(data_off, 2))
-                elseif p_data_len == 4 then
-                    param_tree:add(f_cs_param_uint32, tvb:range(data_off, 4))
-                elseif p_data_len == 8 then
-                    param_tree:add(f_cs_param_uint64, tvb:range(data_off, 8))
-                else
-                    local raw = tvb:range(data_off, p_data_len):bytes()
-                    local is_printable = true
-                    for i = 0, p_data_len - 1 do
-                        local b = raw:get_index(i)
-                        if b == 0 then
-                            break
-                        end
-                        if b < 0x20 and b ~= 0x09 and b ~= 0x0A and b ~= 0x0D then
-                            is_printable = false
-                            break
-                        end
-                    end
-                    if is_printable then
-                        param_tree:add(f_cs_param_str, tvb:range(data_off, p_data_len))
-                    else
-                        param_tree:add(f_cs_param_data, tvb:range(data_off, p_data_len))
-                    end
-                end
-            end
-
-            param_offset = param_offset + p_len
-        end
+        dissect_parameters(tvb, msg_tree, offset + 6, offset + msg_len,
+            GROUPED_PARAM_MESSAGES[msg_id] or false)
 
         offset = offset + msg_len
     end
@@ -757,13 +772,11 @@ local f_rfcomm_len = Field.new("btrfcomm.len")
 local iap2_post_proto = Proto("iap2_post", "iAP2 Bluetooth Wrapper")
 
 function iap2_post_proto.dissector(tvb, pinfo, tree)
-    -- 1. Exit early if this frame does not contain an RFCOMM channel layer
     local protocols = f_frame_protocols()
     if not protocols or not string.find(protocols.value, "btrfcomm") then 
         return 
     end
 
-    -- 2. Pull the field data out of the parsed RFCOMM headers
     local rfcomm_len_field = f_rfcomm_len()
     if not rfcomm_len_field then return end
 
@@ -776,10 +789,8 @@ function iap2_post_proto.dissector(tvb, pinfo, tree)
     -- 2 instead of 9 to also match handshake packets
     if payload_start_offset < 0 or payload_length < 2 then return end
 
-    -- Slicing the target payload array
     local iap2_tvb = tvb(payload_start_offset, payload_length):tvb()
 
-    -- 3. Check for specific Link Initialization / iAP Handshake pattern
     if payload_length >= 6 and iap2_tvb(0, 6):bytes():tohex() == "FF550200EE10" then
         pinfo.cols.protocol:set("iAP")
         pinfo.cols.info:set("iAP Link Initialization Handshake")
@@ -787,12 +798,10 @@ function iap2_post_proto.dissector(tvb, pinfo, tree)
         return
     end
 
-    -- 4. Normal iAP2 link check sequence (0xFF5A)
     if payload_length < 9 then return end
     local check_sop = iap2_tvb(0, 2):uint()
     if check_sop ~= 0xFF5A then return end
 
-    -- 4. Proxy the isolated slice directly into your main engine
     iap2_proto.dissector(iap2_tvb, pinfo, tree)
 end
 

@@ -124,7 +124,7 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
         backend.describe()
     );
 
-    let host = Arc::new(IapHost::start(wifi.as_ref()).await?);
+    let host = Arc::new(IapHost::start(config.hfp.clone()).await?);
 
     // Size the compositor from the last accessory's cached display, if any, so even a non-resizable app
     // can boot at the right size during the BT/WiFi/AirPlay setup rather than after.
@@ -202,7 +202,7 @@ async fn run_desktop(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
         .await
         .map_err(|e| eyre!("gstreamer init task panicked: {e}"))??;
 
-    let host = Arc::new(IapHost::start(wifi.as_ref()).await?);
+    let host = Arc::new(IapHost::start(config.hfp.clone()).await?);
 
     // ScreenCast + RemoteDesktop access, asked once (a consent dialog on first run).
     let rd = portal::start_remote_desktop().await?;

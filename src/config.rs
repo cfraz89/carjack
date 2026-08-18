@@ -15,6 +15,30 @@ pub struct Config {
     pub app: App,
     pub bluetooth: Bluetooth,
     pub wifi: Wifi,
+    pub hfp: Hfp,
+}
+
+/// What carjack's hands-free gateway answers the unit's identity probe with. The defaults are an
+/// iPhone's: a unit that gates CarPlay on the model string accepts nothing else.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Hfp {
+    pub manufacturer: String,
+    pub model: String,
+    /// Only ever displayed by the unit, so left out of `+CNUM`/`+COPS` when unset.
+    pub number: Option<String>,
+    pub operator: Option<String>,
+}
+
+impl Default for Hfp {
+    fn default() -> Self {
+        Self {
+            manufacturer: String::from("Apple Inc."),
+            model: String::from("iPhone16,1"),
+            number: None,
+            operator: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

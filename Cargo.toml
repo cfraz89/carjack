@@ -67,7 +67,7 @@ cuda-dmabuf = { path = "cuda-dmabuf", optional = true }
 serde = { version = "1", features = ["derive"] }
 quick-xml = { version = "0.41", features = ["serialize"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }
-nix = { version = "0.29", features = ["net", "signal"] }
+nix = { version = "0.31", features = ["net", "signal", "socket"] }
 mac_address = "1.1.7"
 socket2 = "0.6"
 xdg = "3.0.0"
@@ -77,6 +77,7 @@ toml = "1"
 ashpd = { version = "0.13", default-features = false, features = ["remote_desktop", "screencast", "tokio"] }
 zbus = { version = "5.18.0", features = ["tokio"] }
 thiserror = "2.0.19"
+chrono = "0.4"
 reis = { version = "0.7.0", features = ["tokio"] }
 
 [features]

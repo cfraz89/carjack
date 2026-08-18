@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use bytes::BytesMut;
+use deku::prelude::*;
+
 use catplay_carplay::carplay_tx::{
     AirPlayTransmitter, AirPlayTransmitterBootstrap, AirPlayTransmitterProxy,
     AirPlayTransmitterProxyRef,
@@ -527,19 +529,50 @@ async fn handle_accessory_commands(
     tracing::debug!("Accessory command handler ended");
 }
 
-/// Decode a CarPlay touchscreen HID report into a touch event. Observed format (12 bytes):
-/// `[reportId=0, tip, Xlo, Xhi, Ylo, Yhi, const=1, 0, 0, 0, 0, 0]` - a single contact whose
-/// `tip` switch (byte 1) is 1 while touching, and whose X/Y (little-endian u16) are in the
-/// accessory's display-pixel space. Our compositor renders at exactly that resolution, so the
-/// coordinates pass through unscaled. `touching` tracks the contact across reports so we can
-/// emit Down/Motion/Up. Non-touch reports (e.g. 1-byte button reports) are ignored.
+/// Wire shape of a CarPlay touchscreen HID report from an accessory with no report ID in its HID
+/// descriptor (e.g. the CFMOTO's "Touch Screen" device, `uuid: "0"`): 5 bytes - a status byte
+/// (bit 0 = tip switch, the other 7 padding) then X/Y as little-endian u16 in display pixels.
+#[derive(DekuRead, Debug, Clone, Copy, PartialEq)]
+#[deku(endian = "little")]
+struct ShortTouchReport {
+    status: u8,
+    x: u16,
+    y: u16,
+}
+
+/// Wire shape from an accessory whose HID descriptor does carry a report ID (e.g. the
+/// AirPlayGeneric1,1 bench box): 12 bytes - report ID, status, X/Y as little-endian u16, then 6
+/// bytes we don't use.
+#[derive(DekuRead, Debug, Clone, PartialEq)]
+#[deku(endian = "little")]
+struct LongTouchReport {
+    _report_id: u8,
+    status: u8,
+    x: u16,
+    y: u16,
+    #[deku(count = "6")]
+    _trailer: Vec<u8>,
+}
+
+/// Decode a CarPlay touchscreen HID report into a touch event. Real accessories have been seen
+/// sending both `ShortTouchReport` (5 bytes) and `LongTouchReport` (12 bytes) shapes for the same
+/// logical report, keyed here on length since that alone disambiguates them; a report whose length
+/// matches neither (e.g. a button report on another HID device uuid) fails to parse and is
+/// ignored. Our compositor renders at exactly the accessory's resolution, so the coordinates pass
+/// through unscaled. `touching` tracks the contact across reports so we can emit Down/Motion/Up.
 fn parse_touch_report(bytes: &[u8], touching: &mut bool) -> Option<TouchEvent> {
-    if bytes.len() < 6 {
-        return None;
-    }
-    let tip = bytes[1] != 0;
-    let x = u16::from_le_bytes([bytes[2], bytes[3]]) as f64;
-    let y = u16::from_le_bytes([bytes[4], bytes[5]]) as f64;
+    let (status, x, y) = match bytes.len() {
+        5 => {
+            let (_, r) = ShortTouchReport::from_bytes((bytes, 0)).ok()?;
+            (r.status, r.x, r.y)
+        }
+        12 => {
+            let (_, r) = LongTouchReport::from_bytes((bytes, 0)).ok()?;
+            (r.status, r.x, r.y)
+        }
+        _ => return None,
+    };
+    let tip = status & 1 != 0;
     let event_type = match (*touching, tip) {
         (false, true) => TouchEventType::Down,
         (true, true) => TouchEventType::Motion,
@@ -550,8 +583,8 @@ fn parse_touch_report(bytes: &[u8], touching: &mut bool) -> Option<TouchEvent> {
     Some(TouchEvent {
         event_type,
         slot: 0,
-        x,
-        y,
+        x: x as f64,
+        y: y as f64,
     })
 }
 
@@ -669,43 +702,75 @@ mod tests {
         assert!(wait_for_first_keyframe(&mut rx, &kf_tx).await.is_err());
     }
 
-    // Real reports captured from the head unit (`HID report (12 bytes)` log lines): the parser
-    // must turn a stream of them into a well-formed Down -> Motion* -> Up gesture with the
-    // right coordinates.
+    // Real reports captured from the bike (`hidReport` payloads, 5 bytes each, no report ID -
+    // see the accessory's own HID descriptor for uuid "0" / "Touch Screen"): the parser must
+    // turn a stream of them into a well-formed Down -> Motion* -> Up gesture with the right
+    // coordinates.
     #[test]
     fn touch_report_gesture() {
         let mut touching = false;
 
-        // First contact -> Down at (0x018a, 0x00cd) = (394, 205).
+        // First contact -> Down at (0x01c7, 0x02eb) = (455, 747).
+        let down =
+            parse_touch_report(&[0x01, 0xc7, 0x01, 0xeb, 0x02], &mut touching).expect("down");
+        assert!(matches!(down.event_type, TouchEventType::Down));
+        assert_eq!((down.x, down.y), (455.0, 747.0));
+        assert!(touching);
+
+        // Still touching, moved -> Motion at (0x0147, 0x02fb) = (327, 763).
+        let mv =
+            parse_touch_report(&[0x01, 0x47, 0x01, 0xfb, 0x02], &mut touching).expect("motion");
+        assert!(matches!(mv.event_type, TouchEventType::Motion));
+        assert_eq!((mv.x, mv.y), (327.0, 763.0));
+
+        // tip=0 -> Up (a real lift-off report).
+        let up = parse_touch_report(&[0x00, 0x00, 0x00, 0x32, 0x03], &mut touching).expect("up");
+        assert!(matches!(up.event_type, TouchEventType::Up));
+        assert!(!touching);
+
+        // No contact while not touching, and short (non-touch, e.g. button) reports -> ignored.
+        assert!(parse_touch_report(&[0, 0, 0, 0, 0], &mut touching).is_none());
+        assert!(parse_touch_report(&[0x01], &mut touching).is_none());
+    }
+
+    // The AirPlayGeneric1,1 bench box reports touch in a different 12-byte shape (report ID +
+    // trailer byte); `parse_touch_report` must handle both without one clobbering the other.
+    #[test]
+    fn touch_report_gesture_long_format() {
+        let mut touching = false;
+
+        // Down at (0x0104, 0x0172) = (260, 370).
         let down = parse_touch_report(
-            &[0, 1, 0x8a, 0x01, 0xcd, 0x00, 1, 0, 0, 0, 0, 0],
+            &[
+                0x00, 0x01, 0x04, 0x01, 0x72, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
             &mut touching,
         )
         .expect("down");
         assert!(matches!(down.event_type, TouchEventType::Down));
-        assert_eq!((down.x, down.y), (394.0, 205.0));
+        assert_eq!((down.x, down.y), (260.0, 370.0));
         assert!(touching);
 
-        // Still touching, moved -> Motion at (0x020f, 0x0114) = (527, 276).
+        // Still touching, moved -> Motion at (0x010b, 0x016b) = (267, 363).
         let mv = parse_touch_report(
-            &[0, 1, 0x0f, 0x02, 0x14, 0x01, 1, 0, 0, 0, 0, 0],
+            &[
+                0x00, 0x01, 0x0b, 0x01, 0x6b, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
             &mut touching,
         )
         .expect("motion");
         assert!(matches!(mv.event_type, TouchEventType::Motion));
-        assert_eq!((mv.x, mv.y), (527.0, 276.0));
+        assert_eq!((mv.x, mv.y), (267.0, 363.0));
 
-        // tip=0 -> Up (a real lift-off report).
+        // tip=0 -> Up at (0x0074, 0x0156) = (116, 342).
         let up = parse_touch_report(
-            &[0, 0, 0xe9, 0x02, 0xba, 0x01, 1, 0, 0, 0, 0, 0],
+            &[
+                0x00, 0x00, 0x74, 0x00, 0x56, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
             &mut touching,
         )
         .expect("up");
         assert!(matches!(up.event_type, TouchEventType::Up));
         assert!(!touching);
-
-        // No contact while not touching, and short (non-touch button) reports -> ignored.
-        assert!(parse_touch_report(&[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0], &mut touching).is_none());
-        assert!(parse_touch_report(&[0x01], &mut touching).is_none());
     }
 }

@@ -4,12 +4,36 @@ set dotenv-load
 setcap:
     binary="$(which carjack-hci-helper)"
     if [ -n "$binary" ]; then
-        echo "Giving cap_net_admin to ${binary}"
-        sudo setcap cap_net_admin+ep "$binary"
+        echo "Giving cap_net_admin,cap_net_raw to ${binary}"
+        sudo setcap cap_net_admin,cap_net_raw+ep "$binary"
     else
         echo "carjack-hci-helper not found in PATH, aborting"
         exit 1
     fi
+
+# Page the head unit; non-zero if it doesn't answer.
+[script('bash')]
+reachable device=env('CARJACK.BLUETOOTH.DEVICE', ''):
+    set -uo pipefail
+    mac=$(bluetoothctl devices | awk -v n="{{device}}" '$3==n {print $2; exit}')
+    mac=${mac:-{{device}}}
+    if [ -z "$mac" ]; then echo "no head unit configured" >&2; exit 2; fi
+    echo "Paging $mac ..." >&2
+    if timeout 20s bluetoothctl connect "$mac" 2>&1 | grep -qiE "Connection successful|already connected"; then
+        echo "reachable" >&2
+    else
+        echo "NOT reachable - off, asleep, or out of range" >&2
+        exit 1
+    fi
+
+# Hand the hands-free gateway UUID over to carjack - see wireplumber/51-carjack-hfp-ag.conf.
+[script]
+install-hfp-config:
+    dir="${XDG_CONFIG_HOME:-$HOME/.config}/wireplumber/wireplumber.conf.d"
+    mkdir -p "$dir"
+    install -m644 wireplumber/51-carjack-hfp-ag.conf "$dir/51-carjack-hfp-ag.conf"
+    systemctl --user restart wireplumber
+    echo "Installed $dir/51-carjack-hfp-ag.conf; remove it and restart wireplumber to undo"
 
 toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }
 

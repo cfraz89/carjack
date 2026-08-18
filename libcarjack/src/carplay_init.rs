@@ -25,31 +25,20 @@ fn local_time() -> (u64, u16, u8) {
     (secs, offset_minutes, 0)
 }
 
-#[derive(DekuRead, Debug, Clone, Copy, PartialEq, Eq)]
-#[deku(id_type = "u8")]
+/// Decoded from whichever wire shape `parse_touch_report` (libcarjack/src/airplay.rs) matched -
+/// not itself a wire format, so it carries no deku framing of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TouchEventType {
-    #[deku(id = "0")]
     Down,
-    #[deku(id = "1")]
     Motion,
-    #[deku(id_pat = "2..=3")]
     Up,
 }
 
-#[derive(DekuRead, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct TouchEvent {
     pub event_type: TouchEventType,
-    #[deku(endian = "little")]
     pub slot: u32,
-    #[deku(
-        map = "|x: u16| -> Result<f64, deku::DekuError> { Ok(f64::from(x)) }",
-        endian = "big"
-    )]
     pub x: f64,
-    #[deku(
-        map = "|y: u16| -> Result<f64, deku::DekuError> { Ok(f64::from(y)) }",
-        endian = "big"
-    )]
     pub y: f64,
 }
 
@@ -92,13 +81,14 @@ pub struct WifiCredentials {
 /// Port to reach AirPlay on when the accessory named an address but no port.
 const DEFAULT_AIRPLAY_PORT: u16 = 7000;
 
-/// Who we tell the accessory we are: name for `DeviceInformationUpdate` (0x4E09), the Bluetooth
-/// transport id for WiFi-config requests, and the MAC that joins its AP.
+/// Who we tell the accessory we are. An iPhone puts its Bluetooth address in the second
+/// WiFi-config group and joins the AP with an unrelated randomised MAC, so that group identifies
+/// the bond rather than the radio.
 #[derive(Debug, Clone)]
 pub struct DeviceIdentity {
     pub name: String,
     pub transport_identifier: String,
-    pub wifi_mac: String,
+    pub bluetooth_address: String,
 }
 
 enum SessionPhase {
@@ -357,7 +347,7 @@ impl<S: Stream> CarplayInit<S> {
                     tracing::debug!("Requesting WiFi config (0x4300, grouped)");
                     self.send_ctrl(ControlMessage::request_accessory_wifi_config_grouped(
                         &self.identity.transport_identifier,
-                        &self.identity.wifi_mac,
+                        &self.identity.bluetooth_address,
                     ))
                     .await?;
                 } else {

@@ -583,7 +583,7 @@ impl ControlMessage {
 
     pub fn request_accessory_wifi_config_grouped(
         transport_identifier: &str,
-        wifi_mac: &str,
+        bluetooth_address: &str,
     ) -> Self {
         let transport = |id, identifier: &str| {
             Parameter::new(
@@ -598,7 +598,7 @@ impl ControlMessage {
             ControlMessageId::RequestAccessoryWiFiConfigurationInformationGrouped,
             vec![
                 transport(ParameterId::REQUEST_TRANSPORT_GROUP, transport_identifier),
-                transport(ParameterId::REQUEST_WIFI_GROUP, wifi_mac),
+                transport(ParameterId::REQUEST_WIFI_GROUP, bluetooth_address),
             ],
         )
     }
