@@ -203,6 +203,116 @@ pub enum ControlMessageId {
     RouteGuidanceManeuverInformation,
     #[deku(id = "0x5203")]
     StopRouteGuidanceUpdates,
+    #[deku(id = "0x00B0")]
+    StartOOBBTPairing,
+    #[deku(id = "0x00B1")]
+    OOBBTPairingAccessoryInformation,
+    #[deku(id = "0x00B2")]
+    OOBBTPairingLinkKeyInformation,
+    #[deku(id = "0x00B3")]
+    OOBBTPairingCompletionInformation,
+    #[deku(id = "0x00B4")]
+    StopOOBBTPairing,
+    #[deku(id = "0x0D00")]
+    StartRoadObjectDetectionUpdates,
+    #[deku(id = "0x0D01")]
+    RoadObjectDetectionUpdate,
+    #[deku(id = "0x0D02")]
+    StopRoadObjectDetectionUpdates,
+    #[deku(id = "0x10DA")]
+    StartDestinationInformation,
+    #[deku(id = "0x10DB")]
+    DestinationInformation,
+    #[deku(id = "0x10DC")]
+    StopDestinationInformation,
+    #[deku(id = "0x10DD")]
+    DestinationInformationStatus,
+    #[deku(id = "0x4170")]
+    StartListUpdates,
+    #[deku(id = "0x4171")]
+    ListUpdate,
+    #[deku(id = "0x4172")]
+    StopListUpdates,
+    #[deku(id = "0x4302")]
+    AvailableDigitalCarKeys,
+    #[deku(id = "0x4303")]
+    MatchedDigitalCarKeys,
+    #[deku(id = "0x4C03")]
+    StartMediaLibraryUpdates,
+    #[deku(id = "0x4C04")]
+    MediaLibraryUpdate,
+    #[deku(id = "0x4C05")]
+    StopMediaLibraryUpdates,
+    #[deku(id = "0x4C07")]
+    PlayMediaLibraryItems,
+    #[deku(id = "0x4C08")]
+    PlayMediaLibraryCollection,
+    #[deku(id = "0x4C09")]
+    PlayMediaLibrarySpecial,
+    #[deku(id = "0x5204")]
+    LaneGuidanceInformation,
+    #[deku(id = "0x5601")]
+    RequestVoiceOverMoveCursor,
+    #[deku(id = "0x5602")]
+    RequestVoiceOverActivateCursor,
+    #[deku(id = "0x5603")]
+    RequestVoiceOverScrollPage,
+    #[deku(id = "0x5606")]
+    RequestVoiceOverSpeakText,
+    #[deku(id = "0x5608")]
+    RequestVoiceOverPauseText,
+    #[deku(id = "0x5609")]
+    RequestVoiceOverResumeText,
+    #[deku(id = "0x560B")]
+    StartVoiceOverUpdates,
+    #[deku(id = "0x560C")]
+    VoiceOverUpdate,
+    #[deku(id = "0x560D")]
+    StopVoiceOverUpdates,
+    #[deku(id = "0x560E")]
+    RequestVoiceOverConfiguration,
+    #[deku(id = "0x560F")]
+    StartVoiceOverCursorUpdates,
+    #[deku(id = "0x5610")]
+    VoiceOverCursorUpdate,
+    #[deku(id = "0x5611")]
+    StopVoiceOverCursorUpdates,
+    #[deku(id = "0x5612")]
+    StartVoiceOver,
+    #[deku(id = "0x5613")]
+    StopVoiceOver,
+    #[deku(id = "0x6807")]
+    HIDComponentUpdate,
+    #[deku(id = "0x7E00")]
+    StartUSBHostMode,
+    #[deku(id = "0x7E01")]
+    USBModeNotification,
+    #[deku(id = "0x7E02")]
+    StopUSBHostMode,
+    #[deku(id = "0xAD03")]
+    RequestAppDiscoveryAppIcons,
+    #[deku(id = "0xAD04")]
+    AppDiscoveryAppIcon,
+    #[deku(id = "0xAE05")]
+    AccessoryPowerUpdate,
+    #[deku(id = "0xB100")]
+    StartBluetoothLowEnergyUpdates,
+    #[deku(id = "0xB101")]
+    DeviceBluetoothLowEnergyUpdate,
+    #[deku(id = "0xB102")]
+    AccessoryBluetoothLowEnergyUpdate,
+    #[deku(id = "0xB103")]
+    AccessoryBluetoothLowEnergyPairingInformation,
+    #[deku(id = "0xB104")]
+    DeviceBluetoothLowEnergyPairingData,
+    #[deku(id = "0xB105")]
+    AccessoryBluetoothLowEnergyPairingData,
+    #[deku(id = "0xB106")]
+    DeviceBluetoothLowEnergyPairingInformation,
+    #[deku(id = "0xB107")]
+    StopBluetoothLowEnergyUpdates,
+    #[deku(id = "0xFFF0")]
+    GPRMCDataStatusValuesNotification,
     #[deku(id_pat = "_")]
     Unknown(u16),
 }
