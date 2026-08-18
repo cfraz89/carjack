@@ -138,22 +138,33 @@ pub async fn connect_airplay(
         .displays
         .first()
         .ok_or_else(|| eyre!("accessory declared no display in /info"))?;
-    let (width, height) = (disp.width_pixels, disp.height_pixels);
     let max_fps = disp.max_fps.unwrap_or(0);
     let disp_uuid = disp.uuid.clone();
-    tracing::info!("Accessory display: {width}x{height} @ {max_fps} fps, uuid={disp_uuid}");
+    tracing::info!(
+        "Accessory display: {}x{} @ {max_fps} fps, uuid={disp_uuid}",
+        disp.width_pixels,
+        disp.height_pixels
+    );
 
+    // The stream is the view, not the panel: the accessory places it at the view's origin, so a
+    // panel-sized frame lands under whatever the accessory keeps for itself.
     let view = panel_view(&info, &disp_uuid);
-    match view {
-        Some(v) => tracing::info!(
-            "Accessory panel reserves part of itself: video at ({}, {}) sized {}x{}",
-            v.origin_x,
-            v.origin_y,
-            v.width,
-            v.height
-        ),
-        None => tracing::debug!("Accessory gave no panel geometry; video covers the display"),
-    }
+    let (width, height) = match &view {
+        Some(v) => {
+            tracing::info!(
+                "Accessory panel reserves part of itself: video at ({}, {}) sized {}x{}",
+                v.origin_x,
+                v.origin_y,
+                v.width,
+                v.height
+            );
+            (v.width as u32, v.height as u32)
+        }
+        None => {
+            tracing::debug!("Accessory gave no panel geometry; video covers the display");
+            (disp.width_pixels, disp.height_pixels)
+        }
+    };
 
     let multi_codec = info
         .features
