@@ -1,7 +1,7 @@
 [Unit]
 Description=carjack - wireless CarPlay bridge
-After=network.target bluetooth.target NetworkManager.service iwd.service carjack-hci-helper.service
-Wants=bluetooth.target NetworkManager.service iwd.service carjack-hci-helper.service
+After=network.target bluetooth.target NetworkManager.service iwd.service
+Wants=bluetooth.target NetworkManager.service iwd.service
 
 [Service]
 Type=simple

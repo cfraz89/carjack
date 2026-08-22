@@ -155,7 +155,6 @@ impl IapHost {
             ),
         }
 
-        // Class of Device is pre-set by carjack-hci-helper.service, which runs before us.
         tracing::info!("Registered iAP and CarPlay profiles");
 
         Ok(Self {

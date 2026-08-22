@@ -529,7 +529,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smithay",
- "socket2",
  "tap",
  "thiserror 2.0.19",
  "tokio",

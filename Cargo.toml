@@ -71,7 +71,6 @@ quick-xml = { version = "0.41", features = ["serialize"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }
 nix = { version = "0.31", features = ["net", "signal", "socket"] }
 mac_address = "1.1.7"
-socket2 = "0.6"
 xdg = "3.0.0"
 clap = { version = "4.6.2", features = ["derive"] }
 serde_json = "1.0.151"
@@ -110,14 +109,9 @@ UI in its own compositor and streams the encoded screen to the accessory over Ai
 maintainer-scripts = "debian/"
 assets = [
     ["target/release/carjack", "usr/bin/", "755"],
-    ["target/release/carjack-hci-helper", "usr/bin/", "755"],
     ["carjack.toml.example", "etc/carjack/carjack.toml.example", "644"],
     ["carjack-polkit.rules", "etc/polkit-1/rules.d/49-carjack.rules", "644"],
 ]
-
-[[package.metadata.deb.systemd-units]]
-unit-scripts = "."
-unit-name = "carjack-hci-helper"
 
 [[package.metadata.deb.systemd-units]]
 unit-scripts = "."
