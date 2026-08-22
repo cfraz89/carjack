@@ -1489,7 +1489,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1769,7 +1769,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2187,7 +2187,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "iwd-automata"
 version = "0.1.0"
-source = "git+ssh://git@github.com/cfraz89/iwd-automata.git?branch=disable-modes-patch#fa0d7572171433ea8f8fda0aa9747aa1b784a6d2"
+source = "git+ssh://git@github.com/cfraz89/iwd-automata.git?branch=disable-modes-patch#60d665626ae388ea2947fea3ac9f5de74d642f7c"
 dependencies = [
  "futures-util",
  "serde",
@@ -2506,7 +2506,6 @@ dependencies = [
 [[package]]
 name = "nm-automata"
 version = "0.1.0"
-source = "git+ssh://git@github.com/cfraz89/nm-automata.git#3191dabbb253a97e646fa1a4b079da708d7b1f29"
 dependencies = [
  "bitflags",
  "futures-util",
@@ -3105,7 +3104,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3505,10 +3504,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
