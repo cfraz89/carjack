@@ -1,18 +1,6 @@
 set dotenv-load
 
-[script]
-setcap:
-    binary="$(which carjack-hci-helper)"
-    if [ -n "$binary" ]; then
-        echo "Giving cap_net_admin to ${binary}"
-        sudo setcap cap_net_admin+ep "$binary"
-    else
-        echo "carjack-hci-helper not found in PATH, aborting"
-        exit 1
-    fi
-
-# Is the head unit awake? Inquiry, not paging: this unit dials us and does not answer pages of
-# its own, so a page timeout says nothing about whether it is there.
+# Is the targetedd unit reachable? 
 [script('bash')]
 reachable device=env('CARJACK.BLUETOOTH.DEVICE', ''):
     set -uo pipefail
@@ -40,14 +28,12 @@ toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BU
 cuda := "false"
 cuda_features := if cuda == 'true' { '--features cuda' } else { '' }
 
-#lets try without hci-helper for now
-# run +flags="": (install flags)
-# waydroid session stop && carjack-hci-helper; cargo run {{cuda_features}} {{flags}} < /dev/null
+#run carjack
 run *flags: (build flags)
     waydroid session stop
     cargo run {{cuda_features}} {{flags}}
 
-#Run the app until timeout, then kill it and restore the original wifi connection
+#Run the app until timeout, then kill it and restore the original wifi connection - networkmanager only
 [script('bash')]
 [arg("timeout", short="t", long)]
 test-run timeout="60" *flags: (build flags)
@@ -73,18 +59,20 @@ test-run timeout="60" *flags: (build flags)
     waydroid session stop || true
     timeout --foreground --kill-after=5s "{{timeout}}s" cargo run {{cuda_features}} {{flags}} < /dev/null || true
 
+#build carjack
+[default]
 build +flags="":
     {{toolbox_build}}cargo build {{cuda_features}} {{flags}}
 
-install +flags="": (build flags) && setcap
+#run cargo install
+install +flags="": (build flags)
     {{toolbox_build}}cargo install --path . {{cuda_features}} {{flags}}
 
+#install as a systemd service
 [script]
 install-carjack-service: build
     sudo install -Dm755 target/debug/carjack /usr/bin/carjack
-    sudo install -Dm755 target/debug/carjack-hci-helper /usr/bin/carjack-hci-helper
     sudo install -Dm644 carjack.service /etc/systemd/system/carjack.service
-    sudo install -Dm644 carjack-hci-helper.service /etc/systemd/system/carjack-hci-helper.service
     sudo install -Dm644 carjack-polkit.rules /etc/polkit-1/rules.d/49-carjack.rules
     sudo systemctl daemon-reload
     sudo systemctl enable --now carjack.service
@@ -98,26 +86,23 @@ deb:
 test +flags="":
     {{toolbox_build}}cargo test {{cuda_features}} {{flags}}
 
-# The carjack binary's own unit tests. Needs the toolbox like `just build` - the binary links
-# dbus/EGL/gbm/gstreamer, none of which the host has.
+# The carjack binary's own unit tests. 
 test-bin +flags="":
     {{toolbox_build}}cargo test --bin carjack {{cuda_features}} {{flags}} < /dev/null
 
 # The iAP2 protocol unit tests (message encode/decode against bytes captured from a working
-# iPhone session). Pure Rust - no GPU, gstreamer or toolbox needed, unlike `just test`.
+# iPhone session).
 test-proto +flags="":
     cargo test -p iap2-proto {{flags}} < /dev/null
 
 # The libcarjack unit tests (iAP2 session logic, against bytes captured from real head units).
-# Links against gstreamer/catplay so it builds in the toolbox like `just build`, but needs no
-# GPU and no accessory. `cargo test` alone doesn't reach it - that only covers the root package.
 test-lib +flags="":
     {{toolbox_build}}cargo test -p libcarjack --lib {{flags}} < /dev/null
 
 install-cuda-dmabuf-deps:
     {{toolbox_build}}sudo dnf install -y libEGL-devel libgbm-devel gstreamer1-plugins-bad-free-devel
 
-# Install dependencies in toolbox
+# Install dependencies on a fedora system - possibly in toolbox
 install-deps:
     {{toolbox_build}}sudo dnf install gcc g++ gstreamer1-devel gstreamer1-plugins-base-devel pipewire-gstreamer dbus-devel \
     openssl-devel mesa-libgbm-devel libdrm-devel libxkbcommon-devel mesa-libEGL-devel mesa-libGLES-devel \
