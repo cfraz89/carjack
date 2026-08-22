@@ -14,6 +14,8 @@ name = "carjack"
 version = "0.1.0"
 edition.workspace = true
 default-run = "carjack"
+description = "Wireless CarPlay bridge"
+license = "Proprietary"
 
 [dependencies]
 # Defaults off deliberately: `tokio` alone would leave zbus's `async-io` enabled too.
@@ -91,3 +93,32 @@ cuda = ["dep:cuda-dmabuf", "cuda-dmabuf/cuda"]
 [[example]]
 name = "screenshot"
 path = ".claude/skills/run-carjack/screenshot.rs"
+
+# `just deb` (cargo-deb). Mirrors what `just install-carjack-service` does by hand: binaries,
+# systemd units and the polkit rule, wired up via DynamicUser services (no package user to create).
+[package.metadata.deb]
+maintainer = "Christopher Fraser <cfraz89@gmail.com>"
+copyright = "2026, Christopher Fraser <cfraz89@gmail.com>"
+depends = "$auto"
+section = "utility"
+priority = "optional"
+extended-description = """\
+Bridges an iPhone's CarPlay session over Bluetooth/WiFi to an in-car head unit: runs the CarPlay \
+UI in its own compositor and streams the encoded screen to the accessory over AirPlay."""
+# Required by cargo-deb's systemd integration even though we don't ship custom maintainer scripts -
+# it inserts the generated enable/start fragments into templates found here (none, in our case).
+maintainer-scripts = "debian/"
+assets = [
+    ["target/release/carjack", "usr/bin/", "755"],
+    ["target/release/carjack-hci-helper", "usr/bin/", "755"],
+    ["carjack.toml.example", "etc/carjack/carjack.toml.example", "644"],
+    ["carjack-polkit.rules", "etc/polkit-1/rules.d/49-carjack.rules", "644"],
+]
+
+[[package.metadata.deb.systemd-units]]
+unit-scripts = "."
+unit-name = "carjack-hci-helper"
+
+[[package.metadata.deb.systemd-units]]
+unit-scripts = "."
+unit-name = "carjack"

@@ -9,7 +9,7 @@ DynamicUser=yes
 User=carjack
 StateDirectory=carjack
 Environment=HOME=/var/lib/carjack
-ExecStart=/usr/local/bin/carjack
+ExecStart=/usr/bin/carjack
 
 AmbientCapabilities=CAP_DAC_OVERRIDE CAP_CHOWN
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN

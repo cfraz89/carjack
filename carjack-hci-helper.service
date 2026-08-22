@@ -6,7 +6,7 @@ Before=carjack.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/carjack-hci-helper
+ExecStart=/usr/bin/carjack-hci-helper
 
 # The one thing this needs elevated: setting the Bluetooth adapter's Class of Device over a raw
 # HCI mgmt socket (see src/bin/carjack-hci-helper.rs). Kept out of carjack.service entirely so the

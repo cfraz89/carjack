@@ -81,14 +81,18 @@ install +flags="": (build flags) && setcap
 
 [script]
 install-carjack-service: build
-    sudo install -Dm755 target/debug/carjack /usr/local/bin/carjack
-    sudo install -Dm755 target/debug/carjack-hci-helper /usr/local/bin/carjack-hci-helper
+    sudo install -Dm755 target/debug/carjack /usr/bin/carjack
+    sudo install -Dm755 target/debug/carjack-hci-helper /usr/bin/carjack-hci-helper
     sudo install -Dm644 carjack.service /etc/systemd/system/carjack.service
     sudo install -Dm644 carjack-hci-helper.service /etc/systemd/system/carjack-hci-helper.service
     sudo install -Dm644 carjack-polkit.rules /etc/polkit-1/rules.d/49-carjack.rules
     sudo systemctl daemon-reload
     sudo systemctl enable --now carjack.service
     systemctl status carjack.service --no-pager
+
+# Build a release .deb (binaries, systemd units, polkit rule) via cargo-deb.
+deb:
+    {{toolbox_build}}cargo deb -- {{cuda_features}}
 
 # Run cargo tests
 test +flags="":
