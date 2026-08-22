@@ -1,0 +1,18 @@
+# Build environment for `just deb`. dpkg-shlibdeps (used by cargo-deb to resolve $auto
+# dependencies) is part of dpkg-dev and doesn't exist on Fedora, so the .deb is built here
+# instead of in the Fedora toolbox used for everything else.
+FROM docker.io/library/debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config dpkg-dev curl ca-certificates cmake nasm \
+    libssl-dev libdbus-1-dev libacl1-dev \
+    libgbm-dev libdrm-dev libxkbcommon-dev libegl1-mesa-dev libgles2-mesa-dev \
+    libwayland-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+RUN cargo install cargo-deb
+
+WORKDIR /src

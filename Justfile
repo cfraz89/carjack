@@ -78,9 +78,16 @@ install-carjack-service: build
     sudo systemctl enable --now carjack.service
     systemctl status carjack.service --no-pager
 
-# Build a release .deb (binaries, systemd units, polkit rule) via cargo-deb.
+# Build a release .deb (binaries, systemd units, polkit rule) via cargo-deb, inside a Debian
+# container - dpkg-shlibdeps (for $auto deps) doesn't exist on Fedora. Reuses the host's cargo
+# cache (registry + already-fetched git deps) so the container never needs network/SSH access.
 deb:
-    {{toolbox_build}}cargo deb -- {{cuda_features}}
+    podman build -t carjack-deb-builder -f Containerfile.deb .
+    podman run --rm --security-opt label=disable \
+        -v {{justfile_directory()}}:/src \
+        -v {{home_directory()}}/.cargo/registry:/usr/local/cargo/registry \
+        -v {{home_directory()}}/.cargo/git:/usr/local/cargo/git \
+        carjack-deb-builder cargo deb --offline -- {{cuda_features}}
 
 # Run cargo tests
 test +flags="":

@@ -19,7 +19,7 @@ license = "Proprietary"
 
 [dependencies]
 # Defaults off deliberately: `tokio` alone would leave zbus's `async-io` enabled too.
-nm-automata = { git = "ssh://git@github.com/cfraz89/nm-automata.git", default-features = false, features = ["tokio"] }
+nm-automata = { git = "ssh://git@github.com/cfraz89/nm-automata.git", branch="disable-modes-patch", default-features = false, features = ["tokio"] }
 # `WifiBackend` impl backed by iwd instead of NetworkManager - see src/wifi_connect/iwd.rs.
 iwd-automata = { git = "ssh://git@github.com/cfraz89/iwd-automata.git", branch = "disable-modes-patch", package = "iwd-automata", default-features = false, features = ["tokio"] }
 async-trait = "0.1"
