@@ -44,15 +44,15 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "tracing-lo
 usb-gadget = "1.2.0"
 tap = "1.0.1"
 ring = "0.17"
-# Fork `cfraz89/catplay`, branch `main` - the fork's integration branch, merging
+# Fork `cfraz89/catplay`, branch `master` - upstream `catplay-labs/catplay` master plus
 # `feat/hevc-and-view-rect` (the screen config frame's view parameters and `displayPanels` in
 # `/info`, on top of the plumbed-through AirPlay `/setup` device identity - BT MAC as `deviceID`,
 # associated WiFi MAC as `macAddress`) and `fix/aarch64-asm-base-macros` (catplay_hap's asm_base.h
 # stub lacks the aarch64 link-register macros, so its chacha20_poly1305 asm won't assemble for
-# arm64), over upstream `catplay-labs/catplay` master.
-catplay_hap = { git = "https://github.com/cfraz89/catplay.git", branch = "main", default-features=false, features = ["std"] }
-catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "main", default-features = false, features = ["tx"]}
-catplay_util = { git = "https://github.com/cfraz89/catplay.git", branch = "main" }
+# arm64), both up as draft PRs upstream.
+catplay_hap = { git = "https://github.com/cfraz89/catplay.git", branch = "master", default-features=false, features = ["std"] }
+catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "master", default-features = false, features = ["tx"]}
+catplay_util = { git = "https://github.com/cfraz89/catplay.git", branch = "master" }
 bytes = "1.12.1"
 gstreamer = "0.24"
 gstreamer-app = "0.24"

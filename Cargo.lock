@@ -548,7 +548,7 @@ dependencies = [
 [[package]]
 name = "catplay_async"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "async-trait",
  "catplay_async_derive",
@@ -561,7 +561,7 @@ dependencies = [
 [[package]]
 name = "catplay_async_derive"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -571,7 +571,7 @@ dependencies = [
 [[package]]
 name = "catplay_audio"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "alac",
  "bitflags",
@@ -585,7 +585,7 @@ dependencies = [
 [[package]]
 name = "catplay_bonjour"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "async-trait",
  "if-addrs",
@@ -599,7 +599,7 @@ dependencies = [
 [[package]]
 name = "catplay_carplay"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "async-trait",
  "bitflags",
@@ -631,7 +631,7 @@ dependencies = [
 [[package]]
 name = "catplay_csm"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "inventory",
 ]
@@ -639,7 +639,7 @@ dependencies = [
 [[package]]
 name = "catplay_fairplay"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "thiserror 2.0.19",
 ]
@@ -647,7 +647,7 @@ dependencies = [
 [[package]]
 name = "catplay_hap"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "aes",
  "catplay_mfi",
@@ -672,7 +672,7 @@ dependencies = [
 [[package]]
 name = "catplay_iap2_client"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "async-trait",
  "bytes",
@@ -692,7 +692,7 @@ dependencies = [
 [[package]]
 name = "catplay_iap2_link"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "bitflags",
  "bytes",
@@ -706,7 +706,7 @@ dependencies = [
 [[package]]
 name = "catplay_mfi"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "libc",
  "log",
@@ -717,7 +717,7 @@ dependencies = [
 [[package]]
 name = "catplay_plist"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "bitflags",
  "bytes",
@@ -734,7 +734,7 @@ dependencies = [
 [[package]]
 name = "catplay_ring"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "libc",
  "log",
@@ -743,7 +743,7 @@ dependencies = [
 [[package]]
 name = "catplay_tokio"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "async-trait",
  "bytes",
@@ -761,7 +761,7 @@ dependencies = [
 [[package]]
 name = "catplay_tracing"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "libc",
  "log",
@@ -772,7 +772,7 @@ dependencies = [
 [[package]]
 name = "catplay_tracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "catplay_tracing",
  "log",
@@ -783,7 +783,7 @@ dependencies = [
 [[package]]
 name = "catplay_udp"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "async-trait",
  "bytes",
@@ -800,7 +800,7 @@ dependencies = [
 [[package]]
 name = "catplay_util"
 version = "0.1.0"
-source = "git+https://github.com/cfraz89/catplay.git?branch=main#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
+source = "git+https://github.com/cfraz89/catplay.git?branch=master#c327e9ce5b825fdda1e3fd271aa5706ca7351f18"
 dependencies = [
  "async-trait",
  "catplay_async",
