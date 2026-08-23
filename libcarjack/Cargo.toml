@@ -10,9 +10,9 @@ path = "src/lib.rs"
 [dependencies]
 btuuid = "0.1.1"
 bytes = "1.12.1"
-catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "feat/hevc-and-view-rect", default-features = false, features = ["tx"]}
-catplay_hap = { git = "https://github.com/cfraz89/catplay.git", branch = "feat/hevc-and-view-rect", default-features=false, features = ["std"] }
-catplay_util = { git = "https://github.com/cfraz89/catplay.git", branch = "feat/hevc-and-view-rect" }
+catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "main", default-features = false, features = ["tx"]}
+catplay_hap = { git = "https://github.com/cfraz89/catplay.git", branch = "main", default-features=false, features = ["std"] }
+catplay_util = { git = "https://github.com/cfraz89/catplay.git", branch = "main" }
 deku = "0.20.3"
 eyre = "0.6.12"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
