@@ -68,16 +68,20 @@ build +flags="":
 install +flags="": (build flags)
     {{toolbox_build}}cargo install --path . {{cuda_features}} {{flags}}
 
-#install as a systemd service
+#install locally as a systemd service.
 [script]
 install-carjack-service: build
-    sudo install -Dm755 target/debug/carjack /usr/bin/carjack
+    sudo install -Dm755 target/debug/carjack /usr/local/bin/carjack
     sudo install -Dm644 carjack.service /etc/systemd/system/carjack.service
+    # The shipped unit names the deb's /usr/bin path; repoint it at the one we just wrote.
+    printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/carjack\n' \
+        | sudo install -Dm644 /dev/stdin /etc/systemd/system/carjack.service.d/local-path.conf
     sudo install -Dm644 carjack-polkit.rules /etc/polkit-1/rules.d/49-carjack.rules
     sudo systemctl daemon-reload
     sudo systemctl enable --now carjack.service
     systemctl status carjack.service --no-pager
 
+#Build an arm64 deb of carjack
 deb:
     podman build -t carjack-deb-builder -f Containerfile.deb .
     podman run --rm --security-opt label=disable \
