@@ -1,44 +1,18 @@
-# carjack configuration.
-# Loaded from ~/.config/carjack/config.toml (XDG), or pass `-c <path>` / `carjack --config <path>`.
-# Every key has a default, so you only need the ones you want to change.
-#
-# Precedence (highest wins): launch flag > CARJACK_* env var > this file > default.
-#   flags:    carjack --drm-device nvidia --zerocopy auto --width 800 --command "..." (see --help)
-#   env vars: CARJACK.SOURCE, CARJACK.GRAPHICS.DRM_DEVICE, CARJACK.GRAPHICS.ZEROCOPY,
-#             CARJACK.GRAPHICS.BITRATE,
-#             CARJACK.DISPLAY.WIDTH, CARJACK.APP.COMMAND, ...  (CARJACK + `.` + config path)
-
-# What to stream:
-#   "app"      - run [app] command in carjack's own headless compositor (default)
-#   "desktop"  - capture your existing desktop via xdg-desktop-portal (ScreenCast; consent dialog
-#                on first run) and inject touch back over libei, which - unlike the portal's
-#                NotifyTouch* methods - maps correctly on a scaled/HiDPI monitor. Needs a running
-#                desktop session; [app], [display], and the display cache are ignored.
-#                [graphics] zerocopy still applies: auto/true prefers VA-API/v4l2 GPU
-#                zero-copy on the GPU that renders the desktop (needs that GPU's VA driver, e.g.
-#                intel-media-driver), then GL convert/scale, then software; false = software.
 source = "app"
 
 [bluetooth]
-# REQUIRED. The head unit to connect to, as either its Bluetooth MAC or its advertised name.
-# carjack connects to exactly this device and nothing else - it does not scan and guess, because
-# picking by cached BlueZ properties meant a powered-off head unit with a stale bond could win
-# over the one actually in the vehicle.
-#   device = "AA:BB:CC:DD:EE:FF"   # by MAC (exact, and survives a name change)
+#   device = "AA:BB:CC:DD:EE:FF"   # by MAC
 #   device = "MYCAR-1234"          # by advertised name
-# Also settable as `carjack --bt-device <MAC|NAME>` or CARJACK.BLUETOOTH.DEVICE.
 device = "MYCAR-1234"
 
 [graphics]
-# Which GPU to render *and* encode on (they must be the same for zero-copy). One of:
-#   "auto"                  - pick automatically, preferring an encode-capable GPU
-#                             (nvidia > amdgpu > i915 > others)
-#   "nvidia" / "amdgpu" / "i915" / ...  - pick the render node with this kernel driver
+#   "auto"
+#   "nvidia" / "amdgpu" / "i915" - pick by driver
 #   "/dev/dri/renderD129"   - an explicit render-node path
 #   "0" / "1" / ...         - a numeric index (0 -> renderD128, 1 -> renderD129)
 drm_device = "auto"
 
-# Zero-copy encode (compositor dmabuf straight into a same-GPU hardware encoder):
+# Zero-copy encode 
 #   "auto"   - try zero-copy; if it can't be set up, fall back to software (with a warning)
 #   true     - require zero-copy; error out at startup if it can't be set up
 #   false    - software encode only
@@ -52,14 +26,10 @@ zerocopy = "auto"
 #   "h264"   - H264 always
 # A unit that declares no HEVC may still decode it - or may show a black screen while accepting
 # every frame without complaint, which is what the bench unit does. Falls back to H264 if the
-# machine has no HEVC encoder installed. Also settable as CARJACK.GRAPHICS.CODEC.
+# machine has no HEVC encoder installed.
 codec = "auto"
 
-# Target video bitrate in kbit/s, applied as VBR to whichever encoder is selected (hardware or
-# software) - so this is a ceiling, not what a still screen costs. The accessory's WiFi link is the
-# bottleneck, so aiming too high shows up as stutter rather than as detail - raise it only if the
-# picture looks soft and the stream stays smooth.
-# Also settable as `carjack --bitrate <KBPS>` or CARJACK.GRAPHICS.BITRATE.
+# Target video bitrate in kbit/s 
 bitrate = 3000   # 3 Mbit/s ceiling
 
 [display]
@@ -71,11 +41,9 @@ height = 720
 fps = 30
 
 [app]
-# Desktop command to stream (run via `sh -c "exec ..."`). Empty = stream black until a client
-# connects.
 command = "waydroid show-full-ui"
 # Can the app live-resize?
-#   true  - launched at startup (boots during the BT/WiFi phase) and left to resize itself
-#   false - can't resize (Android/Waydroid): NOT launched until the accessory's resolution is known,
+#   true  - launched at startup and resize itself when we detect accessory size
+#   false - can't resize NOT launched until the accessory's resolution is known,
 #           and relaunched on later reconnects that change the size
 resizable = false
