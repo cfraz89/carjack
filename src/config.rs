@@ -350,14 +350,7 @@ fn config_file(cli: &Cli) -> Result<Option<PathBuf>> {
             }
             Ok(Some(p.clone()))
         }
-        None => Ok(xdg::BaseDirectories::with_prefix("carjack")
-            .get_config_home()
-            .map(|home| home.join("config.toml"))
-            .filter(|p| p.exists())
-            .or_else(|| {
-                let etc = PathBuf::from("/etc/carjack/config.toml");
-                etc.exists().then_some(etc)
-            })),
+        None => Ok(crate::paths::config_file("config.toml")),
     }
 }
 

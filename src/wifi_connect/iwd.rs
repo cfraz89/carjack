@@ -3,8 +3,8 @@
 //! iwd has no connection-profile API: a network is provisioned by a file in its state directory,
 //! and `Network.Connect()` is the whole of the API. The Agent API is no substitute -
 //! `AddressOverride` has no D-Bus equivalent, and `Device.Address`/`KnownNetwork.Hidden` are
-//! read-only. So this writes the file directly (needs `CAP_DAC_OVERRIDE`/`CAP_CHOWN` - see
-//! `write_profile`), scans, then connects.
+//! read-only. So this writes the file directly (needs membership of the group owning iwd's state
+//! directory - see `write_profile`), scans, then connects.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -176,7 +176,8 @@ fn state_directory(info: &iwd_automata::DaemonInfo) -> Result<PathBuf> {
 
 fn cannot_write(dir: &std::path::Path) -> eyre::Report {
     eyre!(
-        "Cannot write {}; iwd backend requires to run carjack through the systemd service, or as root",
+        "Cannot provision {}; the iwd backend requires to run carjack through the systemd service, \
+         which puts it in the group owning that directory, or as root",
         dir.display()
     )
 }
@@ -195,9 +196,9 @@ async fn check_writable() -> Result<()> {
 
 /// Only what iwd names a WPA-PSK profile. `/`, `.` and `..` are outside both alphabets, so a name
 /// that passes cannot leave the state directory - this is the security boundary of the write,
-/// now that it happens with carjack's own `CAP_DAC_OVERRIDE`/`CAP_CHOWN` rather than a sidecar
-/// validating an argument crossing a process boundary. `network_file_name` already only produces
-/// names in this grammar; this catches it if that ever stops being true.
+/// now that it is carjack's own write rather than a sidecar validating an argument crossing a
+/// process boundary. `network_file_name` already only produces names in this grammar; this catches
+/// it if that ever stops being true.
 fn check_profile_name(name: &str) -> Result<()> {
     let stem = name
         .strip_suffix(".psk")
@@ -226,10 +227,19 @@ fn check_profile_name(name: &str) -> Result<()> {
 
 /// Write one iwd provisioning file - temp file then rename, so iwd's inotify watch never sees a
 /// partial file. Write and `fchown` both land before the rename, since iwd loads on that event.
+///
+/// iwd's `CapabilityBoundingSet` has no `CAP_DAC_OVERRIDE`, so it reads provisioning files by
+/// ordinary permissions despite running as uid 0 - one it cannot reach as owner, group or other is
+/// silently never provisioned. carjack cannot hand it a root-owned file without `CAP_CHOWN`, so the
+/// two meet on the group instead: `iwd.service`'s `Group=` (see `iwd-carjack-state.conf`) owns the
+/// state directory, `carjack.service` joins it through `SupplementaryGroups=`, and the file goes out
+/// 0640 in that group. Setting a group carjack is already in needs no privilege at all.
 async fn write_profile(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
     use tokio::io::AsyncWriteExt;
 
     let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    let group = tokio::fs::metadata(dir).await?.gid();
     // Dot-prefixed so iwd, which reads a file's security type after the first dot, ignores it.
     let temp = dir.join(format!(".carjack-{}.tmp", std::process::id()));
     let result: std::io::Result<()> = async {
@@ -237,15 +247,17 @@ async fn write_profile(path: &std::path::Path, body: &str) -> std::io::Result<()
             .write(true)
             .create(true)
             .truncate(true)
-            .mode(0o600) // Not world-readable - holds the accessory's passphrase.
+            .mode(0o640) // Readable by iwd's group, by nobody else - holds the passphrase.
             .open(&temp)
             .await?;
         file.write_all(body.as_bytes()).await?;
         file.sync_all().await?;
         // By descriptor rather than path, so it can't be redirected between the write and the
-        // chown. No tokio wrapper exists for fchown - it's a fast metadata-only syscall, not
-        // worth spawn_blocking on its own.
-        std::os::unix::fs::fchown(&file, Some(0), Some(0))?;
+        // chown. The directory's own group, rather than a name looked up here: it is the one iwd
+        // reads by, and taking it from the directory means the grant is configured in one place.
+        // No tokio wrapper exists for fchown - it's a fast metadata-only syscall, not worth
+        // spawn_blocking on its own.
+        std::os::unix::fs::fchown(&file, None, Some(group))?;
         tokio::fs::rename(&temp, path).await
     }
     .await;
@@ -687,7 +699,7 @@ mod tests {
 
     /// Live check against iwd: the provisioning file must be one the daemon reads back as written.
     #[test]
-    #[ignore = "needs a live iwd and CAP_DAC_OVERRIDE/CAP_CHOWN on this test binary"]
+    #[ignore = "needs a live iwd and membership of the group owning its state directory"]
     fn iwd_reads_back_the_accessory_provisioning_file() {
         const SSID: &str = "carjack provision-check";
         RUNTIME.block_on(async {

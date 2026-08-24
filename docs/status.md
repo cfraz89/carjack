@@ -1008,6 +1008,20 @@ Two real defects surfaced and fixed while standing this up against a live iwd on
   takes the file *name* only, deriving the directory from iwd's own `Daemon.GetInfo` and checking
   the name against iwd's profile grammar, so a `CAP_DAC_OVERRIDE` binary is not an
   arbitrary-file-write primitive for any local user.
+- **Superseded again (2026-08-24): the capability is gone; the grant is a group.** Carrying
+  `CAP_DAC_OVERRIDE` to reach one directory is a write to every file on the system, and under
+  `DynamicUser=` it was not even sufficient - that implies `ProtectSystem=strict`, so `/var` is
+  mounted read-only for the service and the write is refused before DAC is ever consulted.
+  **Now:** `iwd-carjack-state.conf` (shipped by the deb into `/usr/lib/systemd/system/iwd.service.d/`)
+  gives `iwd.service` `Group=iwd-provision` and `StateDirectoryMode=0770`, so systemd hands
+  `/var/lib/iwd` to that group on every iwd start; `carjack.service` joins it with
+  `SupplementaryGroups=`, adds `ReadWritePaths=/var/lib/iwd` for the mount, and now runs with an
+  empty `CapabilityBoundingSet=`. `write_profile` writes 0640 and `fchown`s only the *group*, taken
+  from the directory itself - setting a group the process is already in needs no privilege, which
+  is what makes the bullet above (iwd reading by ordinary permissions) work without root ownership.
+  The group has to exist before iwd starts or the unit fails, so it is created in three places: the
+  deb's `debian/postinst`, `just install-carjack-service`, and the image build's
+  `config-carjack.conf`.
 - **The HCI sidecar absorbed it** rather than a second binary being added:
   `src/bin/carjack-hci-helper.rs` is now `src/bin/carjack-wireless-helper.rs`, with the old
   behaviour under a `device-class` subcommand, and holds both capabilities

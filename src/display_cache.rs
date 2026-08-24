@@ -1,8 +1,8 @@
 //! Per-accessory display cache. Remembers the resolution/refresh a head unit reported, keyed by the
 //! accessory's Bluetooth MAC, so on the next connect we can size the compositor (and launch the desktop
 //! app) up front - hiding a slow app's boot (e.g. Waydroid) behind the BT/WiFi/AirPlay setup
-//! instead of waiting for AirPlay to report the display. Stored as JSON in the XDG cache dir; a
-//! missing or corrupt file just means "no cache yet".
+//! instead of waiting for AirPlay to report the display. Stored as JSON in the cache dir (see
+//! [`crate::paths`]); a missing or corrupt file just means "no cache yet".
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,11 +33,10 @@ pub struct DisplayCache {
 }
 
 impl DisplayCache {
-    /// Load the cache from `~/.cache/carjack/displays.json` (all-empty if absent/unreadable).
+    /// Load `displays.json` from wherever [`crate::paths::cache_file`] puts it (all-empty if
+    /// absent/unreadable).
     pub fn load() -> Self {
-        let path = xdg::BaseDirectories::with_prefix("carjack")
-            .place_cache_file("displays.json")
-            .ok();
+        let path = crate::paths::cache_file("displays.json").ok();
         let file = path
             .as_ref()
             .and_then(|p| std::fs::read(p).ok())

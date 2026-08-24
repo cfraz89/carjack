@@ -8,12 +8,33 @@ Type=simple
 DynamicUser=yes
 User=carjack
 StateDirectory=carjack
+CacheDirectory=carjack
 Environment=HOME=/var/lib/carjack
+# Without this, everything XDG lands under HOME - i.e. a cache inside the state directory, at
+# /var/lib/private/carjack/.cache/. carjack's own files follow $STATE_DIRECTORY/$CACHE_DIRECTORY
+# (see src/paths.rs); this is for the libraries that only know XDG - mesa's shader cache, the
+# GStreamer registry - so their caches land under CacheDirectory= too and `systemctl clean
+# --what=cache carjack` clears the lot.
+Environment=XDG_CACHE_HOME=/var/cache/carjack
 ExecStart=/usr/bin/carjack
 
-AmbientCapabilities=CAP_DAC_OVERRIDE CAP_CHOWN
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN
+CapabilityBoundingSet=
 NoNewPrivileges=yes
+
+# carjack provisions the accessory's network by writing a file into iwd's state directory. Two
+# things stand between it and that write, and both are lifted here rather than with capabilities:
+#
+#  - DynamicUser=yes implies ProtectSystem=strict, which mounts /var read-only for this service.
+#    A read-only mount refuses the write before DAC is consulted, so no capability would help.
+#  - The directory is 0700 and not ours. iwd-carjack-state.conf hands it to the iwd-provision
+#    group; joining that group is the whole of the grant, and it reaches nothing else.
+#
+# iwd.service creates the directory (StateDirectory=iwd) and the After= above orders us behind it.
+# Optional ('-') all the same: a missing path here fails the whole namespace setup, and carjack not
+# starting at all is a far worse answer than the iwd backend reporting it cannot provision.
+# See src/wifi_connect/iwd.rs.
+SupplementaryGroups=iwd-provision
+ReadWritePaths=-/var/lib/iwd
 
 Restart=on-failure
 RestartSec=5

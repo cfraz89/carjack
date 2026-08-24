@@ -5,3 +5,4 @@ pub mod compositor;
 pub mod config;
 pub mod display_cache;
 pub mod encode;
+pub mod paths;

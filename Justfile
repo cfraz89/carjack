@@ -77,7 +77,13 @@ install-carjack-service: build
     printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/carjack\n' \
         | sudo install -Dm644 /dev/stdin /etc/systemd/system/carjack.service.d/local-path.conf
     sudo install -Dm644 carjack-polkit.rules /etc/polkit-1/rules.d/49-carjack.rules
+    # The deb's postinst does these two; iwd.service will not start if the group is missing, so
+    # the group goes in before the drop-in that names it.
+    sudo groupadd --system --force iwd-provision
+    sudo install -Dm644 iwd-carjack-state.conf /etc/systemd/system/iwd.service.d/carjack-state.conf
     sudo systemctl daemon-reload
+    # Only a restart re-applies the state directory's group and mode, and only if iwd is up.
+    sudo systemctl try-restart iwd.service || true
     sudo systemctl enable --now carjack.service
     systemctl status carjack.service --no-pager
 

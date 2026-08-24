@@ -1,4 +1,5 @@
-//! Per-accessory settings, keyed by the accessory's Bluetooth MAC. Hand-edited config under XDG config.
+//! Per-accessory settings, keyed by the accessory's Bluetooth MAC. Hand-edited, and looked up the
+//! same way as `config.toml` - see [`carjack::paths::config_file`].
 
 use std::collections::HashMap;
 
@@ -23,10 +24,10 @@ pub struct AccessoryStore {
 }
 
 impl AccessoryStore {
-    /// Load from `~/.config/carjack/accessories.toml` (all-empty if absent/unreadable).
+    /// Load from `~/.config/carjack/accessories.toml`, else `/etc/carjack/accessories.toml`
+    /// (all-empty if absent/unreadable).
     pub fn load() -> Self {
-        let file = xdg::BaseDirectories::with_prefix("carjack")
-            .find_config_file("accessories.toml")
+        let file = carjack::paths::config_file("accessories.toml")
             .and_then(|p| {
                 config::Config::builder()
                     .add_source(config::File::from(p.as_path()))

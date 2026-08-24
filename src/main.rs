@@ -43,9 +43,9 @@ async fn main() -> Result<()> {
         ));
     }
 
-    // Shared HomeKit identity across both source paths and runs - in the data dir, not the cache,
+    // Shared HomeKit identity across both source paths and runs - in the state dir, not the cache,
     // so losing it doesn't leave every paired accessory with a dead pairing in its table.
-    match xdg::BaseDirectories::with_prefix("carjack").place_data_file("homekit.bin") {
+    match carjack::paths::state_file("homekit.bin") {
         Ok(path) => libcarjack::airplay::init_homekit_storage(&path)?,
         Err(e) => tracing::warn!("No HomeKit storage path ({e}); pairing from scratch every run"),
     }

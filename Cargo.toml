@@ -113,6 +113,9 @@ assets = [
     ["target/release/carjack", "usr/bin/", "755"],
     ["config.toml.example", "etc/carjack/config.toml.example", "644"],
     ["carjack-polkit.rules", "etc/polkit-1/rules.d/49-carjack.rules", "644"],
+    # Grants carjack the write into iwd's state directory; the group it names is created by the
+    # postinst, since iwd.service will not start without it.
+    ["iwd-carjack-state.conf", "usr/lib/systemd/system/iwd.service.d/carjack-state.conf", "644"],
 ]
 
 [[package.metadata.deb.systemd-units]]
