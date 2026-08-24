@@ -111,7 +111,7 @@ UI in its own compositor and streams the encoded screen to the accessory over Ai
 maintainer-scripts = "debian/"
 assets = [
     ["target/release/carjack", "usr/bin/", "755"],
-    ["carjack.toml.example", "etc/carjack/carjack.toml.example", "644"],
+    ["config.toml.example", "etc/carjack/config.toml.example", "644"],
     ["carjack-polkit.rules", "etc/polkit-1/rules.d/49-carjack.rules", "644"],
 ]
 
