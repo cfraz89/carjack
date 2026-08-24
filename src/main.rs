@@ -140,7 +140,7 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
     };
     let compositor = Compositor::start(
         render_node,
-        backend.is_zero_copy(),
+        backend.frame_format(),
         encode::importable_modifiers(&backend),
         start_w,
         start_h,

@@ -1,4 +1,3 @@
-use std::os::fd::AsFd;
 #[cfg(feature = "cuda")]
 use std::os::fd::AsRawFd;
 use std::str::FromStr;
@@ -15,7 +14,9 @@ use gstreamer_allocators::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use smithay::backend::allocator::Buffer as _;
+use smithay::backend::allocator::Fourcc;
 use smithay::backend::allocator::dmabuf::Dmabuf;
+use std::os::fd::BorrowedFd;
 use tokio::sync::{mpsc, watch};
 use tokio_util::task::AbortOnDropHandle;
 
@@ -108,11 +109,39 @@ pub enum EncodeBackend {
     Software { codec: VideoCodec },
 }
 
+/// What the compositor has to produce for a backend - the compositor is started with this and
+/// the encoder built to match, so the two cannot disagree.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FrameFormat {
+    /// BGRx read back into system memory: the software path, and any hardware encoder that has to
+    /// be fed system memory.
+    Shm,
+    /// The rendered ARGB dmabuf itself, converted downstream by the backend's `postproc` (or by
+    /// the CUDA importer).
+    Argb,
+    /// ARGB rendered, then converted to NV12 on the GPU by [`crate::nv12`] and that dmabuf
+    /// forwarded - for an encoder that imports NV12 but has no postproc element available.
+    Nv12,
+}
+
 impl EncodeBackend {
     /// Whether this backend consumes the compositor's dmabuf directly (so the compositor must
     /// forward dmabufs); false means the software path consuming CPU-read-back frames.
     pub fn is_zero_copy(&self) -> bool {
         !matches!(self, Self::Software { .. })
+    }
+
+    /// The frame the compositor must publish for this backend.
+    pub fn frame_format(&self) -> FrameFormat {
+        match self {
+            Self::Software { .. } => FrameFormat::Shm,
+            Self::Hw { backend, .. } => match backend.import {
+                Import::Nv12DmaBuf => FrameFormat::Nv12,
+                Import::DmaBuf => FrameFormat::Argb,
+                #[cfg(feature = "cuda")]
+                Import::Cuda => FrameFormat::Argb,
+            },
+        }
     }
 
     /// The codec this backend encodes - what the accessory is told the stream is, and which parameter
@@ -188,10 +217,25 @@ pub fn resolve_backend(
             )
         }),
         ZeroCopyMode::Auto => Ok(try_zero_copy(render_node, codec).unwrap_or_else(|| {
-            tracing::warn!(
-                "zerocopy=auto: no zero-copy backend available on {render_node}, \
-                 falling back to SOFTWARE encode"
-            );
+            // Which encoder that leaves is worth saying here: no zero-copy chain does not mean no
+            // hardware encoder, only that frames reach it through system memory.
+            match system_memory_encoder(codec) {
+                Some((desc, true)) => tracing::warn!(
+                    "zerocopy=auto: no zero-copy backend available on {render_node}; encoding on \
+                     hardware '{}' fed system memory (a CPU copy per frame)",
+                    encoder_name(&desc)
+                ),
+                Some((desc, false)) => tracing::warn!(
+                    "zerocopy=auto: no zero-copy backend available on {render_node}, falling back \
+                     to SOFTWARE encode with '{}'",
+                    encoder_name(&desc)
+                ),
+                None => tracing::warn!(
+                    "zerocopy=auto: no zero-copy backend available on {render_node}, and no \
+                     {} encoder at all",
+                    codec.describe()
+                ),
+            }
             EncodeBackend::Software { codec }
         })),
     }
@@ -233,13 +277,30 @@ fn encoder_installed(codec: VideoCodec) -> bool {
 /// import then fails per-frame on a mismatched GPU. The rest stay as fallbacks, in table order.
 fn try_zero_copy(render_node: &str, codec: VideoCodec) -> Option<EncodeBackend> {
     let driver = crate::config::render_node_driver(render_node);
-    let mut candidates: Vec<&HwBackend> = HW_BACKENDS
-        .iter()
-        .filter(|b| wanted(b) && b.available(codec) && b.can_import_from(driver.as_deref()))
-        .collect();
+    let mut candidates: Vec<&HwBackend> = Vec::new();
+    // Why each row was passed over, so a board that falls back to software says which of the two
+    // reasons it was: wrong GPU, or the plugin isn't installed.
+    let mut rejected: Vec<String> = Vec::new();
+    for backend in HW_BACKENDS.iter().filter(|b| wanted(b)) {
+        if !backend.can_import_from(driver.as_deref()) {
+            rejected.push(format!(
+                "{} (runs on {})",
+                backend.name,
+                backend.drivers.join("/")
+            ));
+        } else if !backend.available(codec) {
+            rejected.push(format!(
+                "{} (missing {})",
+                backend.name,
+                backend.missing_elements(codec).join(", ")
+            ));
+        } else {
+            candidates.push(backend);
+        }
+    }
     candidates.sort_by_key(|b| !b.matches_driver(driver.as_deref()));
     tracing::info!(
-        "{render_node} is driven by {}; usable zero-copy backends: {}",
+        "{render_node} is driven by {}; usable zero-copy backends: {}{}",
         driver.as_deref().unwrap_or("an unknown driver"),
         if candidates.is_empty() {
             "none".to_string()
@@ -249,6 +310,11 @@ fn try_zero_copy(render_node: &str, codec: VideoCodec) -> Option<EncodeBackend> 
                 .map(|b| b.name)
                 .collect::<Vec<_>>()
                 .join(", ")
+        },
+        if rejected.is_empty() {
+            String::new()
+        } else {
+            format!("; skipped: {}", rejected.join(", "))
         },
     );
 
@@ -261,6 +327,24 @@ fn try_zero_copy(render_node: &str, codec: VideoCodec) -> Option<EncodeBackend> 
                     #[cfg(feature = "cuda")]
                     importer: None,
                 });
+            }
+            // The elements existing is not enough here: this row leans on the compositor being
+            // able to render NV12 on this GPU, which is a driver capability, not a gst one. Ask
+            // before choosing it - a backend chosen and then unable to produce a frame would take
+            // the session down, where falling through just costs the zero-copy path.
+            Import::Nv12DmaBuf => {
+                if crate::nv12::supported(render_node) {
+                    return Some(EncodeBackend::Hw {
+                        backend,
+                        codec,
+                        #[cfg(feature = "cuda")]
+                        importer: None,
+                    });
+                }
+                tracing::warn!(
+                    "'{}' needs NV12 rendering, which {render_node} cannot do",
+                    backend.name
+                );
             }
             // CUDA is the one backend that needs state (a CUDA context bound to `render_node`)
             // rather than just elements, so it can fail this late - e.g. the compositor renders on
@@ -833,9 +917,11 @@ async fn drive_video_pipeline(
 enum Import {
     /// Pushed as `video/x-raw(memory:DMABuf)` (DMA_DRM) and imported by the backend's `postproc`.
     DmaBuf,
-    /// Imported into `GstCudaMemory` by `cuda-dmabuf` (EGL + `cuGraphicsEGLRegisterImage`, which
-    /// also de-tiles GPU->GPU). NVIDIA needs this because its block-linear surfaces can *not* be
-    /// imported by `glupload`/`vapostproc`; the encoder then consumes CUDA memory with no postproc.
+    /// The compositor converts to NV12 on the GPU ([`crate::nv12`]) and the encoder imports that
+    /// dmabuf directly - for encoders that take NV12 dmabufs but whose platform has no postproc
+    /// element to convert with (venus: `v4l2h264enc` takes them, `v4l2convert` does not exist).
+    Nv12DmaBuf,
+    /// Each dmabuf imported into `GstCudaMemory` via CUDA/EGL interop.
     #[cfg(feature = "cuda")]
     Cuda,
 }
@@ -911,12 +997,18 @@ const HW_BACKENDS: &[HwBackend] = &[
     },
     // Qualcomm / embedded (the deployment target). v4l2 stateful encoders take DMABuf directly;
     // rate/keyframe control goes through V4L2 controls (`extra-controls`) rather than gst
-    // properties. Untested off-device.
+    // properties.
+    //
+    // No `postproc` on the compositor path: `v4l2convert` needs an m2m converter device, which
+    // Qualcomm SoCs do not have (`gst-inspect-1.0 v4l2convert` finds nothing on a QCS6490), so
+    // the compositor converts to NV12 itself and the encoder imports that. The desktop path still
+    // names `v4l2convert` - it has no compositor to convert for, and falls back to software
+    // convert/scale where the element is missing.
     HwBackend {
         name: "v4l2",
         drivers: &["msm", "msm_drm"],
-        import: Import::DmaBuf,
-        postproc: Some("v4l2convert"),
+        import: Import::Nv12DmaBuf,
+        postproc: None,
         desktop: &["v4l2convert"],
         desktop_memory: "memory:DMABuf",
         // `video_bitrate_mode=0` is VBR in V4L2 (1 is CBR).
@@ -924,7 +1016,9 @@ const HW_BACKENDS: &[HwBackend] = &[
         encoder_hevc: Some(
             "v4l2h265enc extra-controls=controls,video_bitrate_mode=0,video_bitrate={bps}",
         ),
-        encoder_input: Some("video/x-raw(memory:DMABuf), format=NV12"),
+        // The compositor's dmabuf already arrives as DMA_DRM/NV12 with the plane offsets on it;
+        // a filter here would only re-state what appsrc has already negotiated.
+        encoder_input: None,
     },
     // Intel / AMD VA-API. vapostproc imports the dmabuf and outputs NV12 in VAMemory, which
     // vah264enc consumes on the same GPU - fully zero-copy.
@@ -976,6 +1070,23 @@ impl HwBackend {
         self.postproc.is_none_or(element_available) && self.encodes(codec)
     }
 
+    /// Compositor-path elements this machine does not have - why [`available`](Self::available)
+    /// said no, for logging.
+    fn missing_elements(&self, codec: VideoCodec) -> Vec<String> {
+        let mut missing = Vec::new();
+        if let Some(p) = self.postproc.filter(|p| !element_available(p)) {
+            missing.push(p.to_string());
+        }
+        match self.encoder_template(codec) {
+            Some(t) if !element_available(encoder_name(&t)) => {
+                missing.push(encoder_name(&t).into())
+            }
+            None => missing.push(format!("no {} encoder", codec.describe())),
+            _ => {}
+        }
+        missing
+    }
+
     /// Whether this backend's desktop-path elements all exist on this machine.
     fn desktop_available(&self, codec: VideoCodec) -> bool {
         self.desktop.iter().copied().all(element_available) && self.encodes(codec)
@@ -983,8 +1094,19 @@ impl HwBackend {
 
     /// Whether this backend runs on the GPU driven by DRM `driver` (used to pick the desktop
     /// backend that lives on the same GPU as the desktop's buffers).
+    ///
+    /// A listed name matches the whole driver family under it, because sysfs reports the *platform*
+    /// driver bound to the node, which varies per SoC: one Qualcomm board's render node reads
+    /// `msm_dpu`, another `msm_drm`, and nvidia's reads `nvidia-drm`. So `"msm"` covers all of them
+    /// while staying narrow enough not to reach another vendor.
     fn matches_driver(&self, driver: Option<&str>) -> bool {
-        driver.is_some_and(|d| self.drivers.contains(&d))
+        driver.is_some_and(|d| {
+            self.drivers.iter().any(|f| {
+                d == *f
+                    || d.strip_prefix(f)
+                        .is_some_and(|rest| rest.starts_with(['_', '-']))
+            })
+        })
     }
 
     /// A dmabuf import cannot cross GPUs, and a mismatched one fails only once frames flow - the
@@ -992,7 +1114,7 @@ impl HwBackend {
     /// `Cuda`, which reports failure up front. Permissive when the driver is unknown.
     fn can_import_from(&self, driver: Option<&str>) -> bool {
         match self.import {
-            Import::DmaBuf => driver.is_none() || self.matches_driver(driver),
+            Import::DmaBuf | Import::Nv12DmaBuf => driver.is_none() || self.matches_driver(driver),
             #[cfg(feature = "cuda")]
             Import::Cuda => true,
         }
@@ -1114,39 +1236,49 @@ fn sw_encoder_candidates(codec: VideoCodec) -> impl Iterator<Item = &'static str
 /// between a stream and a slideshow. `CARJACK_SW_ENCODE=1` forces the CPU encoder instead. Each
 /// row's `encoder` is tuned to hold up on system memory too, so it's usable as-is.
 fn software_encoder_desc(codec: VideoCodec, bitrate: Bitrate) -> Result<String> {
-    if let Some(desc) = encoder_override() {
-        return Ok(bitrate.apply(&desc));
-    }
-    let sw = sw_encoder_candidates(codec);
-    let force_sw = std::env::var("CARJACK_SW_ENCODE").as_deref() == Ok("1");
-    if !force_sw
-        && let Some(desc) = HW_BACKENDS
-            .iter()
-            .filter_map(|b| b.encoder_desc(codec, bitrate))
-            .find(|d| element_available(encoder_name(d)))
-    {
+    let (desc, hardware) = system_memory_encoder(codec).ok_or_else(|| {
+        eyre!(
+            "no {} encoder available (tried: {})",
+            codec.describe(),
+            sw_encoder_candidates(codec)
+                .map(|d| encoder_name(d).to_string())
+                .chain(
+                    HW_BACKENDS
+                        .iter()
+                        .filter_map(|b| b.encoder_template(codec))
+                        .map(|t| encoder_name(&t).to_string())
+                )
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    if hardware {
         tracing::info!(
             "No zero-copy path; using hardware '{}' on system memory",
             encoder_name(&desc)
         );
-        return Ok(desc);
     }
-    if let Some(desc) = sw.clone().find(|d| element_available(encoder_name(d))) {
-        return Ok(bitrate.apply(desc));
+    Ok(bitrate.apply(&desc))
+}
+
+/// The choice [`software_encoder_desc`] makes, still holding its bitrate placeholder, and whether
+/// it landed on hardware - split out so the startup fallback warning can name the encoder before a
+/// pipeline exists.
+fn system_memory_encoder(codec: VideoCodec) -> Option<(String, bool)> {
+    if let Some(desc) = encoder_override() {
+        return Some((desc, false));
     }
-    Err(eyre!(
-        "no {} encoder available (tried: {})",
-        codec.describe(),
-        sw.map(|d| encoder_name(d).to_string())
-            .chain(
-                HW_BACKENDS
-                    .iter()
-                    .filter_map(|b| b.encoder_template(codec))
-                    .map(|t| encoder_name(&t).to_string())
-            )
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
+    if std::env::var("CARJACK_SW_ENCODE").as_deref() != Ok("1")
+        && let Some(desc) = HW_BACKENDS
+            .iter()
+            .filter_map(|b| b.encoder_template(codec))
+            .find(|t| element_available(encoder_name(t)))
+    {
+        return Some((desc, true));
+    }
+    sw_encoder_candidates(codec)
+        .find(|d| element_available(encoder_name(d)))
+        .map(|d| (d.to_string(), false))
 }
 
 /// Zero-copy hardware chain: `appsrc ! [postproc] ! <encoder>`, per the backend's [`HwBackend`]
@@ -1286,27 +1418,51 @@ fn wrap_dmabuf(allocator: &DmaBufAllocator, dmabuf: &Dmabuf) -> Result<gst::Buff
     let bm = buffer
         .get_mut()
         .ok_or_else(|| eyre!("buffer not uniquely owned"))?;
-    let mut offsets = Vec::new();
-    let mut strides = Vec::new();
-    for (fd, (offset, stride)) in dmabuf.handles().zip(dmabuf.offsets().zip(dmabuf.strides())) {
+
+    let offsets: Vec<usize> = dmabuf.offsets().map(|o| o as usize).collect();
+    let strides: Vec<i32> = dmabuf.strides().map(|s| s as i32).collect();
+    let mut add = |fd: BorrowedFd, size: usize| -> Result<()> {
         let owned = fd
-            .as_fd()
             .try_clone_to_owned()
             .map_err(|e| eyre!("dup dmabuf fd: {e}"))?;
-        let size = (stride as usize) * (height as usize) + offset as usize;
         let mem = unsafe {
             allocator
                 .alloc_dmabuf(owned, size)
                 .map_err(|e| eyre!("alloc dmabuf memory: {e}"))?
         };
         bm.append_memory(mem);
-        offsets.push(offset as usize);
-        strides.push(stride as i32);
+        Ok(())
+    };
+
+    match plane_rows(dmabuf.format().code, height) {
+        // A planar format the compositor cuts from a single allocation (its NV12: luma and chroma
+        // are byte ranges of one fd). It has to arrive as *one* memory with the plane offsets on
+        // the video meta - a memory per plane makes v4l2 read them as separate buffers and refuse
+        // the import.
+        Some(rows) => {
+            let size = rows
+                .iter()
+                .zip(&strides)
+                .map(|(rows, stride)| *rows as usize * *stride as usize)
+                .sum();
+            let fd = dmabuf
+                .handles()
+                .next()
+                .ok_or_else(|| eyre!("dmabuf has no plane 0"))?;
+            add(fd, size)?;
+        }
+        // Anything else: one memory per plane, sized to the plane, as before.
+        None => {
+            for (fd, (offset, stride)) in dmabuf.handles().zip(offsets.iter().zip(&strides)) {
+                add(fd, *stride as usize * height as usize + offset)?;
+            }
+        }
     }
+
     gst_video::VideoMeta::add_full(
         bm,
         gst_video::VideoFrameFlags::empty(),
-        gst_video::VideoFormat::DmaDrm,
+        meta_format(dmabuf.format().code),
         width,
         height,
         &offsets,
@@ -1314,6 +1470,30 @@ fn wrap_dmabuf(allocator: &DmaBufAllocator, dmabuf: &Dmabuf) -> Result<gst::Buff
     )
     .map_err(|e| eyre!("attach video meta: {e}"))?;
     Ok(buffer)
+}
+
+/// The pixel format to put on the buffer's `GstVideoMeta`.
+///
+/// For a DMA_DRM buffer the meta normally mirrors the caps and says `DmaDrm`, which is what the
+/// postproc backends take. v4l2's dmabuf import is not like that: it resolves the caps to the real
+/// pixel format first and then asserts the meta agrees, so an NV12 buffer has to say NV12 or
+/// `gst_video_frame_map_id` fails on every frame and the encoder silently produces nothing.
+fn meta_format(fourcc: Fourcc) -> gst_video::VideoFormat {
+    match fourcc {
+        Fourcc::Nv12 => gst_video::VideoFormat::Nv12,
+        Fourcc::Nv21 => gst_video::VideoFormat::Nv21,
+        _ => gst_video::VideoFormat::DmaDrm,
+    }
+}
+
+/// Rows per plane for the single-allocation planar formats the compositor publishes, or `None` for
+/// anything else - which is every packed RGB format, one full-height plane.
+fn plane_rows(fourcc: Fourcc, height: u32) -> Option<Vec<u32>> {
+    match fourcc {
+        // 4:2:0: a full-height luma plane, then a half-height interleaved chroma plane.
+        Fourcc::Nv12 | Fourcc::Nv21 => Some(vec![height, height.div_ceil(2)]),
+        _ => None,
+    }
 }
 
 /// Split an encoder description like `"nvh264enc gop-size=6"` into
@@ -1556,7 +1736,10 @@ mod tests {
     /// exist for a second, Intel GPU.
     #[test]
     fn dmabuf_backends_are_confined_to_their_own_gpu() {
-        for b in HW_BACKENDS.iter().filter(|b| b.import == Import::DmaBuf) {
+        for b in HW_BACKENDS
+            .iter()
+            .filter(|b| matches!(b.import, Import::DmaBuf | Import::Nv12DmaBuf))
+        {
             assert!(
                 !b.can_import_from(Some("nvidia")),
                 "'{}' must not be offered for an nvidia render node",
@@ -1566,6 +1749,65 @@ mod tests {
             // Unknown driver stays permissive - there is nothing better to go on.
             assert!(b.can_import_from(None), "'{}'", b.name);
         }
+    }
+
+    /// Only a row with no postproc element should be asking the compositor to convert: vaapi and
+    /// cuda do their own conversion downstream, and quietly moving them onto the compositor's NV12
+    /// pass would change what every Intel/AMD/NVIDIA machine encodes.
+    #[test]
+    fn only_backends_without_a_postproc_ask_the_compositor_for_nv12() {
+        for b in HW_BACKENDS {
+            if matches!(b.import, Import::Nv12DmaBuf) {
+                assert!(
+                    b.postproc.is_none(),
+                    "'{}' asks the compositor for NV12 but also names a postproc",
+                    b.name
+                );
+            }
+        }
+        let vaapi = HW_BACKENDS.iter().find(|b| b.name == "vaapi").unwrap();
+        assert!(matches!(vaapi.import, Import::DmaBuf));
+        assert_eq!(
+            vaapi.postproc,
+            Some("vapostproc"),
+            "vaapi must keep converting in vapostproc, not in the compositor"
+        );
+    }
+
+    /// The compositor is started from this and the encoder built to match, so a wrong answer here
+    /// is a pipeline that negotiates and then never produces a frame.
+    #[test]
+    fn frame_format_follows_the_backend() {
+        let hw = |name: &str| EncodeBackend::Hw {
+            backend: HW_BACKENDS.iter().find(|b| b.name == name).unwrap(),
+            codec: VideoCodec::H264,
+            #[cfg(feature = "cuda")]
+            importer: None,
+        };
+        assert_eq!(hw("v4l2").frame_format(), FrameFormat::Nv12);
+        assert_eq!(hw("vaapi").frame_format(), FrameFormat::Argb);
+        assert_eq!(
+            EncodeBackend::Software {
+                codec: VideoCodec::H264
+            }
+            .frame_format(),
+            FrameFormat::Shm
+        );
+    }
+
+    /// sysfs reports the platform driver bound to the render node, not the DRM driver name: the
+    /// Qualcomm board carjack targets reads `msm_dpu`, which used to match no row at all and put
+    /// the whole board on software encode.
+    #[test]
+    fn driver_names_match_their_family() {
+        let v4l2 = HW_BACKENDS.iter().find(|b| b.name == "v4l2").unwrap();
+        for driver in ["msm", "msm_drm", "msm_dpu", "msm_mdss"] {
+            assert!(v4l2.matches_driver(Some(driver)), "{driver}");
+            assert!(v4l2.can_import_from(Some(driver)), "{driver}");
+        }
+        // A family prefix must not reach past its own vendor.
+        assert!(!v4l2.matches_driver(Some("msmith")));
+        assert!(!v4l2.matches_driver(Some("i915")));
     }
 
     #[test]

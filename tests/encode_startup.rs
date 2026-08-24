@@ -42,7 +42,7 @@ async fn time_to_first_keyframe(
     let (node, backend, bitrate) = resolve_gpu()?;
     let comp = Compositor::start(
         node,
-        backend.is_zero_copy(),
+        backend.frame_format(),
         carjack::encode::importable_modifiers(&backend),
         start_size.0,
         start_size.1,

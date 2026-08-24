@@ -74,7 +74,7 @@ async fn dump_encoded_stream() -> Result<()> {
 
     let comp = Compositor::start(
         node,
-        backend.is_zero_copy(),
+        backend.frame_format(),
         carjack::encode::importable_modifiers(&backend),
         width,
         height,

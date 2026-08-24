@@ -51,7 +51,7 @@ async fn encoder() -> Result<(
     )?;
     let comp = Compositor::start(
         node,
-        backend.is_zero_copy(),
+        backend.frame_format(),
         carjack::encode::importable_modifiers(&backend),
         800,
         1280,
@@ -119,7 +119,7 @@ async fn first_keyframe() -> Result<EncodedFrame> {
     )?;
     let comp = Compositor::start(
         node,
-        backend.is_zero_copy(),
+        backend.frame_format(),
         carjack::encode::importable_modifiers(&backend),
         800,
         1280,

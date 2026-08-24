@@ -517,6 +517,7 @@ dependencies = [
  "gstreamer-video",
  "iap2-proto",
  "iwd-automata",
+ "libc",
  "libcarjack",
  "mac_address",
  "netlink-packet-route",
@@ -2505,6 +2506,7 @@ dependencies = [
 [[package]]
 name = "nm-automata"
 version = "0.1.0"
+source = "git+ssh://git@github.com/cfraz89/nm-automata.git?branch=disable-modes-patch#6e026ed283567027f7addd2ddb82a9890fa38294"
 dependencies = [
  "bitflags",
  "futures-util",

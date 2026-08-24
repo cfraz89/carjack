@@ -4,8 +4,10 @@
 //! (including the zero-copy dmabuf pipeline) produces access units from them.
 //!
 //! Needs GPU/DRM (the render node) at runtime, so run it via `just test compositor` (which
-//! builds first, then `cargo test compositor`). `CARJACK_DESKTOP_CMD` overrides the test client
-//! to validate the real desktop app; `CARJACK_TEST_FRAMES` caps how many frames to sample.
+//! builds first, then `cargo test compositor`). The client is built in (see `white_client`), so
+//! nothing has to be installed for it to run. `CARJACK_DESKTOP_CMD` still overrides it with an
+//! external command to validate the real desktop app; `CARJACK_TEST_FRAMES` caps how many frames
+//! to sample.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +20,23 @@ use eyre::{Result, eyre};
 use libcarjack::airplay::EncodedFrame;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
+
+mod white_client;
+
+/// Held for the length of the test to keep the client running, and to stop it afterwards.
+#[allow(dead_code)]
+enum TestClient {
+    BuiltIn(white_client::WhiteClient),
+    External(std::process::Child),
+}
+
+impl Drop for TestClient {
+    fn drop(&mut self) {
+        if let TestClient::External(child) = self {
+            let _ = child.kill();
+        }
+    }
+}
 
 /// Resolve the render node + encode backend + bitrate the same way `main` does (from config/env),
 /// so the test exercises the real selection path. Returns (node, backend, bitrate).
@@ -43,7 +62,7 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
     let (node, backend, bitrate) = resolve_gpu()?;
     let comp = Compositor::start(
         node,
-        backend.is_zero_copy(),
+        backend.frame_format(),
         carjack::encode::importable_modifiers(&backend),
         1280,
         720,
@@ -51,17 +70,24 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
     )?;
     tracing::info!("compositor started, socket={:?}", comp.socket_name);
 
-    // Use the configured desktop app if set (so this validates the real CARJACK_DESKTOP_CMD),
-    // otherwise a foot that fills the screen white so a rendered frame is unmistakably non-black.
-    let cmd = std::env::var("CARJACK_DESKTOP_CMD")
-        .unwrap_or_else(|_| "foot -e sh -c 'printf \\033[47m\\033[2J; sleep 60'".to_string());
-    tracing::info!("test client: {cmd}");
-    let mut child = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd)
-        .env("WAYLAND_DISPLAY", &comp.socket_name)
-        .spawn()
-        .map_err(|e| eyre!("spawn test client: {e}"))?;
+    // The built-in client paints white, so a rendered frame is unmistakably not the black clear.
+    let _client = match std::env::var("CARJACK_DESKTOP_CMD") {
+        Ok(cmd) => {
+            tracing::info!("test client: {cmd}");
+            TestClient::External(
+                std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .env("WAYLAND_DISPLAY", &comp.socket_name)
+                    .spawn()
+                    .map_err(|e| eyre!("spawn test client: {e}"))?,
+            )
+        }
+        Err(_) => {
+            tracing::info!("test client: built-in white client");
+            TestClient::BuiltIn(white_client::spawn(&comp.socket_name)?)
+        }
+    };
 
     // Also run the H264 encoder on the compositor frames and count encoded access units, so
     // this validates the full compositor -> encode path (incl. the zero-copy dmabuf pipeline)
@@ -137,8 +163,6 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
             }
         }
     }
-    let _ = child.kill();
-
     let encoded_total = encoded.load(Ordering::Relaxed);
     tracing::info!(
         "compositor OK: {checked} frames reached the stream, {encoded_total} encoded AUs"
@@ -162,7 +186,7 @@ async fn reconfigure_switches_frame_size() -> Result<()> {
     let (node, backend, _bitrate) = resolve_gpu()?;
     let comp = Compositor::start(
         node,
-        backend.is_zero_copy(),
+        backend.frame_format(),
         carjack::encode::importable_modifiers(&backend),
         1280,
         720,

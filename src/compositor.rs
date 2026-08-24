@@ -14,6 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::encode::FrameFormat;
+use crate::nv12::Nv12Converter;
 use eyre::{Result, eyre};
 use libcarjack::carplay_init::{TouchEvent, TouchEventType};
 use smithay::backend::allocator::dmabuf::{AsDmabuf, Dmabuf};
@@ -105,6 +107,11 @@ struct ReconfigureRequest {
     ack: std::sync::mpsc::Sender<std::result::Result<bool, String>>,
 }
 
+/// How many buffers are cycled for whatever gets handed to the encoder. One in flight is not
+/// enough - GStreamer holds a pushed dmabuf until the encoder is done with it, so re-rendering
+/// into it immediately would tear the frame being encoded.
+const FORWARDED_POOL: usize = 4;
+
 /// Handle to a running internal compositor. Owns the frame stream and the touch input channel;
 /// the compositor itself runs on its own thread. Dropping it stops that thread (important: the
 /// session flow restarts on failure, so a leaked compositor per restart would pile up).
@@ -121,12 +128,13 @@ pub struct Compositor {
 
 impl Compositor {
     /// Start a headless compositor rendering at `width`x`height` @ `fps` on `render_node`.
-    /// `zero_copy` must match the resolved encode backend - it picks whether frames are forwarded
-    /// as a dmabuf or read back to system memory. Blocks until the socket is listening; the
-    /// size/rate are a starting point, refined later by [`reconfigure`](Self::reconfigure).
+    /// `frame_format` must match the resolved encode backend - it picks whether frames are
+    /// forwarded as a dmabuf, converted to NV12 on the GPU first, or read back to system memory.
+    /// Blocks until the socket is listening; the size/rate are a starting point, refined later by
+    /// [`reconfigure`](Self::reconfigure).
     pub fn start(
         render_node: String,
-        zero_copy: bool,
+        frame_format: FrameFormat,
         importable_modifiers: Vec<u64>,
         width: u32,
         height: u32,
@@ -146,7 +154,7 @@ impl Compositor {
             .spawn(move || {
                 if let Err(e) = run(
                     render_node,
-                    zero_copy,
+                    frame_format,
                     importable_modifiers,
                     width,
                     height,
@@ -232,7 +240,7 @@ impl Drop for Compositor {
 
 /// Open the DRM render node to render on. Must be the same GPU as the encoder (the zero-copy
 /// requirement); the concrete node is resolved from config in `main` and passed in.
-fn open_render_node(path: &str) -> Result<std::fs::File> {
+pub(crate) fn open_render_node(path: &str) -> Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -241,7 +249,7 @@ fn open_render_node(path: &str) -> Result<std::fs::File> {
 }
 
 /// Bring up a headless GLES renderer on `gbm`'s GPU.
-fn make_renderer(gbm: &RenderDevice) -> Result<GlesRenderer> {
+pub(crate) fn make_renderer(gbm: &RenderDevice) -> Result<GlesRenderer> {
     // SAFETY: the EGLDisplay/context are used only on this (the compositor) thread; the context
     // is made current here and never shared across threads.
     let egl_display =
@@ -278,12 +286,16 @@ struct State {
     data_device_state: DataDeviceState,
 
     renderer: GlesRenderer,
-    /// Render targets. Zero-copy mode cycles through a small pool (a forwarded dmabuf is held
-    /// by GStreamer until it's consumed, so we can't re-render into it immediately); the CPU
-    /// readback mode uses a single reused buffer.
+    /// Render targets. Forwarding the rendered dmabuf cycles through a small pool (a forwarded
+    /// dmabuf is held by GStreamer until it's consumed, so we can't re-render into it
+    /// immediately); the CPU readback and NV12 modes reuse a single buffer, since in both cases
+    /// what leaves the compositor is a *copy* made before the next frame starts.
     render_pool: Vec<Dmabuf>,
     pool_idx: usize,
-    zero_copy: bool,
+    frame_format: FrameFormat,
+    /// The GPU ARGB->NV12 pass and its own pool of NV12 targets. `Some` exactly when
+    /// `frame_format` is [`FrameFormat::Nv12`].
+    nv12: Option<Nv12Converter>,
     damage_tracker: OutputDamageTracker,
     /// Set by any client commit; cleared when the frame it produced has been published. The
     /// render timer publishes only when it is set - a still screen costs no frames.
@@ -333,7 +345,19 @@ impl State {
             return;
         }
 
-        if self.zero_copy {
+        if let Some(nv12) = self.nv12.as_mut() {
+            drop(fb);
+            // Convert on the GPU into a buffer the encoder can import directly. Still no
+            // readback: the frame never leaves the GPU, it just changes format.
+            match nv12.convert(&mut self.renderer) {
+                Ok(buf) => {
+                    let _ = self
+                        .frame_tx
+                        .send(Some(Arc::new(CapturedFrame::Dmabuf(buf))));
+                }
+                Err(e) => tracing::warn!("compositor: NV12 conversion failed: {e}"),
+            }
+        } else if self.frame_format == FrameFormat::Argb {
             drop(fb);
             // Forward the rendered GPU buffer itself - no readback, no CPU copy. The clone
             // shares the fds; cycling the pool keeps us from overwriting a buffer the encoder
@@ -422,6 +446,28 @@ impl State {
                 .map_err(|e| format!("allocate render buffer: {e}"))?;
             new_pool.push(buffer.export().map_err(|e| format!("export dmabuf: {e}"))?);
         }
+        // The NV12 targets and the imported source texture are all sized to the old mode, so the
+        // conversion has to be rebuilt around the new pool. Do it before anything is swapped in:
+        // a failure here leaves the compositor rendering at the old size rather than at a new one
+        // it cannot publish.
+        let new_nv12 = match self.frame_format {
+            FrameFormat::Nv12 => Some(
+                Nv12Converter::new(
+                    &mut self.renderer,
+                    &mut self.allocator,
+                    &new_pool[0],
+                    width,
+                    height,
+                    FORWARDED_POOL,
+                )
+                .map_err(|e| format!("rebuild NV12 conversion: {e}"))?,
+            ),
+            _ => None,
+        };
+        if let Some(old) = self.nv12.take() {
+            old.destroy(&mut self.renderer);
+        }
+        self.nv12 = new_nv12;
         self.render_pool = new_pool;
         self.pool_idx = 0;
         self.width = width as i32;
@@ -527,7 +573,7 @@ impl State {
 #[allow(clippy::too_many_arguments)]
 fn run(
     render_node: String,
-    zero_copy: bool,
+    frame_format: FrameFormat,
     importable_modifiers: Vec<u64>,
     width: u32,
     height: u32,
@@ -542,7 +588,7 @@ fn run(
     let file = open_render_node(&render_node)?;
     let device_fd = DrmDeviceFd::new(smithay::utils::DeviceFd::from(OwnedFd::from(file)));
     let gbm = GbmDevice::new(device_fd).map_err(|e| eyre!("create GbmDevice: {e}"))?;
-    let renderer = make_renderer(&gbm)?;
+    let mut renderer = make_renderer(&gbm)?;
 
     // A modifier the GPU can render *into* - NVIDIA rejects a Linear dmabuf but accepts its own
     // tiled modifiers. Falls back to Linear if the driver advertises none.
@@ -589,10 +635,15 @@ fn run(
     } else {
         render_modifiers
     };
-    // Zero-copy mode forwards each rendered dmabuf to the encoder, which holds it until
-    // consumed - so we cycle through a small pool. The CPU-readback path reuses a single buffer
-    // (readback is synchronous, no aliasing).
-    let pool_size = if zero_copy { 4 } else { 1 };
+    // Forwarding the rendered dmabuf hands it to the encoder, which holds it until consumed - so
+    // that mode cycles through a small pool. The other two reuse one buffer: readback is
+    // synchronous, and the NV12 pass has finished reading the ARGB buffer by the time it returns
+    // (its own targets are the ones that get cycled).
+    let pool_size = if frame_format == FrameFormat::Argb {
+        FORWARDED_POOL
+    } else {
+        1
+    };
     let mut render_pool = Vec::with_capacity(pool_size);
     for _ in 0..pool_size {
         let gbm_buffer = allocator
@@ -604,12 +655,23 @@ fn run(
                 .map_err(|e| eyre!("export dmabuf: {e}"))?,
         );
     }
+    let nv12 = match frame_format {
+        FrameFormat::Nv12 => Some(Nv12Converter::new(
+            &mut renderer,
+            &mut allocator,
+            &render_pool[0],
+            width,
+            height,
+            FORWARDED_POOL,
+        )?),
+        _ => None,
+    };
     tracing::info!(
         "compositor: encode path = {}",
-        if zero_copy {
-            "zero-copy dmabuf"
-        } else {
-            "CPU readback"
+        match frame_format {
+            FrameFormat::Argb => "zero-copy dmabuf",
+            FrameFormat::Nv12 => "zero-copy dmabuf (GPU NV12 conversion)",
+            FrameFormat::Shm => "CPU readback",
         }
     );
 
@@ -795,7 +857,8 @@ fn run(
         renderer,
         render_pool,
         pool_idx: 0,
-        zero_copy,
+        frame_format,
+        nv12,
         damage_tracker,
         dirty: true,
         last_published: std::time::Instant::now(),

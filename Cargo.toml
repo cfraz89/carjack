@@ -121,3 +121,7 @@ assets = [
 [[package.metadata.deb.systemd-units]]
 unit-scripts = "."
 unit-name = "carjack"
+
+[dev-dependencies]
+# mmap, to read back the bytes the NV12 conversion wrote (tests/nv12.rs).
+libc = "0.2"
