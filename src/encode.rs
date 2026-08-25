@@ -724,6 +724,44 @@ fn build_pipewire_encode(
         Ok(encoder)
     };
 
+    // GPU convert/scale with a system-memory handoff, for a GPU whose vendor postproc is missing.
+    // `gldownload` cannot hand these encoders a dmabuf, so a readback remains - but the conversion
+    // and scaling stay on the GPU, and what comes back is NV12 rather than four bytes per pixel.
+    let build_gl = || -> Result<gst::Element> {
+        let (enc_name, encoder) = make_encoder(&software_encoder_desc(codec, bitrate)?)?;
+        let rate = mk("videorate", "videorate")?;
+        let mut chain = vec![rate];
+        for (i, name) in DESKTOP_GL_CHAIN.iter().enumerate() {
+            chain.push(mk(name, &format!("gl{i}_{name}"))?);
+        }
+        pipeline
+            .add_many(&chain)
+            .map_err(|_| eyre!("add gl elements"))?;
+        pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
+        gst::Element::link_many(std::iter::once(src).chain(chain.iter()))
+            .map_err(|_| eyre!("link gl chain"))?;
+        // NV12 named here and nowhere earlier: it is what makes the GL side do the conversion
+        // rather than handing back RGBA for the CPU to convert.
+        chain
+            .last()
+            .expect("chain is never empty")
+            .link_filtered(
+                &encoder,
+                &gst::Caps::builder("video/x-raw")
+                    .field("format", "NV12")
+                    .field("width", width as i32)
+                    .field("height", height as i32)
+                    .field("framerate", gst::Fraction::new(30, 1))
+                    .build(),
+            )
+            .map_err(|_| eyre!("link gl-encoder"))?;
+        tracing::info!(
+            "Encode source: desktop GPU convert/scale ({} ! {enc_name}) at {bitrate}",
+            DESKTOP_GL_CHAIN.join(" ! ")
+        );
+        Ok(encoder)
+    };
+
     if !matches!(zerocopy, ZeroCopyMode::Off) {
         // Prefer the backend that runs on the GPU the desktop buffer actually lives on - encoding
         // an Intel/AMD desktop on NVIDIA (or vice versa) would be a cross-GPU copy. Sorting rather
@@ -749,7 +787,11 @@ fn build_pipewire_encode(
                     .join(", ")
             ));
         }
-        tracing::warn!("no zero-copy desktop backend available, using software convert/scale");
+        tracing::warn!("no zero-copy desktop backend available");
+        if DESKTOP_GL_CHAIN.iter().copied().all(element_available) {
+            return build_gl();
+        }
+        tracing::warn!("no GL convert/scale either, falling back to the CPU");
     }
 
     // Software: CPU convert + scale.
@@ -968,6 +1010,17 @@ pub struct HwBackend {
     /// The memory feature has to be named too, or negotiation falls back to system memory.
     encoder_input: Option<&'static str>,
 }
+
+/// GPU convert/scale for the desktop path, used when no backend's own postproc is available.
+/// Two `glcolorconvert`s on purpose: the first feeds `glcolorscale` a format it scales, the second
+/// produces the NV12 that `gldownload` hands back.
+const DESKTOP_GL_CHAIN: &[&str] = &[
+    "glupload",
+    "glcolorconvert",
+    "glcolorscale",
+    "glcolorconvert",
+    "gldownload",
+];
 
 /// Probed in order; the first whose elements all exist wins.
 const HW_BACKENDS: &[HwBackend] = &[
@@ -1749,6 +1802,25 @@ mod tests {
             // Unknown driver stays permissive - there is nothing better to go on.
             assert!(b.can_import_from(None), "'{}'", b.name);
         }
+    }
+
+    /// The order was arrived at by testing, not by reading docs, and every part of it is load
+    /// bearing: `glcolorscale` will not accept an NV12 target, so the convert to NV12 has to come
+    /// after the scale, and it will not scale straight off `glupload`'s output either, so a
+    /// convert has to come before it. Dropping either one gives `not-negotiated` at runtime, where
+    /// nothing here would catch it.
+    #[test]
+    fn the_desktop_gl_chain_keeps_its_verified_order() {
+        assert_eq!(
+            DESKTOP_GL_CHAIN,
+            [
+                "glupload",
+                "glcolorconvert",
+                "glcolorscale",
+                "glcolorconvert",
+                "gldownload"
+            ]
+        );
     }
 
     /// Only a row with no postproc element should be asking the compositor to convert: vaapi and
