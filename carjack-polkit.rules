@@ -1,7 +1,8 @@
-// Installed by `just install-carjack-service`. The carjack service account has no logind
-// session, so NetworkManager's polkit actions for adding/activating/scanning WiFi connections
-// (see src/wifi_connect.rs) fall to their `allow_any` default, which is auth_admin - i.e. blocked
-// non-interactively. Grant them directly instead.
+// carjack runs in a lingering session, which logind classes as `background` and never marks
+// active. NetworkManager's polkit actions for adding/activating/scanning WiFi connections (see
+// src/wifi_connect.rs) therefore miss `allow_active` and fall to `allow_any`, which is auth_admin -
+// blocked, with nobody at a console to answer the prompt. Grant them to this one user instead.
+// Installed by the deb and by `just install-carjack-service`.
 polkit.addRule(function (action, subject) {
     if (
         subject.user == "carjack" &&

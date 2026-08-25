@@ -106,8 +106,8 @@ priority = "optional"
 extended-description = """\
 Bridges an iPhone's CarPlay session over Bluetooth/WiFi to an in-car head unit: runs the CarPlay \
 UI in its own compositor and streams the encoded screen to the accessory over AirPlay."""
-# Required by cargo-deb's systemd integration even though we don't ship custom maintainer scripts -
-# it inserts the generated enable/start fragments into templates found here (none, in our case).
+# Where debian/postinst lives. No [package.metadata.deb.systemd-units]: it only installs *system*
+# units, and carjack.service is a user unit. Installed as an asset below, enabled by the installer.
 maintainer-scripts = "debian/"
 assets = [
     ["target/release/carjack", "usr/bin/", "755"],
@@ -116,11 +116,10 @@ assets = [
     # Grants carjack the write into iwd's state directory; the group it names is created by the
     # postinst, since iwd.service will not start without it.
     ["iwd-carjack-state.conf", "usr/lib/systemd/system/iwd.service.d/carjack-state.conf", "644"],
+    ["carjack.service", "usr/lib/systemd/user/carjack.service", "644"],
+    # Stops PipeWire taking the hands-free gateway UUID src/wireless/hfp.rs registers.
+    ["wireplumber/51-carjack-hfp-ag.conf", "etc/wireplumber/wireplumber.conf.d/51-carjack-hfp-ag.conf", "644"],
 ]
-
-[[package.metadata.deb.systemd-units]]
-unit-scripts = "."
-unit-name = "carjack"
 
 [dev-dependencies]
 # mmap, to read back the bytes the NV12 conversion wrote (tests/nv12.rs).

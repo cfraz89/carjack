@@ -68,24 +68,29 @@ build +flags="":
 install +flags="": (build flags)
     {{toolbox_build}}cargo install --path . {{cuda_features}} {{flags}}
 
-#install locally as a systemd service.
+# Install locally as a systemd *user* service, running as whoever invokes this.
 [script]
 install-carjack-service: build
     sudo install -Dm755 target/debug/carjack /usr/local/bin/carjack
-    sudo install -Dm644 carjack.service /etc/systemd/system/carjack.service
+    sudo install -Dm644 carjack.service /usr/lib/systemd/user/carjack.service
     # The shipped unit names the deb's /usr/bin path; repoint it at the one we just wrote.
     printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/carjack\n' \
-        | sudo install -Dm644 /dev/stdin /etc/systemd/system/carjack.service.d/local-path.conf
-    sudo install -Dm644 carjack-polkit.rules /etc/polkit-1/rules.d/49-carjack.rules
-    # The deb's postinst does these two; iwd.service will not start if the group is missing, so
-    # the group goes in before the drop-in that names it.
+        | install -Dm644 /dev/stdin "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/carjack.service.d/local-path.conf"
+    # The polkit rule names a user; on a dev box that is you, not "carjack".
+    sed "s/\"carjack\"/\"$USER\"/" carjack-polkit.rules \
+        | sudo install -Dm644 /dev/stdin /etc/polkit-1/rules.d/49-carjack.rules
+    # The deb's postinst does the group; iwd.service will not start if it is missing, so the
+    # group goes in before the drop-in that names it. netdev is what iwd's D-Bus policy checks.
     sudo groupadd --system --force iwd-provision
     sudo install -Dm644 iwd-carjack-state.conf /etc/systemd/system/iwd.service.d/carjack-state.conf
+    sudo usermod -aG iwd-provision,netdev "$USER"
     sudo systemctl daemon-reload
     # Only a restart re-applies the state directory's group and mode, and only if iwd is up.
     sudo systemctl try-restart iwd.service || true
-    sudo systemctl enable --now carjack.service
-    systemctl status carjack.service --no-pager
+    systemctl --user daemon-reload
+    systemctl --user enable --now carjack.service
+    systemctl --user status carjack.service --no-pager
+    echo "Note: the new group memberships only reach carjack after you log out and back in."
 
 #Build an arm64 deb of carjack
 deb:
