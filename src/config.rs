@@ -236,6 +236,8 @@ pub struct App {
     /// `true`: launched at startup and left to resize itself. `false` (apps that fix their
     /// resolution at boot, e.g. Waydroid): held until the accessory's resolution is known.
     pub resizable: bool,
+    /// A background process `command` needs running - see [`AppService`].
+    pub service: AppService,
 }
 
 impl Default for App {
@@ -243,7 +245,28 @@ impl Default for App {
         Self {
             command: String::new(),
             resizable: false,
+            service: AppService::default(),
         }
+    }
+}
+
+/// A background process `[app] command` depends on, brought up before it and taken down after it.
+/// All three run via `sh -c`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AppService {
+    /// Long-running, spawned with `WAYLAND_DISPLAY` pointing at carjack's compositor. Empty
+    /// disables the whole section.
+    pub start: String,
+    /// Polled until it exits 0, between `start` and `[app] command`. Empty = don't wait.
+    pub ready: String,
+    /// Graceful stop, given a chance to end `start` before it is signalled.
+    pub stop: String,
+}
+
+impl AppService {
+    pub fn is_enabled(&self) -> bool {
+        !self.start.trim().is_empty()
     }
 }
 
@@ -597,6 +620,36 @@ mod tests {
         );
         assert_eq!(cfg.desktop_command(), "foo");
         assert!(cfg.app.resizable);
+    }
+
+    #[test]
+    fn app_service_parses_and_defaults_to_disabled() {
+        // No [app.service] at all: nothing to manage.
+        assert!(
+            !parse_toml("[app]\ncommand = \"foo\"\n")
+                .app
+                .service
+                .is_enabled()
+        );
+        // `ready`/`stop` are optional; `start` alone is enough to turn it on.
+        let cfg = parse_toml("[app.service]\nstart = \"waydroid session start\"\n");
+        assert!(cfg.app.service.is_enabled());
+        assert_eq!(cfg.app.service.start, "waydroid session start");
+        assert_eq!(cfg.app.service.ready, "");
+        assert_eq!(cfg.app.service.stop, "");
+
+        let cfg = parse_toml(
+            r#"
+            [app]
+            command = "waydroid show-full-ui"
+            [app.service]
+            start = "waydroid session start"
+            ready = "waydroid status | grep -q RUNNING"
+            stop = "waydroid session stop"
+            "#,
+        );
+        assert_eq!(cfg.desktop_command(), "waydroid show-full-ui");
+        assert_eq!(cfg.app.service.stop, "waydroid session stop");
     }
 
     #[test]

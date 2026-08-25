@@ -14,6 +14,7 @@ use clap::Parser;
 use crate::{wifi_connect::WifiBackend, wireless::IapHost};
 
 mod accessory_settings;
+mod app_service;
 mod libei;
 mod portal;
 mod session;
@@ -146,6 +147,10 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
         start_h,
         start_fps,
     )?;
+    // After `Compositor::start`: the service is pointed at its Wayland socket.
+    let service =
+        app_service::AppService::start(&config.app.service, &compositor.socket_name).await?;
+
     let mut app = session::DesktopApp::new(
         config.desktop_command().to_owned(),
         compositor.socket_name.clone(),
@@ -181,7 +186,9 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
         }
     };
 
+    // The app is a client of the service, which is a client of the compositor.
     app.kill();
+    drop(service);
     drop(compositor);
     exit
 }

@@ -47,3 +47,12 @@ command = "waydroid show-full-ui"
 #   false - can't resize NOT launched until the accessory's resolution is known,
 #           and relaunched on later reconnects that change the size
 resizable = false
+
+# A background process `command` needs running. Started before it and stopped after it, so the
+# helper's lifetime is carjack's rather than the app child's. All optional; omit `start` for none.
+[app.service]
+start = "waydroid session start"
+# Polled until it exits 0 before `command` runs.
+ready = "waydroid status | grep -q 'Session:.*RUNNING'"
+# Graceful stop, tried before `start` is signalled.
+stop = "waydroid session stop"
