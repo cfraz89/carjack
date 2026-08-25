@@ -106,8 +106,7 @@ priority = "optional"
 extended-description = """\
 Bridges an iPhone's CarPlay session over Bluetooth/WiFi to an in-car head unit: runs the CarPlay \
 UI in its own compositor and streams the encoded screen to the accessory over AirPlay."""
-# Where debian/postinst lives. No [package.metadata.deb.systemd-units]: it only installs *system*
-# units, and carjack.service is a user unit. Installed as an asset below, enabled by the installer.
+# Where debian/postinst lives.
 maintainer-scripts = "debian/"
 assets = [
     ["target/release/carjack", "usr/bin/", "755"],
@@ -116,6 +115,8 @@ assets = [
     # Grants carjack the write into iwd's state directory; the group it names is created by the
     # postinst, since iwd.service will not start without it.
     ["iwd-carjack-state.conf", "usr/lib/systemd/system/iwd.service.d/carjack-state.conf", "644"],
+    # A user unit, and left disabled - enabling one needs a running user manager, so that is the
+    # installer's job (`just install-carjack-service`, or the image's carjack_session hook).
     ["carjack.service", "usr/lib/systemd/user/carjack.service", "644"],
     # Stops PipeWire taking the hands-free gateway UUID src/wireless/hfp.rs registers.
     ["wireplumber/51-carjack-hfp-ag.conf", "etc/wireplumber/wireplumber.conf.d/51-carjack-hfp-ag.conf", "644"],

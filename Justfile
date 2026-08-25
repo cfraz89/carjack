@@ -13,14 +13,18 @@ reachable device=env('CARJACK.BLUETOOTH.DEVICE', ''):
         exit 1
     fi
 
-# Hand the hands-free gateway UUID over to carjack - see wireplumber/51-carjack-hfp-ag.conf.
+# Hand the hands-free gateway UUID over to carjack, and keep the bluez monitor running on a
+# headless seat - see wireplumber/51-carjack-hfp-ag.conf and wireplumber/52-carjack-bluez-seat.conf.
 [script]
 install-hfp-config:
     dir="${XDG_CONFIG_HOME:-$HOME/.config}/wireplumber/wireplumber.conf.d"
     mkdir -p "$dir"
-    install -m644 wireplumber/51-carjack-hfp-ag.conf "$dir/51-carjack-hfp-ag.conf"
+    for conf in wireplumber/*.conf; do
+        install -m644 "$conf" "$dir/$(basename "$conf")"
+        echo "Installed $dir/$(basename "$conf")"
+    done
     systemctl --user restart wireplumber
-    echo "Installed $dir/51-carjack-hfp-ag.conf; remove it and restart wireplumber to undo"
+    echo "Remove them and restart wireplumber to undo"
 
 toolbox_build := if env('TOOLBOX_PATH', '') != '' { '' } else if env('TOOLBOX_BUILD', '') == 'true' { 'toolbox run ' } else { '' }
 

@@ -1,23 +1,20 @@
 [Unit]
 Description=carjack - wireless CarPlay bridge
-# Only user units can be ordered against from here; iwd/bluetooth/network belong to the system
-# manager. Costs nothing - carjack retries its whole flow on failure.
+# Only user units are orderable from here; iwd, bluetooth and the network targets belong to the
+# system manager. carjack retries its whole flow on failure, so that costs a retry at worst.
 After=pipewire.service wireplumber.service
 Wants=pipewire.service wireplumber.service
 
 [Service]
 Type=simple
-# Still $STATE_DIRECTORY/$CACHE_DIRECTORY, now under $XDG_STATE_HOME/$XDG_CACHE_HOME. src/paths.rs
-# reads the variables, so it works unchanged in either kind of unit.
+# Resolved under $XDG_STATE_HOME/$XDG_CACHE_HOME; src/paths.rs reads the variables, not the paths.
 StateDirectory=carjack
 CacheDirectory=carjack
 ExecStart=/usr/bin/carjack
 
-# DynamicUser=/CapabilityBoundingSet=/ProtectSystem= are gone with the move out of the system
-# manager, and little of it was doing work: DynamicUser= declines to allocate when a static user of
-# that name exists, which here it does. The iwd grant survives - it was always the iwd-provision
-# group, now a property of the account (user units have no SupplementaryGroups=). That account also
-# needs netdev, since iwd's D-Bus policy denies net.connman.iwd to everyone else.
+# The account this runs as must be in iwd-provision, for the profile write into /var/lib/iwd
+# (src/wifi_connect/iwd.rs), and in netdev, which is what iwd's D-Bus policy checks. User units
+# have no SupplementaryGroups=, so both are properties of the account.
 NoNewPrivileges=yes
 
 Restart=on-failure
