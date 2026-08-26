@@ -181,7 +181,7 @@ async fn existing_profile(
 
 /// The connection profile for the accessory's access point.
 ///
-/// `disable_he` currently requires patched iwd, or wpa_supplicant with config_disable_he and patched NetworkManager.
+/// `disable_he` requires wpa_supplicant with config_disable_he and a patched NetworkManager.
 fn accessory_profile(
     ssid: &str,
     passphrase: &str,

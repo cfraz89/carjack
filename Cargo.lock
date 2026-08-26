@@ -516,7 +516,6 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-video",
  "iap2-proto",
- "iwd-automata",
  "libc",
  "libcarjack",
  "mac_address",
@@ -2183,17 +2182,6 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
-
-[[package]]
-name = "iwd-automata"
-version = "0.1.0"
-source = "git+ssh://git@github.com/cfraz89/iwd-automata.git?branch=disable-modes-patch#60d665626ae388ea2947fea3ac9f5de74d642f7c"
-dependencies = [
- "futures-util",
- "serde",
- "zbus",
- "zbus_xml",
-]
 
 [[package]]
 name = "jobserver"
@@ -4340,18 +4328,6 @@ checksum = "d8bf88b4a3ff53e883001e0e0115b297a9d53c31b9c1edd2bfdd853e3428624e"
 dependencies = [
  "serde",
  "winnow",
- "zvariant",
-]
-
-[[package]]
-name = "zbus_xml"
-version = "5.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1586c021a01ca0a9216dcd874e546382e156a5cbab5fab6cb5f10087e22682a"
-dependencies = [
- "serde",
- "winnow",
- "zbus_names",
  "zvariant",
 ]
 

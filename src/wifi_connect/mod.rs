@@ -1,9 +1,6 @@
-//! WiFi backend abstraction: NetworkManager or iwd, chosen by `[wifi] backend` in config (see
-//! [`carjack::config::WifiBackendKind`]). The two daemons share nothing at the D-Bus level - no
-//! connection-profile concept in iwd, no provisioning-file concept in NetworkManager - so the
-//! split lives at this trait boundary rather than inside one module with branches.
+//! WiFi backend abstraction. NetworkManager is the only implementation; the trait is the seam
+//! [`crate::session`] holds, so it stays a trait.
 
-mod iwd;
 mod networkmanager;
 
 use std::future::Future;
@@ -12,8 +9,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use backon::{ConstantBuilder, Retryable};
 use eyre::Result;
-
-use carjack::config::WifiBackendKind;
 
 use crate::accessory_settings::AccessoryStore;
 
@@ -43,48 +38,12 @@ pub trait WifiBackend: Send + Sync {
     ) -> Result<AccessoryWifi>;
 }
 
-/// Which WiFi daemon owns its D-Bus name, used when `[wifi] backend` isn't set explicitly.
-/// NetworkManager wins if both are running; falls back to NetworkManager if the bus can't be
-/// probed at all, so callers always get a concrete choice.
-pub(crate) async fn detect_backend() -> WifiBackendKind {
-    match probe_backend().await {
-        Ok(kind) => kind,
-        Err(e) => {
-            tracing::warn!(
-                "Could not probe D-Bus for a WiFi daemon ({e}); defaulting to NetworkManager"
-            );
-            WifiBackendKind::NetworkManager
-        }
-    }
+pub(crate) fn build() -> Box<dyn WifiBackend> {
+    Box::new(networkmanager::NetworkManagerBackend)
 }
 
-async fn owns_bus_name(dbus: &zbus::fdo::DBusProxy<'_>, name: &'static str) -> Result<bool> {
-    let name = zbus::names::BusName::from_static_str(name).expect("valid bus name literal");
-    Ok(dbus.name_has_owner(name).await?)
-}
-
-async fn probe_backend() -> Result<WifiBackendKind> {
-    let conn = zbus::Connection::system().await?;
-    let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
-    let nm = owns_bus_name(&dbus, "org.freedesktop.NetworkManager").await?;
-    let iwd = owns_bus_name(&dbus, "net.connman.iwd").await?;
-    Ok(if iwd && !nm {
-        WifiBackendKind::Iwd
-    } else {
-        WifiBackendKind::NetworkManager
-    })
-}
-
-/// Build the backend selected by config.
-pub(crate) fn build(kind: WifiBackendKind) -> Box<dyn WifiBackend> {
-    match kind {
-        WifiBackendKind::NetworkManager => Box::new(networkmanager::NetworkManagerBackend),
-        WifiBackendKind::Iwd => Box::new(iwd::IwdBackend),
-    }
-}
-
-/// Shared by both backends' `live_connection` checks: log and unwrap the "are we already on this
-/// accessory's network" query the same way, so `connect_to_accessory_wifi` only has to decide whether to ask.
+/// Log and unwrap the "are we already on this accessory's network" query, so
+/// `connect_to_accessory_wifi` only has to decide whether to ask.
 fn reuse_if_live(
     ssid: impl std::fmt::Display,
     checked: Result<Option<AccessoryWifi>>,

@@ -1,9 +1,0 @@
-#!/bin/sh
-set -e
-
-# The drop-in this package ships sets iwd.service's Group= to iwd-provision, so that carjack can
-# provision a network without CAP_DAC_OVERRIDE - see iwd-carjack-state.conf. systemd refuses to
-# start a unit whose Group= does not resolve, so iwd stays down until this group exists.
-if [ "$1" = configure ]; then
-	addgroup --system iwd-provision || true
-fi

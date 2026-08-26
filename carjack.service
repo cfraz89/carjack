@@ -1,7 +1,8 @@
 [Unit]
 Description=carjack - wireless CarPlay bridge
-# Only user units are orderable from here; iwd, bluetooth and the network targets belong to the
-# system manager. carjack retries its whole flow on failure, so that costs a retry at worst.
+# Only user units are orderable from here; NetworkManager, bluetooth and the network targets
+# belong to the system manager. carjack retries its whole flow on failure, so that costs a
+# retry at worst.
 After=pipewire.service wireplumber.service
 Wants=pipewire.service wireplumber.service
 
@@ -12,9 +13,9 @@ StateDirectory=carjack
 CacheDirectory=carjack
 ExecStart=/usr/bin/carjack
 
-# The account this runs as must be in iwd-provision, for the profile write into /var/lib/iwd
-# (src/wifi_connect/iwd.rs), and in netdev, which is what iwd's D-Bus policy checks. User units
-# have no SupplementaryGroups=, so both are properties of the account.
+# WiFi goes through NetworkManager's D-Bus API, which polkit gates (carjack-polkit.rules), not a
+# group. What the account does need - audio/video/render for a seatless session - is a property
+# of the account: user units have no SupplementaryGroups=.
 NoNewPrivileges=yes
 
 Restart=on-failure
