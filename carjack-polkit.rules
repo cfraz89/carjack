@@ -1,11 +1,17 @@
 // A lingering session is classed `background` and never active, so NetworkManager's WiFi actions
-// (src/wifi_connect.rs) miss `allow_active` and fall to `allow_any` - auth_admin, with nobody at a
-// console to answer it. Grant them to this one user instead.
+// (src/wifi_connect/networkmanager.rs) miss `allow_active` and fall to `allow_any` - auth_admin,
+// with nobody at a console to answer it. Grant them to this one user instead.
+//
+// settings.modify.system, not just .own: the accessory profile carries no `connection.permissions`,
+// so NetworkManager treats AddAndActivateConnection - and the Delete of stale duplicates in
+// existing_profile() - as a change to a system connection. That action is auth_admin_keep in every
+// case, active or not, so without this the connect fails with "Insufficient privileges".
 polkit.addRule(function (action, subject) {
     if (
         subject.user == "carjack" &&
         (action.id == "org.freedesktop.NetworkManager.network-control" ||
             action.id == "org.freedesktop.NetworkManager.settings.modify.own" ||
+            action.id == "org.freedesktop.NetworkManager.settings.modify.system" ||
             action.id == "org.freedesktop.NetworkManager.wifi.scan")
     ) {
         return polkit.Result.YES;
