@@ -513,18 +513,18 @@ impl State {
             tracing::warn!("inject_touch: seat has no touch handle");
             return;
         };
-        let loc = Point::<f64, Logical>::from((event.x, event.y));
+        let loc = self.touch_location(&event);
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         let time = self.start_time.elapsed().as_millis() as u32;
         let slot = Some(event.slot).into();
         match event.event_type {
             TouchEventType::Down => {
-                let focus = self.surface_under(loc);
+                let focus = self.touch_focus(loc);
                 tracing::debug!(
                     "inject_touch DOWN slot={} ({},{}) focus={}",
                     event.slot,
-                    event.x,
-                    event.y,
+                    loc.x,
+                    loc.y,
                     focus.is_some()
                 );
                 touch.down(
@@ -540,7 +540,7 @@ impl State {
                 touch.frame(self);
             }
             TouchEventType::Motion => {
-                let focus = self.surface_under(loc);
+                let focus = self.touch_focus(loc);
                 touch.motion(
                     self,
                     focus,
@@ -567,6 +567,31 @@ impl State {
                     .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
                     .map(|(s, p)| (s, (p + location).to_f64()))
             })
+    }
+
+    /// Touch focus, falling back to the top window when the point hits nothing.
+    ///
+    /// Wayland latches focus at down, so a down that misses drops the whole sequence - and the
+    /// points that miss are the screen edges, which is where Android's system gestures live. A
+    /// miss here means the app's surface doesn't cover the output to the pixel, or its input
+    /// region doesn't; in a single-app kiosk, giving the edge to the app beats losing the gesture.
+    fn touch_focus(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
+        if let Some(focus) = self.surface_under(pos) {
+            return Some(focus);
+        }
+        let window = self.space.elements().last()?;
+        let location = self.space.element_location(window)?;
+        let surface = window.toplevel()?.wl_surface().clone();
+        Some((surface, location.to_f64()))
+    }
+
+    /// Accessory coordinates, clamped into the output. A digitizer that reports one row past the
+    /// last pixel would otherwise put every bottom-edge swipe outside every surface.
+    fn touch_location(&self, event: &TouchEvent) -> Point<f64, Logical> {
+        Point::from((
+            event.x.clamp(0.0, (self.width - 1).max(0) as f64),
+            event.y.clamp(0.0, (self.height - 1).max(0) as f64),
+        ))
     }
 }
 
