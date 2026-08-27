@@ -11,9 +11,10 @@ use nm_automata::{
     ActivationStateFlags, ActiveConnectionState, ActiveProxy, AssignedMacAddress,
     ConnectionProfile, ConnectionSetting, DeviceProxy, DeviceState, DeviceType, Ipv4Method,
     Ipv4Setting, Ipv6Method, Ipv6Setting, MacAddress, NetworkManagerProxy, NonEmpty, ProxyExt,
-    SettingsConnectionProxy, SettingsProxy, Ssid, WirelessProxy, WirelessSecurityKeyMgmt,
-    WirelessSecuritySetting, WirelessSetting,
+    SettingsConnectionProxy, SettingsProxy, Ssid, UserSetting, WirelessProxy,
+    WirelessSecurityKeyMgmt, WirelessSecuritySetting, WirelessSetting,
 };
+use std::collections::HashMap;
 use std::time::Duration;
 use tap::TapFallible;
 use tokio::sync::OnceCell;
@@ -21,6 +22,13 @@ use tokio::sync::OnceCell;
 use super::{AccessoryWifi, WifiBackend};
 
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Namespace for [`accessory_uuid`]; fixed so the derived UUIDs can't collide with anything else.
+const PROFILE_NAMESPACE: uuid::Uuid = uuid::uuid!("4c989952-3611-420d-8a26-91c9c035ad10");
+
+/// `user.data` key holding the accessory's Bluetooth address, so [`superseded_by`] can tell
+/// carjack's profiles from everyone else's, and one accessory's from another's.
+const ACCESSORY_TAG: &str = "carjack.accessory";
 
 static NETWORK_MANAGER: OnceCell<NetworkManagerProxy<'static>> = OnceCell::const_new();
 
@@ -76,15 +84,19 @@ async fn connect_to_accessory_wifi(
         }
     };
 
+    let owned_accessory_mac = accessory_mac.map(str::to_owned);
     super::connect_with_known_settings(
         accessory_mac,
-        enclose!((announced_mac, announced) |disable_he| { async move {
-            let profile = accessory_profile(ssid, passphrase, announced_mac, disable_he);
+        enclose!((announced_mac, announced, owned_accessory_mac) |disable_he| { async move {
+            let accessory_mac = owned_accessory_mac.as_deref();
+            let profile = accessory_profile(ssid, passphrase, announced_mac, disable_he, accessory_mac);
             let nm = get_network_manager().await;
             let device = wifi_device().await?;
-            let (conn, active) = match existing_profile(nm, &profile).await {
+            let (conn, active) = match accessory_connection(nm, &profile).await {
                 Some(existing) => {
-                    tracing::info!(path = ?existing.object_path(), "Using existing wifi profile for accessory");
+                    tracing::info!(path = ?existing.object_path(), "Reusing this accessory's wifi profile");
+                    // The unit may have renamed its network since; rewrite before activating.
+                    existing.update(&profile).await?;
                     let active = nm
                         .activate_connection(
                             &existing,
@@ -138,45 +150,88 @@ async fn connect_to_accessory_wifi(
     .await
 }
 
-/// Find an existing profile that matches the one we want by ssid an assigned mac, and delete any others for the same SSID
-async fn existing_profile(
+/// This accessory's stored profile, deleting every stale one it passes.
+///
+/// Keyed by UUID, not SSID: a head unit is free to rename its network - some invent a fresh SSID
+/// every boot - and each name must not become a profile of its own.
+async fn accessory_connection(
     nm: &NetworkManagerProxy<'_>,
     profile: &ConnectionProfile,
 ) -> Option<SettingsConnectionProxy<'static>> {
     let settings = SettingsProxy::new(nm.inner().connection()).await.ok()?;
-    let connections = settings.connections().await.ok()?;
     let mut keep: Option<SettingsConnectionProxy<'static>> = None;
-    let profile_wireless = profile
-        .wireless
-        .as_ref()
-        .expect("Existing profile wireless should not be none");
-    let profile_ssid = profile_wireless
-        .ssid
-        .as_ref()
-        .expect("Existing profile ssid should not be none");
-    for conn in connections {
-        if let Ok(ConnectionProfile {
-            wireless:
-                Some(WirelessSetting {
-                    ssid: Some(ssid),
-                    assigned_mac_address,
-                    ..
-                }),
-            ..
-        }) = conn.get_settings().await
-            && &ssid == profile_ssid
-        {
-            if keep.is_none() && assigned_mac_address == profile_wireless.assigned_mac_address {
-                keep = Some(conn);
-            } else {
-                let _ = conn
-                    .delete()
-                    .await
-                    .tap_err(|e| tracing::warn!(?e, ?conn, "Error deleting connection"));
-            }
+    for conn in settings.connections().await.ok()? {
+        let Ok(stored) = conn.get_settings().await else {
+            continue;
         };
+        if profile_uuid(&stored).is_some() && profile_uuid(&stored) == profile_uuid(profile) {
+            keep = Some(conn);
+        } else if superseded_by(&stored, profile) {
+            tracing::info!(path = ?conn.object_path(), "Deleting a stale profile for this accessory");
+            let _ = conn
+                .delete()
+                .await
+                .tap_err(|e| tracing::warn!(?e, ?conn, "Error deleting connection"));
+        }
     }
     keep
+}
+
+/// Whether `want` replaces `stored`, so `stored` should be deleted.
+///
+/// Deleting one of carjack's profiles costs nothing - the accessory re-sends its SSID and key every
+/// session - so the rules err towards collecting.
+fn superseded_by(stored: &ConnectionProfile, want: &ConnectionProfile) -> bool {
+    // A profile with no `wireless` setting is somebody else's.
+    let (Some(stored_wireless), Some(want_wireless)) = (&stored.wireless, &want.wireless) else {
+        return false;
+    };
+    if profile_uuid(stored).is_some() && profile_uuid(stored) == profile_uuid(want) {
+        return false;
+    }
+    match (accessory_tag(stored), accessory_tag(want)) {
+        (Some(stored_mac), Some(want_mac)) if stored_mac == want_mac => return true,
+        // Tagged for another accessory - not ours to collect.
+        (Some(_), _) => {}
+        // Untagged, but pinned to the address only carjack invents. Which accessory it belonged to
+        // is unrecoverable, and does not matter.
+        (None, _) => {
+            if matches!(
+                want_wireless.assigned_mac_address,
+                Some(AssignedMacAddress::Address(_))
+            ) && stored_wireless.assigned_mac_address == want_wireless.assigned_mac_address
+            {
+                return true;
+            }
+        }
+    }
+    // Anything else on the SSID carjack is about to join would compete with it for the AP.
+    stored_wireless.ssid.is_some() && stored_wireless.ssid == want_wireless.ssid
+}
+
+/// The accessory this profile was made for, as stamped in `user.data`.
+fn accessory_tag(profile: &ConnectionProfile) -> Option<&str> {
+    profile
+        .user
+        .as_ref()?
+        .data
+        .as_ref()?
+        .get(ACCESSORY_TAG)
+        .map(String::as_str)
+}
+
+fn profile_uuid(profile: &ConnectionProfile) -> Option<&str> {
+    profile.connection.as_ref()?.uuid.as_deref()
+}
+
+/// The UUID this accessory's profile is keyed by. Derived from the Bluetooth address so it survives
+/// the unit renaming its network; from the SSID when that address isn't known yet.
+fn accessory_uuid(ssid: &str, accessory_mac: Option<&str>) -> uuid::Uuid {
+    let name = match accessory_mac {
+        Some(mac) => format!("bluetooth:{}", mac.to_ascii_lowercase()),
+        None => format!("ssid:{ssid}"),
+    };
+    uuid::Uuid::new_v5(&PROFILE_NAMESPACE, name.as_bytes())
 }
 
 /// The connection profile for the accessory's access point.
@@ -187,14 +242,20 @@ fn accessory_profile(
     passphrase: &str,
     announced_mac: AssignedMacAddress,
     disable_he: bool,
+    accessory_mac: Option<&str>,
 ) -> ConnectionProfile {
     let wireless = WirelessSetting::default()
         .ssid(ssid)
         .hidden(true)
         .assigned_mac_address(announced_mac)
         .disable_he(disable_he);
-    ConnectionProfile::new(ssid)
-        .connection(ConnectionSetting::default().autoconnect(false))
+    // `.connection()` replaces the whole setting, dropping the id `ConnectionProfile::new` put there.
+    let connection = ConnectionSetting::default()
+        .id(ssid)
+        .uuid(accessory_uuid(ssid, accessory_mac).to_string())
+        .autoconnect(false);
+    let mut profile = ConnectionProfile::new(ssid)
+        .connection(connection)
         .wireless(wireless)
         .wireless_security(
             WirelessSecuritySetting::default()
@@ -202,7 +263,14 @@ fn accessory_profile(
                 .psk(passphrase),
         )
         .ipv4(Ipv4Setting::default().method(Ipv4Method::Auto))
-        .ipv6(Ipv6Setting::default().method(Ipv6Method::LinkLocal))
+        .ipv6(Ipv6Setting::default().method(Ipv6Method::LinkLocal));
+    if let Some(accessory_mac) = accessory_mac {
+        profile = profile.user(UserSetting::default().data(HashMap::from([(
+            ACCESSORY_TAG.to_owned(),
+            accessory_mac.to_owned(),
+        )])));
+    }
+    profile
 }
 
 async fn wait_for_activation(active: &ActiveProxy<'_>) -> Result<()> {
@@ -377,6 +445,7 @@ mod tests {
                 "hunter2hunter2",
                 AssignedMacAddress::Permanent,
                 false,
+                Some("AA:BB:CC:DD:EE:FF"),
             );
 
             let stored = settings
@@ -385,6 +454,22 @@ mod tests {
                 .expect("NetworkManager rejected the accessory profile");
             let read_back = stored.get_settings().await.expect("couldn't read it back");
             stored.delete().await.expect("couldn't delete it");
+
+            // One profile per accessory rests on NetworkManager storing the UUID carjack chose,
+            // rather than minting one of its own.
+            let connection = read_back
+                .connection
+                .as_ref()
+                .expect("no connection setting");
+            assert_eq!(connection.id.as_deref(), Some("carjack-profile-check"));
+            assert_eq!(
+                connection.uuid.clone(),
+                Some(
+                    super::accessory_uuid("carjack-profile-check", Some("AA:BB:CC:DD:EE:FF"))
+                        .to_string()
+                )
+            );
+            assert_eq!(super::accessory_tag(&read_back), Some("AA:BB:CC:DD:EE:FF"));
 
             let wireless = read_back.wireless.expect("no wireless setting");
             assert_eq!(wireless.ssid, Some(Ssid::from("carjack-profile-check")));
@@ -417,6 +502,7 @@ mod tests {
             "hunter2hunter2",
             AssignedMacAddress::Permanent,
             true,
+            None,
         );
         assert_eq!(
             profile.wireless.expect("no wireless setting").disable_he,
@@ -428,10 +514,115 @@ mod tests {
             "hunter2hunter2",
             AssignedMacAddress::Permanent,
             false,
+            None,
         );
         assert_eq!(
             profile.wireless.expect("no wireless setting").disable_he,
             Some(false)
         );
+    }
+
+    fn profile(ssid: &str, mac: Option<&str>) -> nm_automata::ConnectionProfile {
+        super::accessory_profile(
+            ssid,
+            "hunter2hunter2",
+            AssignedMacAddress::Address(announced()),
+            false,
+            mac,
+        )
+    }
+
+    fn announced() -> nm_automata::MacAddress {
+        nm_automata::MacAddress::new([0xFE, 0x01, 0x02, 0x03, 0x04, 0x05])
+    }
+
+    /// A unit that renames its network on every boot must still get one profile, not one per boot.
+    #[test]
+    fn the_uuid_follows_the_accessory_not_the_ssid() {
+        let first = profile("bench-1234", Some("AA:BB:CC:DD:EE:FF"));
+        let renamed = profile("bench-5678", Some("aa:bb:cc:dd:ee:ff"));
+        let other_unit = profile("bench-1234", Some("11:22:33:44:55:66"));
+
+        assert_eq!(super::profile_uuid(&first), super::profile_uuid(&renamed));
+        assert_ne!(
+            super::profile_uuid(&first),
+            super::profile_uuid(&other_unit)
+        );
+        assert_eq!(super::accessory_tag(&first), Some("AA:BB:CC:DD:EE:FF"));
+    }
+
+    /// Without the accessory's address there is nothing better to key on than the SSID.
+    #[test]
+    fn an_unknown_accessory_falls_back_to_the_ssid() {
+        assert_eq!(
+            super::profile_uuid(&profile("bench-1234", None)),
+            super::profile_uuid(&profile("bench-1234", None))
+        );
+        assert_ne!(
+            super::profile_uuid(&profile("bench-1234", None)),
+            super::profile_uuid(&profile("bench-5678", None))
+        );
+        assert_eq!(super::accessory_tag(&profile("bench-1234", None)), None);
+    }
+
+    #[test]
+    fn the_accessorys_own_profile_is_never_collected() {
+        // Stored under an older SSID, but the same UUID - the one to rewrite, not delete.
+        let want = profile("bench-5678", Some("AA:BB:CC:DD:EE:FF"));
+        assert!(!super::superseded_by(
+            &profile("bench-1234", Some("AA:BB:CC:DD:EE:FF")),
+            &want
+        ));
+    }
+
+    #[test]
+    fn other_accessories_are_left_alone_unless_they_hold_the_ssid() {
+        let want = profile("bench-5678", Some("AA:BB:CC:DD:EE:FF"));
+        assert!(!super::superseded_by(
+            &profile("other-unit", Some("11:22:33:44:55:66")),
+            &want
+        ));
+        // Two units advertising the same SSID: the stored one would compete for the AP.
+        assert!(super::superseded_by(
+            &profile("bench-5678", Some("11:22:33:44:55:66")),
+            &want
+        ));
+    }
+
+    /// A profile tagged for this accessory but keyed under some other UUID.
+    #[test]
+    fn a_rekeyed_profile_for_the_same_accessory_is_superseded() {
+        let want = profile("bench-5678", Some("AA:BB:CC:DD:EE:FF"));
+        let mut rekeyed = profile("bench-1234", Some("AA:BB:CC:DD:EE:FF"));
+        rekeyed
+            .connection
+            .as_mut()
+            .expect("no connection setting")
+            .uuid = Some("2815492f-7e56-435e-b2e9-246bd7cdc664".to_owned());
+        assert!(super::superseded_by(&rekeyed, &want));
+    }
+
+    /// An untagged profile is carjack's if it is pinned to the address only carjack invents.
+    #[test]
+    fn untagged_profiles_pinned_to_our_address_are_superseded() {
+        let want = profile("bench-5678", Some("AA:BB:CC:DD:EE:FF"));
+        assert!(super::superseded_by(&profile("bench-1234", None), &want));
+
+        let someone_elses = super::accessory_profile(
+            "home wifi",
+            "hunter2hunter2",
+            AssignedMacAddress::Permanent,
+            false,
+            None,
+        );
+        assert!(!super::superseded_by(&someone_elses, &want));
+    }
+
+    /// An ethernet or VPN profile is never carjack's.
+    #[test]
+    fn non_wireless_profiles_are_never_superseded() {
+        let wired = nm_automata::ConnectionProfile::new("wired");
+        let want = profile("bench-5678", Some("AA:BB:CC:DD:EE:FF"));
+        assert!(!super::superseded_by(&wired, &want));
     }
 }

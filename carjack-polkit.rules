@@ -3,9 +3,9 @@
 // with nobody at a console to answer it. Grant them to this one user instead.
 //
 // settings.modify.system, not just .own: the accessory profile carries no `connection.permissions`,
-// so NetworkManager treats AddAndActivateConnection - and the Delete of stale duplicates in
-// existing_profile() - as a change to a system connection. That action is auth_admin_keep in every
-// case, active or not, so without this the connect fails with "Insufficient privileges".
+// so NetworkManager treats AddAndActivateConnection - and the Update and Delete in
+// accessory_connection() - as a change to a system connection. That action is auth_admin_keep in
+// every case, active or not, so without this the connect fails with "Insufficient privileges".
 polkit.addRule(function (action, subject) {
     if (
         subject.user == "carjack" &&

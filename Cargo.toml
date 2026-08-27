@@ -28,7 +28,7 @@ backon = "1.6.0"
 bluer = { version = "0.17.4", features = ["full", "rfcomm"] }
 color-eyre = "0.6.5"
 deku = "0.20.3"
-uuid = "1.23.3"
+uuid = { version = "1.23.3", features = ["v5"] }
 eyre = "0.6.12"
 futures = "0.3.32"
 
