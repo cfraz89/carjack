@@ -70,8 +70,8 @@ pub struct WifiCredentials {
     pub passphrase: Option<String>,
     pub bssid: Option<String>,
     /// AirPlay receiver for when we're on its AP; 0x4301 names one, the flat 0x5703 dialect
-    /// doesn't. Handed over rather than discovered: some accessories never browse for ours. Missing
-    /// the interface's scope id, which only the caller can attach.
+    /// doesn't. Handed over rather than discovered, since some accessories never browse for ours.
+    /// Missing the interface's scope id, which only the caller can attach.
     pub airplay: Option<SocketAddr>,
     /// HomeKit pairing id when named; the invitation equivalent, and the only route to
     /// pair-verify with an accessory that never invites.
@@ -158,17 +158,16 @@ impl<S: Stream> CarplayInit<S> {
                 packet = self.iap2.receive_packet() => {
                     let packet = match packet {
                         Ok(packet) => packet,
-                        // After handover the link going away *is* the ending, however it goes - the accessory
-                        // drops the RFCOMM channel when AirPlay connects (ECONNRESET, not an iAP2
-                        // reset). Reporting it would make a normal teardown look like a fault.
+                        // After handover the link going away *is* the ending, however it goes: the
+                        // accessory drops the RFCOMM channel when AirPlay connects, with an
+                        // ECONNRESET rather than an iAP2 reset.
                         Err(e) if handed_over => {
                             tracing::info!("Accessory closed the iAP2 link after the handover ({e})");
                             return Ok(());
                         }
                         Err(e) => return Err(e),
                     };
-                    // `receive_packet` absorbed the link-layer traffic (acknowledgements, resets);
-                    // what's left here is all session data.
+                    // `receive_packet` absorbed the link-layer traffic; the rest is session data.
                     if packet.header.control.syn {
                         // Renegotiation can't happen under a running session; fold back to a restart.
                         tracing::warn!("Accessory re-sent SYN mid-session; restarting");
@@ -183,8 +182,7 @@ impl<S: Stream> CarplayInit<S> {
                 _ = self.iap2.wait_for_link_work() => {
                     self.iap2.maintain().await?;
                 }
-                // Only stops the post-handover drop being reported as a failure; the arm disables
-                // itself, since a cancelled token is ready forever.
+                // The arm disables itself, since a cancelled token is ready forever.
                 _ = self.handover.cancelled(), if !handed_over => {
                     handed_over = true;
                     tracing::info!("Handover complete; the accessory drops Bluetooth from here");
@@ -276,7 +274,7 @@ impl<S: Stream> CarplayInit<S> {
                     })
                     .unwrap_or_else(|| String::from("Unknown"));
                 tracing::info!("Accessory identified: {}", name);
-                // The WiFi-config dialect is per-accessory; empty list means the flat 0x5702 behaviour.
+                // An empty list means the flat 0x5702 dialect.
                 self.accepted_messages = msg
                     .parameters
                     .get_param::<Vec<u16>>(ParameterId::MESSAGES_RECEIVED_FROM_DEVICE)

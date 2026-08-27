@@ -51,8 +51,8 @@ impl VideoCodec {
     }
 }
 
-// Guessed from testing against two different units, one which only took h264, one which only took hevc.
-// Only thing we could see that differentiatedd them was source_version.
+// Inferred from two accessories, one taking only H264 and one only HEVC: `source_version` was the
+// only field that separated them.
 pub fn expects_hevc(hevc_info: bool, multi_codec: bool, source_version: &str) -> bool {
     const HEVC_FROM_SOURCE_VERSION: u32 = 400;
     let major = source_version
@@ -190,10 +190,8 @@ pub async fn connect_airplay(
 
 /// Where our stream sits on the accessory's panel, from `/info`'s `displayPanels`.
 ///
-/// `None` when it covers the whole panel, which is the only case catplay used to handle. An
-/// accessory that keeps a strip for its own instruments gives an origin below the top; the size is
-/// what is left of the panel. (An iPhone sends one pixel less for the origin than the panel
-/// declares - the reason is unknown, so the declared value is used.)
+/// `None` when it covers the whole panel. An accessory that keeps a strip for its own instruments
+/// gives an origin below the top, and a size that is what is left of the panel.
 fn panel_view(
     info: &catplay_carplay::msg::InfoMessageResponse,
     display_uuid: &str,
@@ -239,10 +237,8 @@ pub async fn run_video_stream(
         hevc_expected: _,
     } = conn;
 
-    // CarPlay resource arbitration: claim the main screen for us (the controller) via a
-    // ModesChanged command BEFORE setting up the screen stream. This ordering is mandatory
-    // - without it the head unit doesn't consider the phone the screen owner and tears the
-    // session down as soon as video starts arriving.
+    // Claim the main screen BEFORE setting up the screen stream: without that ordering the head
+    // unit does not consider us the screen owner, and tears the session down once video arrives.
     let mut modes = ResourceController::from_change_modes(&tx.info_cached().modes);
     if modes.screen.entity() != EntityEnum::Controller {
         modes.screen.take_by_controller(&Resource::take(
@@ -296,12 +292,10 @@ pub async fn run_video_stream(
     let mut frames_at_last_heartbeat: u64 = 0;
     const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
-    // Steady media clock. The accessory honours our PTS (`respect_timestamps`), so presenting frames on
-    // an evenly-spaced timeline (`frame_dur` apart) - rather than at jittery wall-clock arrival
-    // time - is what makes playback smooth: the `latency` buffer soaks up encode/delivery jitter.
-    // We re-anchor to real-time only if the clock drifts out of a safe window (a stall, or the
-    // production rate wandering from `fps`), so a PTS never lands in the past (which the head unit
-    // rejects) or runs unboundedly ahead.
+    // The accessory honours our PTS (`respect_timestamps`), so an evenly-spaced timeline rather
+    // than jittery arrival time is what makes playback smooth; `latency` soaks up the jitter.
+    // Re-anchored to real time only if the clock drifts out of the safe window, so a PTS never
+    // lands in the past (which the head unit rejects) or runs unboundedly ahead.
     let fps = if max_fps == 0 { 30 } else { max_fps };
     let frame_dur = Duration::from_nanos(1_000_000_000 / fps as u64);
     const AHEAD_LIMIT: Duration = Duration::from_millis(200);
@@ -326,11 +320,9 @@ pub async fn run_video_stream(
             continue;
         }
 
-        // The accessory has stopped keeping up (a WiFi stall, a busy head unit). `push_frame` would
-        // wait for a slot, which just converts the backlog into latency, so drop this frame
-        // instead - and because every later delta frame references the one we dropped, ask the
-        // encoder for a fresh keyframe so the picture recovers now rather than at the next
-        // natural IDR up to a second away.
+        // The accessory has stopped keeping up. `push_frame` would wait for a slot, turning the
+        // backlog into latency, so drop the frame - and since every later delta references it,
+        // ask for a keyframe so the picture recovers now rather than at the next natural IDR.
         if screen_guard.is_full() {
             dropped_full += 1;
             if !requested_keyframe {
@@ -345,10 +337,8 @@ pub async fn run_video_stream(
             continue;
         }
 
-        // Advance the media clock by one frame; keep the smooth scheduled time as long as it
-        // stays in the safe window (strictly in the future so it's never rejected as past, and
-        // not more than AHEAD_LIMIT beyond the ideal so buffering can't grow unbounded), else
-        // re-anchor to `now + latency`.
+        // Keep the smooth scheduled time while it stays in the safe window - strictly future, and
+        // no more than AHEAD_LIMIT past the ideal - else re-anchor to `now + latency`.
         let now = std::time::Instant::now();
         let ideal = now + latency;
         let pts_instant = match next_pts {
@@ -387,10 +377,8 @@ pub async fn run_video_stream(
                 return Err(eyre!("Screen socket closed by accessory"));
             }
             if matches!(err, ScreenTransmitError::NeedsKeyframe) {
-                // catplay refuses delta frames until the stream has opened on a keyframe (it
-                // re-arms this whenever the screen socket reconnects). Pushing deltas at it
-                // regardless just discards them until the encoder's next natural IDR, so ask
-                // for one now and hold off until it arrives.
+                // catplay refuses deltas until the stream has opened on a keyframe, and re-arms
+                // that whenever the screen socket reconnects.
                 if !requested_keyframe {
                     tracing::warn!("Screen stream needs a keyframe; requesting one");
                     let _ = keyframe_tx.try_send(());
@@ -443,8 +431,7 @@ async fn wait_for_first_keyframe(
         let _ = keyframe_tx.try_send(());
     }
 
-    // Warn while waiting: past a second it is the video source that has stalled, not the encoder,
-    // and a silent wait here is near-impossible to diagnose after the fact.
+    // Warn while waiting: past a second it is the video source that has stalled, not the encoder.
     let started = std::time::Instant::now();
     let mut deltas = 0u32;
     let first = async {
@@ -480,11 +467,9 @@ async fn wait_for_first_keyframe(
     }
 }
 
-/// Answer the CarPlay control commands the accessory sends over the AirPlay event channel.
-/// With no real iPhone to proxy to (we stream a desktop), the accessory just needs each command
-/// acknowledged: ChangeModes gets a mode-state response, everything else an OK. Touch comes
-/// here too, as `HidSendReport` touchscreen reports, which we decode and forward to the
-/// compositor.
+/// Answer the CarPlay control commands the accessory sends over the AirPlay event channel. With no
+/// real iPhone to proxy to, each command just needs acknowledging: ChangeModes gets a mode-state
+/// response, everything else an OK. Touch arrives here too, as `HidSendReport` reports.
 async fn handle_accessory_commands(
     tx: AirPlayTransmitterProxyRef,
     mut modes: ResourceController,
@@ -505,10 +490,8 @@ async fn handle_accessory_commands(
                 }
             }
             Command::ForceKeyFrame(_) => {
-                // The accessory asks for this when it has lost sync - it has just joined the stream,
-                // or dropped enough packets that its decoder can no longer follow the deltas.
-                // Answering OK and doing nothing (which is what we used to do) leaves it
-                // showing a frozen or torn picture until the encoder's next natural IDR.
+                // Asked for when the accessory has lost sync: it has just joined the stream, or
+                // dropped enough packets that its decoder can no longer follow the deltas.
                 tracing::debug!("Accessory requested a keyframe");
                 let _ = keyframe_tx.try_send(());
                 cmd.respond_ok();
@@ -526,10 +509,8 @@ async fn handle_accessory_commands(
                 cmd.respond_ok();
             }
             Command::DisableBluetooth(_) => {
-                // No unit has ever sent this - both drop the channel themselves - so it only marks
-                // the handover, the same as reaching it any other way. A unit that sends it and
-                // then *waits* for us to disconnect would hang here, and would be the reason to
-                // start closing the link ourselves.
+                // Accessories seen so far drop the channel themselves, so this only marks the
+                // handover. One that sends it and then waits for us to disconnect would hang.
                 tracing::info!("Accessory asked us to disable Bluetooth");
                 cmd.respond_ok();
                 handover.cancel();
@@ -548,9 +529,9 @@ async fn handle_accessory_commands(
     tracing::debug!("Accessory command handler ended");
 }
 
-/// Wire shape of a CarPlay touchscreen HID report from an accessory with no report ID in its HID
-/// descriptor (e.g. the CFMOTO's "Touch Screen" device, `uuid: "0"`): 5 bytes - a status byte
-/// (bit 0 = tip switch, the other 7 padding) then X/Y as little-endian u16 in display pixels.
+/// A CarPlay touchscreen HID report from an accessory with no report ID in its HID descriptor:
+/// 5 bytes - a status byte (bit 0 = tip switch, the rest padding), then X/Y as little-endian u16
+/// in display pixels.
 #[derive(DekuRead, Debug, Clone, Copy, PartialEq)]
 #[deku(endian = "little")]
 struct ShortTouchReport {
@@ -559,9 +540,8 @@ struct ShortTouchReport {
     y: u16,
 }
 
-/// Wire shape from an accessory whose HID descriptor does carry a report ID (e.g. the
-/// AirPlayGeneric1,1 bench box): 12 bytes - report ID, status, X/Y as little-endian u16, then 6
-/// bytes we don't use.
+/// The same from an accessory whose HID descriptor does carry a report ID: 12 bytes - report ID,
+/// status, X/Y as little-endian u16, then 6 bytes we don't use.
 #[derive(DekuRead, Debug, Clone, PartialEq)]
 #[deku(endian = "little")]
 struct LongTouchReport {
@@ -573,12 +553,10 @@ struct LongTouchReport {
     _trailer: Vec<u8>,
 }
 
-/// Decode a CarPlay touchscreen HID report into a touch event. Real accessories have been seen
-/// sending both `ShortTouchReport` (5 bytes) and `LongTouchReport` (12 bytes) shapes for the same
-/// logical report, keyed here on length since that alone disambiguates them; a report whose length
-/// matches neither (e.g. a button report on another HID device uuid) fails to parse and is
-/// ignored. Our compositor renders at exactly the accessory's resolution, so the coordinates pass
-/// through unscaled. `touching` tracks the contact across reports so we can emit Down/Motion/Up.
+/// Decode a CarPlay touchscreen HID report. Both shapes are seen in the wild for the same logical
+/// report, keyed here on length since that alone disambiguates them; a report matching neither
+/// length is ignored. The compositor renders at the accessory's resolution, so coordinates pass
+/// through unscaled. `touching` tracks the contact across reports, to emit Down/Motion/Up.
 fn parse_touch_report(bytes: &[u8], touching: &mut bool) -> Option<TouchEvent> {
     let (status, x, y) = match bytes.len() {
         5 => {
@@ -622,18 +600,12 @@ fn abort_on_drop(handle: tokio::task::JoinHandle<()>) -> impl Drop {
 mod tests {
     use super::*;
 
-    /// The two units captured from a real iPhone: neither declares a codec, and only the
+    /// Two accessories captured from a real iPhone: neither declares a codec, and only the
     /// implementation version separates the one that gets HEVC from the one that gets H264.
     #[test]
     fn hevc_follows_the_accessory_not_the_default() {
-        assert!(
-            expects_hevc(false, false, "475.8.2"),
-            "CFMOTO takes HEVC from a phone"
-        );
-        assert!(
-            !expects_hevc(false, false, "320.14"),
-            "AUTO BOX gets H264 from a phone"
-        );
+        assert!(expects_hevc(false, false, "475.8.2"));
+        assert!(!expects_hevc(false, false, "320.14"));
 
         // A declaration settles it whatever the version says, and an unparseable version is not
         // evidence of anything.
@@ -659,14 +631,12 @@ mod tests {
         }
     }
 
-    /// RECORD must not go out on a delta frame: the accessory's stream has to open on a keyframe, and
-    /// the whole point of the gate is that we hold the announcement until we have one.
+    /// RECORD must not go out on a delta frame - the accessory's stream has to open on a keyframe.
     #[tokio::test]
     async fn first_keyframe_skips_deltas() {
         let (tx, mut rx) = mpsc::channel(8);
         let (kf_tx, _kf_rx) = mpsc::channel(1);
-        // Produced after the wait begins - a cold pipeline emitting into an already-drained
-        // channel, which is the real sequence.
+        // Produced after the wait begins: a cold pipeline emitting into an already-drained channel.
         let producer = tokio::spawn(async move {
             for _ in 0..3 {
                 tx.send(delta()).await.unwrap();
@@ -688,8 +658,8 @@ mod tests {
     async fn stale_frames_dropped_and_keyframe_requested() {
         let (tx, mut rx) = mpsc::channel(8);
         let (kf_tx, mut kf_rx) = mpsc::channel(1);
-        // Queued before the wait starts, so `try_recv` sees them: a stale keyframe among them
-        // must still be discarded rather than opening the stream on old content.
+        // Queued before the wait starts, so `try_recv` sees them: a stale keyframe among them must
+        // still be discarded rather than opening the stream on old content.
         tx.send(keyframe()).await.unwrap();
         tx.send(delta()).await.unwrap();
 
@@ -721,10 +691,8 @@ mod tests {
         assert!(wait_for_first_keyframe(&mut rx, &kf_tx).await.is_err());
     }
 
-    // Real reports captured from the bike (`hidReport` payloads, 5 bytes each, no report ID -
-    // see the accessory's own HID descriptor for uuid "0" / "Touch Screen"): the parser must
-    // turn a stream of them into a well-formed Down -> Motion* -> Up gesture with the right
-    // coordinates.
+    // Real 5-byte reports: the parser must turn a stream of them into a well-formed
+    // Down -> Motion* -> Up gesture with the right coordinates.
     #[test]
     fn touch_report_gesture() {
         let mut touching = false;
@@ -747,13 +715,13 @@ mod tests {
         assert!(matches!(up.event_type, TouchEventType::Up));
         assert!(!touching);
 
-        // No contact while not touching, and short (non-touch, e.g. button) reports -> ignored.
+        // No contact while not touching, and non-touch reports -> ignored.
         assert!(parse_touch_report(&[0, 0, 0, 0, 0], &mut touching).is_none());
         assert!(parse_touch_report(&[0x01], &mut touching).is_none());
     }
 
-    // The AirPlayGeneric1,1 bench box reports touch in a different 12-byte shape (report ID +
-    // trailer byte); `parse_touch_report` must handle both without one clobbering the other.
+    // Other accessories report the same touch in a 12-byte shape; both must parse without one
+    // clobbering the other.
     #[test]
     fn touch_report_gesture_long_format() {
         let mut touching = false;

@@ -24,8 +24,8 @@ use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_ba
 ///
 /// Prefers `wp_fractional_scale_v1::preferred_scale` (exact, a fraction over 120) over the integer
 /// `wl_output.scale` fallback, which rounds under fractional scaling. `None` if there's no Wayland
-/// display or neither source answered (callers then assume 1.0). Multi-monitor setups with
-/// different per-output scales can get the wrong one, since this only probes one surface.
+/// display or neither source answered; callers then assume 1.0. Only one surface is probed, so a
+/// multi-monitor setup with differing per-output scales can get the wrong one.
 pub fn display_scale() -> Option<f64> {
     let state = probe_scale()?;
     if let Some(num) = state.fractional_scale {
@@ -84,9 +84,8 @@ struct FractionalProbe {
 
 impl ScaleState {
     /// Create the throwaway surface and its `wp_fractional_scale_v1`, so the next roundtrip can
-    /// pick up a `preferred_scale`. Given an `xdg_toplevel` role since Mutter only reports a
-    /// preferred scale once a surface has one; no buffer is ever attached, so nothing appears
-    /// on the user's desktop.
+    /// pick up a `preferred_scale`. Given an `xdg_toplevel` role since Mutter only reports one
+    /// once a surface has one; no buffer is ever attached, so nothing appears on the desktop.
     fn start_fractional_probe(&self, qh: &QueueHandle<Self>) -> Option<FractionalProbe> {
         let compositor = self.compositor.as_ref()?;
         let manager = self.fractional_manager.as_ref()?;
@@ -207,17 +206,15 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for ScaleState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        // Ack the configure so the role is fully established (we still never attach a buffer, so
-        // the surface stays unmapped and invisible).
+        // Ack the configure so the role is fully established. Still no buffer, so the surface
+        // stays unmapped and invisible.
         if let xdg_surface::Event::Configure { serial } = event {
             xdg_surface.ack_configure(serial);
         }
     }
 }
 
-// No events we care about: wl_compositor and the manager have none, wl_surface only reports
-// enter/leave/preferred_buffer_* for a surface we never map, and the toplevel's configure/close are
-// irrelevant to a window that never appears.
+// Nothing here has an event worth handling for a surface that is never mapped.
 delegate_noop!(ScaleState: ignore wl_compositor::WlCompositor);
 delegate_noop!(ScaleState: ignore wl_surface::WlSurface);
 delegate_noop!(ScaleState: ignore WpFractionalScaleManagerV1);
@@ -242,7 +239,7 @@ pub struct RemoteDesktopStream {
 }
 
 impl RemoteDesktopStream {
-    /// Inject a CarPlay touch. `accessory_size` is the accessory's display size (the space `event.x/.y` are in).
+    /// Inject a CarPlay touch. `accessory_size` is the space `event.x/.y` are in.
     ///
     /// Over libei the coordinates go straight into the device's region. On the D-Bus fallback
     /// they're scaled to `stream_size` (or `frame_size` if the portal gave no size) and clamped
@@ -307,9 +304,8 @@ impl RemoteDesktopStream {
         self.node_id
     }
 
-    /// Lift any finger still held down, and report whether input is still usable. Called when a
-    /// CarPlay session ends: the input session outlives individual accessory sessions, so an accessory that
-    /// vanishes mid-gesture would otherwise leave the desktop with a touch stuck down.
+    /// Lift any finger still held down, at the end of a CarPlay session. The input session
+    /// outlives individual accessory sessions, so a gesture cut short would otherwise stay held.
     pub fn end_session(&self) {
         if let Some(ei) = &self.ei {
             if let Err(e) = ei.release_all() {
@@ -326,10 +322,9 @@ impl RemoteDesktopStream {
             .is_none_or(crate::libei::EiTouch::is_connected)
     }
 
-    /// Warn (once) when the advertised stream size is the desktop's *logical* size while frames are
+    /// Warn once when the advertised stream size is the desktop's *logical* size while frames are
     /// physical - `advertised * display_scale == frame`. Mutter does this, and no D-Bus coordinate
-    /// satisfies both its validation and its input transform - hence the libei path above; this
-    /// warning is for any other compositor with the same mismatch.
+    /// satisfies both its validation and its input transform, which is why libei exists above.
     fn warn_on_scale_mismatch(&self, frame: Option<(f64, f64)>) {
         use std::sync::atomic::Ordering;
         let (Some((sw, _)), Some((fw, _))) = (self.stream_size, frame) else {
@@ -351,9 +346,9 @@ impl RemoteDesktopStream {
     }
 }
 
-/// Keep a coordinate strictly inside `target`, which `xdg-desktop-portal`'s `check_position`
-/// requires (`0 <= x < width`): a touch at the very edge of the accessory's display scales to exactly
-/// `width` and would be rejected with "Invalid position", killing the whole event.
+/// Keep a coordinate strictly inside `target`, as `check_position` requires (`0 <= x < width`): a
+/// touch at the edge of the accessory's display scales to exactly `width`, which is rejected as
+/// "Invalid position".
 fn clamp_inside((x, y): (f64, f64), target: Option<(f64, f64)>) -> (f64, f64) {
     match target {
         Some((w, h)) => (
@@ -364,10 +359,9 @@ fn clamp_inside((x, y): (f64, f64), target: Option<(f64, f64)>) -> (f64, f64) {
     }
 }
 
-/// Scale an accessory-space touch coordinate (`x`, `y` in the accessory's `accessory_size` display) to the desktop
-/// stream's coordinate space. The desktop is scaled *down* to the accessory's resolution for streaming, so
-/// touch has to be scaled back *up*. Passes through unchanged if the target size is unknown or the
-/// accessory size is degenerate.
+/// Scale an accessory-space touch into the desktop stream's coordinate space. The desktop is
+/// scaled *down* to the accessory's resolution for streaming, so touch scales back *up*. Passes
+/// through unchanged if the target size is unknown or the accessory size is degenerate.
 pub(crate) fn scale_touch(
     x: f64,
     y: f64,
@@ -464,9 +458,7 @@ mod tests {
         };
         stream.send_touch(&tap(Down), accessory_size, None).await?;
         stream.send_touch(&tap(Up), accessory_size, None).await?;
-        // A duplicate Up here would be dropped by the slot tracker - but never send one on purpose:
-        // unfiltered, it aborts Mutter (`g_assert` in release_slot) and takes the session with it.
-        // Injection is queued to the EI thread; give it time to reach the compositor and for a
+        // Injection is queued to the EI thread; give it time to reach the compositor, and for a
         // protocol error to come back if the events were malformed.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert!(
@@ -483,12 +475,11 @@ mod tests {
     fn edge_touch_is_clamped_inside_the_stream() {
         let stream = Some((1920.0, 1080.0));
         assert_eq!(clamp_inside((1920.0, 1080.0), stream), (1919.0, 1079.0));
-        // interior and origin untouched
         assert_eq!(clamp_inside((960.0, 540.0), stream), (960.0, 540.0));
         assert_eq!(clamp_inside((0.0, 0.0), stream), (0.0, 0.0));
-        // overshoot (an accessory reporting beyond its own display) and negatives are pulled in
+        // Overshoot and negatives are pulled in.
         assert_eq!(clamp_inside((5000.0, -3.0), stream), (1919.0, 0.0));
-        // unknown target -> unchanged
+        // Unknown target -> unchanged.
         assert_eq!(clamp_inside((5000.0, 1.0), None), (5000.0, 1.0));
     }
 }
@@ -513,9 +504,8 @@ pub async fn start_remote_desktop() -> Result<RemoteDesktopStream> {
         .select_devices(
             &session,
             SelectDevicesOptions::default()
-                // `Pointer` is requested even though only Touchscreen is injected: Mutter's EIS
-                // refuses to create any viewport-backed device without a pointer capability, so
-                // Keyboard|Touchscreen alone silently yields no touch device at all.
+                // `Pointer` even though only Touchscreen is injected: Mutter's EIS refuses to
+                // create a viewport-backed device without a pointer capability.
                 .set_devices(DeviceType::Keyboard | DeviceType::Pointer | DeviceType::Touchscreen)
                 .set_persist_mode(PersistMode::Application),
         )
@@ -559,8 +549,7 @@ pub async fn start_remote_desktop() -> Result<RemoteDesktopStream> {
         }
     };
 
-    // Probed once, here, to spot the scale mismatch `warn_on_scale_mismatch` checks for. Runs on
-    // the blocking pool since it does blocking Wayland roundtrips.
+    // On the blocking pool, since it does blocking Wayland roundtrips.
     let display_scale = tokio::task::spawn_blocking(display_scale)
         .await
         .ok()

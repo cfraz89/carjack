@@ -74,13 +74,13 @@ pub enum CapturedFrame {
         height: u32,
         gst_format: &'static str,
     },
-    /// The rendered GPU buffer itself, forwarded zero-copy - `encode.rs` imports the fd into a
-    /// hardware encoder on the same GPU (glupload -> nvh264enc) without any CPU copy.
+    /// The rendered GPU buffer itself - `encode.rs` imports the fd into a hardware encoder on the
+    /// same GPU without any CPU copy.
     Dmabuf(Dmabuf),
 }
 
-/// The GPU device the compositor renders on, as a reference-counted fd Smithay can share
-/// between the GBM device, EGL display, and allocator.
+/// The GPU device the compositor renders on, as a reference-counted fd Smithay can share between
+/// the GBM device, EGL display, and allocator.
 type RenderDevice = GbmDevice<DrmDeviceFd>;
 
 const TARGET_FPS: u64 = 30;
@@ -94,9 +94,8 @@ struct Ready {
     loop_signal: LoopSignal,
 }
 
-/// A request to re-size/re-time the running compositor. Sent from the session thread once the
-/// accessory's real display parameters are known; `ack` reports success/failure back to the caller so
-/// [`Compositor::reconfigure`] can block until the new mode is live.
+/// A request to re-size/re-time the running compositor, sent once the accessory's real display
+/// parameters are known. `ack` lets [`Compositor::reconfigure`] block until the mode is live.
 struct ReconfigureRequest {
     width: u32,
     height: u32,
@@ -112,9 +111,8 @@ struct ReconfigureRequest {
 /// into it immediately would tear the frame being encoded.
 const FORWARDED_POOL: usize = 4;
 
-/// Handle to a running internal compositor. Owns the frame stream and the touch input channel;
-/// the compositor itself runs on its own thread. Dropping it stops that thread (important: the
-/// session flow restarts on failure, so a leaked compositor per restart would pile up).
+/// Handle to a running internal compositor. Dropping it stops the compositor thread - the session
+/// flow restarts on failure, so a leaked compositor per restart would pile up.
 pub struct Compositor {
     /// Wayland socket name to point desktop client apps at (via `WAYLAND_DISPLAY`).
     pub socket_name: OsString,
@@ -143,8 +141,8 @@ impl Compositor {
         let (frame_tx, frame_rx) = tokio::sync::watch::channel(None);
         let (touch_tx, touch_rx) = calloop::channel::channel::<TouchEvent>();
         let (control_tx, control_rx) = calloop::channel::channel::<ReconfigureRequest>();
-        // Setup runs on the compositor thread; it reports readiness (or a setup error) back
-        // here so `start` can return a ready-to-use handle.
+        // Setup runs on the compositor thread and reports readiness (or a setup error) back here,
+        // so `start` can return a ready-to-use handle.
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<Ready>>();
         let frame_requested = Arc::new(AtomicBool::new(false));
         let thread_frame_requested = frame_requested.clone();
@@ -206,9 +204,8 @@ impl Compositor {
         self.frame_requested.clone()
     }
 
-    /// Re-size and re-time the running compositor to the accessory's real display parameters. Blocks
-    /// until the compositor thread has applied the new mode (or reports the failure). Returns
-    /// whether the mode actually changed (`false` = it was already at these parameters).
+    /// Re-size and re-time the running compositor, blocking until the mode is applied. Returns
+    /// whether it actually changed (`false` = already at these parameters).
     pub fn reconfigure(&self, width: u32, height: u32, fps: u32) -> Result<bool> {
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
         self.control_tx
@@ -228,8 +225,7 @@ impl Compositor {
 
 impl Drop for Compositor {
     fn drop(&mut self) {
-        // Stop the event loop and wake it so it exits promptly, then join the thread - this
-        // tears down the Wayland socket and render loop so a session restart starts clean.
+        // Tear down the Wayland socket and render loop, so a session restart starts clean.
         self.loop_signal.stop();
         self.loop_signal.wakeup();
         if let Some(thread) = self.thread.take() {
@@ -238,8 +234,7 @@ impl Drop for Compositor {
     }
 }
 
-/// Open the DRM render node to render on. Must be the same GPU as the encoder (the zero-copy
-/// requirement); the concrete node is resolved from config in `main` and passed in.
+/// Open the DRM render node to render on. Must be the same GPU as the encoder, for zero-copy.
 pub(crate) fn open_render_node(path: &str) -> Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .read(true)
@@ -286,10 +281,9 @@ struct State {
     data_device_state: DataDeviceState,
 
     renderer: GlesRenderer,
-    /// Render targets. Forwarding the rendered dmabuf cycles through a small pool (a forwarded
-    /// dmabuf is held by GStreamer until it's consumed, so we can't re-render into it
-    /// immediately); the CPU readback and NV12 modes reuse a single buffer, since in both cases
-    /// what leaves the compositor is a *copy* made before the next frame starts.
+    /// Render targets. Forwarding the rendered dmabuf cycles through a pool, since GStreamer holds
+    /// it until consumed; the readback and NV12 modes reuse one buffer, because what leaves the
+    /// compositor is a copy made before the next frame starts.
     render_pool: Vec<Dmabuf>,
     pool_idx: usize,
     frame_format: FrameFormat,
@@ -302,12 +296,10 @@ struct State {
     dirty: bool,
     last_published: std::time::Instant,
     frame_tx: tokio::sync::watch::Sender<Option<Arc<CapturedFrame>>>,
-    /// Kept so `reconfigure` can re-allocate the render pool at a new size (with the same
-    /// modifiers chosen for this GPU at startup).
+    /// Kept so `reconfigure` can re-allocate the render pool at a new size.
     allocator: GbmAllocator<DrmDeviceFd>,
     modifiers: Vec<smithay::backend::allocator::Modifier>,
-    /// Current render-timer period (derived from the accessory's refresh rate); read by the timer each
-    /// tick so `reconfigure` can change the framerate live.
+    /// Render-timer period, re-read each tick so `reconfigure` can change the framerate live.
     frame_interval: Duration,
 }
 
@@ -347,8 +339,7 @@ impl State {
 
         if let Some(nv12) = self.nv12.as_mut() {
             drop(fb);
-            // Convert on the GPU into a buffer the encoder can import directly. Still no
-            // readback: the frame never leaves the GPU, it just changes format.
+            // No readback: the frame never leaves the GPU, it just changes format.
             match nv12.convert(&mut self.renderer) {
                 Ok(buf) => {
                     let _ = self
@@ -359,8 +350,7 @@ impl State {
             }
         } else if self.frame_format == FrameFormat::Argb {
             drop(fb);
-            // Forward the rendered GPU buffer itself - no readback, no CPU copy. The clone
-            // shares the fds; cycling the pool keeps us from overwriting a buffer the encoder
+            // The clone shares the fds; cycling the pool avoids overwriting a buffer the encoder
             // is still reading.
             let buf = self.render_pool[idx].clone();
             let _ = self
@@ -368,8 +358,7 @@ impl State {
                 .send(Some(Arc::new(CapturedFrame::Dmabuf(buf))));
             self.pool_idx = (idx + 1) % self.render_pool.len();
         } else {
-            // Read the framebuffer back into system memory (GPU->CPU copy) - what the software
-            // encode path needs. Works with any modifier (GL readback, not a dmabuf mmap).
+            // GL readback rather than a dmabuf mmap, so it works with any modifier.
             let region = Rectangle::<i32, BufferCoord>::from_size((self.width, self.height).into());
             match self
                 .renderer
@@ -415,10 +404,9 @@ impl State {
         let _ = self.display_handle.flush_clients();
     }
 
-    /// Re-size/re-time the compositor to the accessory's real display parameters: reallocates the render
-    /// pool, updates the output mode and render-timer period, and reconfigures mapped clients to
-    /// the new fullscreen size. Runs on the compositor thread; the error is a `String` so it can
-    /// cross the ack channel.
+    /// Reallocate the render pool, update the output mode and render-timer period, and reconfigure
+    /// mapped clients to the new fullscreen size. Runs on the compositor thread; the error is a
+    /// `String` so it can cross the ack channel.
     fn reconfigure(
         &mut self,
         width: u32,
@@ -435,8 +423,7 @@ impl State {
         }
         tracing::info!("compositor: reconfiguring to {width}x{height} @ {fps}fps");
 
-        // Reallocate the render pool at the new size (same count + modifiers as at startup). Do
-        // this first so a failure leaves the old pool/mode untouched.
+        // First, so a failure leaves the old pool and mode untouched.
         let pool_size = self.render_pool.len();
         let mut new_pool = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
@@ -446,10 +433,9 @@ impl State {
                 .map_err(|e| format!("allocate render buffer: {e}"))?;
             new_pool.push(buffer.export().map_err(|e| format!("export dmabuf: {e}"))?);
         }
-        // The NV12 targets and the imported source texture are all sized to the old mode, so the
-        // conversion has to be rebuilt around the new pool. Do it before anything is swapped in:
-        // a failure here leaves the compositor rendering at the old size rather than at a new one
-        // it cannot publish.
+        // The NV12 targets and source texture are sized to the old mode, so the conversion is
+        // rebuilt around the new pool - before anything is swapped in, so a failure leaves the
+        // compositor rendering at the old size rather than at one it cannot publish.
         let new_nv12 = match self.frame_format {
             FrameFormat::Nv12 => Some(
                 Nv12Converter::new(
@@ -474,7 +460,6 @@ impl State {
         self.height = height as i32;
         self.frame_interval = frame_interval;
 
-        // Update the output mode (size + refresh) and rebuild the size-specific damage tracker.
         let mode = Mode {
             size: (width as i32, height as i32).into(),
             refresh: fps as i32 * 1000,
@@ -488,7 +473,6 @@ impl State {
         self.output.set_preferred(mode);
         self.damage_tracker = OutputDamageTracker::from_output(&self.output);
 
-        // Reconfigure every mapped client to the new fullscreen size.
         let size = (self.width, self.height);
         for window in self.space.elements() {
             if let Some(toplevel) = window.toplevel() {
@@ -501,9 +485,8 @@ impl State {
             }
         }
 
-        // Publish a frame at the new size immediately so a subscriber that connects right after
-        // this returns (the encoder does) latches its caps onto the new dimensions, not a stale
-        // pre-resize frame still sitting in the watch channel.
+        // So a subscriber connecting right after this returns - the encoder does - latches its
+        // caps onto the new dimensions, not a stale frame still sitting in the watch channel.
         self.render_and_publish();
         Ok(true)
     }
@@ -660,16 +643,15 @@ fn run(
         }
     };
     let mut allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING);
-    // Kept (owned) so `reconfigure` can re-allocate the pool at a new size later.
+    // Owned so `reconfigure` can re-allocate the pool at a new size later.
     let modifiers: Vec<smithay::backend::allocator::Modifier> = if render_modifiers.is_empty() {
         vec![smithay::backend::allocator::Modifier::Linear]
     } else {
         render_modifiers
     };
-    // Forwarding the rendered dmabuf hands it to the encoder, which holds it until consumed - so
-    // that mode cycles through a small pool. The other two reuse one buffer: readback is
-    // synchronous, and the NV12 pass has finished reading the ARGB buffer by the time it returns
-    // (its own targets are the ones that get cycled).
+    // The encoder holds a forwarded dmabuf until consumed, so that mode needs a pool. The other
+    // two reuse one buffer: readback is synchronous, and the NV12 pass has finished reading the
+    // ARGB buffer by the time it returns - its own targets are the ones cycled.
     let pool_size = if frame_format == FrameFormat::Argb {
         FORWARDED_POOL
     } else {
@@ -719,9 +701,8 @@ fn run(
     let data_device_state = DataDeviceState::new::<State>(&dh);
     let popups = PopupManager::default();
 
-    // Advertise zwp_linux_dmabuf_v1 with the renderer's supported formats so GPU-accelerated
-    // clients (Waydroid, browsers, games) can share their rendered frames as dmabufs - without
-    // this they only have wl_shm and Waydroid in particular can't render at all.
+    // Without zwp_linux_dmabuf_v1, GPU-accelerated clients have only wl_shm, and Waydroid in
+    // particular cannot render at all.
     let mut dmabuf_state = DmabufState::new();
     let dmabuf_formats: Vec<_> = renderer.dmabuf_formats().into_iter().collect();
     let dmabuf_global = dmabuf_state.create_global::<State>(&dh, dmabuf_formats);
@@ -731,8 +712,7 @@ fn run(
         .map_err(|e| eyre!("add keyboard: {e}"))?;
     seat.add_touch();
 
-    // Headless output at exactly the accessory's resolution, so clients render fullscreen at the
-    // right size and no scaling is needed downstream.
+    // At exactly the accessory's resolution, so nothing downstream has to scale.
     let output = Output::new(
         "carplay".to_string(),
         PhysicalProperties {
@@ -810,9 +790,8 @@ fn run(
         })
         .map_err(|e| eyre!("insert control source: {e}"))?;
 
-    // Rearm to a fixed deadline rather than "now + interval", so render time doesn't accumulate
-    // into the period and sag the rate under load. Re-read from `state.frame_interval` each tick
-    // so `reconfigure` can change it live.
+    // A fixed deadline rather than "now + interval", so render time doesn't accumulate into the
+    // period and sag the rate under load.
     let frame_interval = Duration::from_micros(1_000_000 / fps as u64);
     let mut next_deadline = std::time::Instant::now() + frame_interval;
     // Cadence stats, logged ~every 5s.
@@ -825,9 +804,8 @@ fn run(
             Timer::from_duration(frame_interval),
             move |_, _, state: &mut State| {
                 let render_start = std::time::Instant::now();
-                // A frame every IDLE_REFRESH even when nothing moves: the accessory's decoder gets
-                // a heartbeat, and a keyframe it asks for while the screen is still has a buffer to
-                // ride out on.
+                // A frame every IDLE_REFRESH even when nothing moves: the decoder gets a heartbeat,
+                // and a keyframe asked for on a still screen has a buffer to ride out on.
                 if state.dirty
                     || frame_requested.swap(false, Ordering::Relaxed)
                     || state.last_published.elapsed() >= IDLE_REFRESH
@@ -1056,8 +1034,7 @@ impl DmabufHandler for State {
         dmabuf: Dmabuf,
         notifier: ImportNotifier,
     ) {
-        // Validate by importing into our renderer; the render loop re-uses this same import
-        // when compositing the client's surface.
+        // The render loop re-uses this same import when compositing the client's surface.
         if self.renderer.import_dmabuf(&dmabuf, None).is_ok() {
             let _ = notifier.successful::<State>();
         } else {

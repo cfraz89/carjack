@@ -23,7 +23,6 @@ impl Decoder for Iap2Codec {
     type Error = Iap2Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Frame>, Iap2Error> {
-        // Walk bytes one at a time looking for the magic of either frame kind.
         let mut pos = 0;
         while pos + 2 <= src.len() {
             if src[pos] == 0xFF && (src[pos + 1] == 0x5A || src[pos + 1] == 0x55) {
@@ -72,10 +71,8 @@ struct Queued {
 }
 
 pub struct Iap2<T> {
-    // Split into independent read/write halves so a pending receive_packet() (which
-    // spends nearly all its time blocked waiting for the accessory's next byte) never
-    // blocks a concurrent send_packet() - needed for link-layer keep-alives to actually
-    // go out while otherwise idle.
+    // Independent halves, so a receive_packet() blocked on the accessory's next byte doesn't
+    // block a concurrent send_packet() - link-layer keep-alives have to go out while idle.
     sink: Mutex<SplitSink<Framed<T, Iap2Codec>, Frame>>,
     stream: Mutex<SplitStream<Framed<T, Iap2Codec>>>,
     /// Whether anything at all has arrived on this transport - see [`Iap2::heard_from_peer`].
@@ -99,9 +96,8 @@ const INITIAL_SEQ: u8 = 0x9D;
 pub const LINK_SESSION_ID: u8 = 0;
 
 impl<S: Stream> Iap2<S> {
-    /// The control session ID the *accessory* advertised in its SYN. Never assume a
-    /// value here: the CFMOTO head unit numbers its control session 2, and messages
-    /// sent on any other ID are link-ACKed and then silently dropped.
+    /// The control session ID the *accessory* advertised in its SYN. Never assume a value: head
+    /// units number theirs differently, and messages on any other ID are link-ACKed then dropped.
     pub async fn control_session_id(&self) -> Result<u8, Iap2Error> {
         self.session_table
             .lock()
@@ -128,10 +124,9 @@ impl<S: Stream> Iap2<S> {
         }
     }
 
-    /// Bring the link up on a transport the accessory has just opened.
-    ///
-    /// The same for every transport: an accessory may open with the iAP1 detect, which
-    /// [`Iap2::receive_raw`] answers wherever it appears, and the link itself starts at the SYN.
+    /// Bring the link up on a transport the accessory has just opened. An accessory may open with
+    /// the iAP1 detect, which [`Iap2::receive_raw`] answers wherever it appears; the link itself
+    /// starts at the SYN.
     pub async fn start(stream: S) -> Result<Self, Iap2Error> {
         let iap2 = Iap2::wrap(stream);
         let table = Syn(&iap2).perform().await?;
@@ -162,9 +157,8 @@ impl<S: Stream> Iap2<S> {
         payload: Vec<u8>,
         ack: u8,
     ) -> Packet {
-        // `self.seq` is the number the *next* payload-bearing packet will use. A packet with
-        // no payload is a pure acknowledgement, and repeats the last one instead - see
-        // `send_packet` for why that matters.
+        // `self.seq` is the number the *next* payload-bearing packet will use; a pure
+        // acknowledgement repeats the last one instead - see `send_packet` for why.
         let next_seq = self.seq.load(Ordering::Relaxed);
         let seq = if payload.is_empty() {
             next_seq.wrapping_sub(1)
@@ -176,24 +170,16 @@ impl<S: Stream> Iap2<S> {
 
     /// Queue or send a packet, consuming a sequence number only if it carries a payload.
     ///
-    /// Pure acknowledgements do not advance the sequence: both an iPhone and the accessory
-    /// repeat their last data packet's number on them (`iphone-cfmoto.pklg` - the phone sends
-    /// data as seq `0x47` and then acknowledges two separate messages with seq `0x47` again;
-    /// the accessory does the same with `0x78` before moving to `0x79`).
-    ///
-    /// Burning a sequence number per acknowledgement leaves a gap the accessory never sees
-    /// filled, so it stops accepting everything we send afterwards: it freezes its cumulative
-    /// ack, retransmits its last message until it gives up, and tears down the link. That is
-    /// exactly what `cfmoto_9.pcapng` shows - three 1 s keepalives take us from seq `0xa7` to
-    /// `0xa9`, and the accessory ignores every packet from there on, including the `0xaa` that
-    /// follows, while re-sending its WiFi configuration nine times.
+    /// Pure acknowledgements do not advance the sequence - both an iPhone and the accessory repeat
+    /// their last data packet's number on them. Burning a sequence number per acknowledgement
+    /// leaves a gap the accessory never sees filled, so it freezes its cumulative ack, retransmits
+    /// until it gives up, and tears the link down.
     ///
     /// **This never blocks on the send window.** The session dispatches its replies from inside
-    /// its own receive loop, so a `send_packet` that waited for an acknowledgement would stop
-    /// that loop from ever reading the acknowledgement it is waiting for - a guaranteed deadlock
-    /// at `max_outstanding = 1`, which is what the CFMOTO head unit negotiates. A packet that
-    /// does not fit in the window is queued instead and goes out from `maintain` as soon as an
-    /// acknowledgement frees a slot.
+    /// its own receive loop, so a `send_packet` that waited for an acknowledgement would stop that
+    /// loop from ever reading the acknowledgement it is waiting for - a guaranteed deadlock at the
+    /// `max_outstanding = 1` some accessories negotiate. A packet that does not fit is queued
+    /// instead and goes out from `maintain` as soon as an acknowledgement frees a slot.
     pub async fn send_packet(
         &self,
         control: ControlByte,
@@ -202,9 +188,8 @@ impl<S: Stream> Iap2<S> {
     ) -> Result<(), Iap2Error> {
         self.check_length(&payload).await?;
 
-        // Bare acknowledgements and link-control packets (SYN, RST) are not session data: they
-        // take no sequence number, are never retransmitted, and are not subject to the window -
-        // the SYN exchange has to complete *before* there is a negotiated window at all.
+        // Bare acknowledgements and link control (SYN, RST) take no sequence number and are not
+        // subject to the window - the SYN exchange completes *before* a window is negotiated.
         let bypasses_window = payload.is_empty() || control.syn || control.rst;
         if !bypasses_window && self.link.lock().await.window_is_full() {
             tracing::debug!(
@@ -244,8 +229,8 @@ impl<S: Stream> Iap2<S> {
         Ok(())
     }
 
-    /// Reject anything larger than the accessory said it could receive. Sending it regardless
-    /// would overrun its buffer and cost us the link, which is far worse than a failed send.
+    /// Reject anything larger than the accessory said it could receive - sending it would overrun
+    /// its buffer and cost us the link.
     async fn check_length(&self, payload: &[u8]) -> Result<(), Iap2Error> {
         let max = self.link.lock().await.params.max_length;
         let len = Packet::wire_len(payload.len());
@@ -279,13 +264,9 @@ impl<S: Stream> Iap2<S> {
             .await
     }
 
-    /// Drive the link-layer timers: retransmit anything that has gone unacknowledged for
-    /// `retx_timeout`, and send a bare acknowledgement when the cumulative-ack timer expires or
-    /// the link has been idle long enough to need a keepalive.
-    ///
-    /// Tell the accessory the link is finished, so it can start a fresh SYN straight away
-    /// instead of waiting out its own retransmit timeout. Best-effort - by the time we send
-    /// this the transport is often already gone.
+    /// Tell the accessory the link is finished, so it can start a fresh SYN straight away instead
+    /// of waiting out its own retransmit timeout. Best-effort - the transport is often already
+    /// gone by the time this goes out.
     pub async fn send_reset(&self) -> Result<(), Iap2Error> {
         let control = ControlByte {
             rst: true,
@@ -294,10 +275,9 @@ impl<S: Stream> Iap2<S> {
         self.transmit(control, LINK_SESSION_ID, Vec::new()).await
     }
 
-    /// Sleep until the link needs attention. Pure - it only waits - so it is safe to cancel,
-    /// which is what lets it sit in a `select!` while `maintain` runs outside one.
+    /// Sleep until the link needs attention. It only waits, so it is safe to cancel - which is what
+    /// lets it sit in a `select!` while `maintain` runs outside one.
     pub async fn wait_for_link_work(&self) {
-        // Anything already queued goes out the moment the window has room for it.
         if !self.tx_queue.lock().await.is_empty() && !self.link.lock().await.window_is_full() {
             return;
         }
@@ -345,11 +325,9 @@ impl<S: Stream> Iap2<S> {
     }
 
     /// Read the next packet off the wire and apply link-layer bookkeeping, returning **every**
-    /// packet - bare acknowledgements and SYNs included.
-    ///
-    /// The SYN handshake needs those: its third leg *is* a bare acknowledgement, and the SYN it
-    /// answers carries the sequence number our SYN+ACK has to acknowledge. The session doesn't,
-    /// and uses [`Iap2::receive_packet`] instead.
+    /// packet - bare acknowledgements and SYNs included, because the SYN handshake needs them: its
+    /// third leg *is* a bare acknowledgement, and the SYN it answers carries the sequence number
+    /// our SYN+ACK has to acknowledge. The session uses [`Iap2::receive_packet`] instead.
     ///
     /// Returns the packet and whether it was new (`false` = a retransmission of a sequence
     /// number we have already taken).
@@ -377,8 +355,7 @@ impl<S: Stream> Iap2<S> {
             return Err(Iap2Error::LinkReset);
         }
         if control.sleep {
-            // Nothing to do beyond noting it: we have no power state to enter, and the
-            // accessory carries on talking regardless.
+            // We have no power state to enter, and the accessory carries on talking regardless.
             tracing::info!("Accessory signalled device sleep");
         }
 
@@ -399,10 +376,9 @@ impl<S: Stream> Iap2<S> {
         self.drain_tx_queue().await?;
 
         // Anything carrying a payload advances the receive sequence, and that **includes the
-        // SYN** - it is a numbered packet like any other, and its number is what our SYN+ACK
-        // has to acknowledge. Skipping it left the SYN+ACK claiming `ack = 0`, so the accessory
-        // never saw its SYN acknowledged and retransmitted it until it gave up
-        // (`bench_2.pcapng`: our `ff5a 0017 c0 9d 00 00` against its SYN at seq `0xa8`).
+        // SYN** - it is a numbered packet like any other, and its number is what our SYN+ACK has
+        // to acknowledge. Skip it and the SYN+ACK claims `ack = 0`, so the accessory never sees
+        // its SYN acknowledged and retransmits until it gives up.
         let is_new = if packet.payload.is_empty() || (control.eak && !control.syn) {
             true
         } else {
@@ -479,16 +455,15 @@ mod tests {
         packets
     }
 
-    /// Acknowledgements repeat the last data packet's sequence number rather than taking one
-    /// of their own. Getting this wrong deadlocks the link: the accessory sees a gap it can
-    /// never fill and ignores everything we send afterwards.
+    /// Acknowledgements repeat the last data packet's sequence number rather than taking one of
+    /// their own. Get it wrong and the accessory sees a gap it can never fill, then ignores
+    /// everything we send afterwards.
     #[tokio::test]
     async fn pure_acks_do_not_consume_a_sequence_number() {
         let (ours, mut theirs) = tokio::io::duplex(1024);
         let iap2 = Iap2::wrap(ours);
 
-        // The shape of the tail of a real session: a message, an idle spell covered by
-        // keepalives, then another message.
+        // The tail of a real session: a message, an idle spell of keepalives, then another message.
         iap2.send_packet(ControlByte::with_ack(), 2, control_payload())
             .await
             .unwrap();
@@ -521,9 +496,8 @@ mod tests {
             .unwrap();
     }
 
-    /// Let `receive_packet` consume whatever is buffered. It swallows link-layer traffic and
-    /// then waits for real session data, so a timeout is how a test gets the side effects
-    /// without hanging on the wait that follows.
+    /// Let `receive_packet` consume whatever is buffered. It swallows link-layer traffic and then
+    /// waits for session data, so a timeout is how a test gets the side effects without hanging.
     async fn pump<S: Stream>(iap2: &Iap2<S>) {
         let _ =
             tokio::time::timeout(std::time::Duration::from_millis(50), iap2.receive_packet()).await;
@@ -536,13 +510,9 @@ mod tests {
             .collect()
     }
 
-    /// The full SYN handshake, driven with the AUTO BOX bench unit's real bytes.
-    ///
-    /// Two regressions hid behind the absence of this test, both in `bench_2.pcapng`:
-    /// our SYN+ACK claimed `ack = 0` instead of the accessory's SYN sequence (so it never saw
-    /// its SYN acknowledged and retransmitted until it gave up), and the session-level receive
-    /// filter swallowed bare acknowledgements - which is exactly what the third leg of this
-    /// handshake is, so it could never complete.
+    /// The full SYN handshake, driven with a real accessory's bytes. Two ways it fails silently:
+    /// a SYN+ACK claiming `ack = 0` instead of the accessory's SYN sequence, and a session-level
+    /// receive filter that swallows the bare acknowledgement forming the third leg.
     #[tokio::test]
     async fn syn_handshake_acknowledges_the_accessorys_sequence() {
         use crate::ops::syn::Syn;
@@ -551,7 +521,7 @@ mod tests {
         let (ours, mut theirs) = tokio::io::duplex(1024);
         let iap2 = Iap2::wrap(ours);
 
-        // bench_2.pcapng: SYN at seq 0xa8, control session id 1 (the CFMOTO numbers its 2).
+        // SYN at seq 0xa8, control session id 1.
         theirs
             .write_all(&hex("ff5a001780a8000068017fffff07d003e81e0601000299"))
             .await
@@ -605,9 +575,8 @@ mod tests {
         assert_eq!(params.max_cumack, 6);
     }
 
-    /// The CFMOTO head unit negotiates a one-packet window. Anything beyond it has to wait for
-    /// an acknowledgement rather than going out immediately - we used to send three at once
-    /// (`cfmoto_11.pcapng` frames 851-853).
+    /// Head units negotiate windows as small as one packet; anything beyond it has to wait for an
+    /// acknowledgement rather than go out immediately.
     #[tokio::test]
     async fn a_full_window_queues_the_next_packet() {
         let (ours, mut theirs) = tokio::io::duplex(1024);
@@ -654,8 +623,8 @@ mod tests {
         assert!(matches!(err, Iap2Error::PacketTooLarge { max: 64, .. }));
     }
 
-    /// A reset from the accessory means the link is gone. Carrying on talking over it - which is
-    /// what ignoring the bit amounted to - just wastes the session's time.
+    /// A reset from the accessory means the link is gone; carrying on talking over it just wastes
+    /// the session's time.
     #[tokio::test]
     async fn a_link_reset_is_surfaced_as_an_error() {
         let (ours, mut theirs) = tokio::io::duplex(1024);
@@ -719,7 +688,7 @@ mod tests {
     /// "not yet", never an error: erroring would tear down a link over a split read.
     #[test]
     fn a_partial_frame_is_not_an_error() {
-        for wire in [hex(DETECT), hex(BENCH_SYN)] {
+        for wire in [hex(DETECT), hex(ACCESSORY_SYN)] {
             let mut buf = BytesMut::new();
             for byte in &wire[..wire.len() - 1] {
                 buf.put_u8(*byte);
@@ -737,9 +706,9 @@ mod tests {
     }
 
     /// A real accessory SYN, used by the `start` tests below.
-    const BENCH_SYN: &str = "ff5a001780a8000068017fffff07d003e81e0601000299";
+    const ACCESSORY_SYN: &str = "ff5a001780a8000068017fffff07d003e81e0601000299";
 
-    /// The iAP1 detect, as the CFMOTO head unit sends it.
+    /// The iAP1 detect, as a head unit sends it.
     const DETECT: &str = "ff550200ee10";
 
     /// `Iap2::start` end to end: the detect echoed, then the SYN handshake.
@@ -751,7 +720,7 @@ mod tests {
         let peer = tokio::spawn(async move {
             let mut echo = [0u8; 6];
             theirs.read_exact(&mut echo).await.unwrap();
-            theirs.write_all(&hex(BENCH_SYN)).await.unwrap();
+            theirs.write_all(&hex(ACCESSORY_SYN)).await.unwrap();
             let mut buf = [0u8; 128];
             let n = theirs.read(&mut buf).await.unwrap();
             let (Frame::Iap2(reply), _) = Frame::read(&buf[..n]).unwrap() else {
@@ -776,15 +745,13 @@ mod tests {
     }
 
     /// The accessory does not always detect at the start: over the AirPlay tunnel it moves an
-    /// established session across and detects there, once a second, until it is answered
-    /// (`logs/cfmoto-11-08-1855.pcapng`). Answering only at bring-up left it detecting for ever.
+    /// established session across and detects there, once a second, until it is answered.
     #[tokio::test]
     async fn a_detect_is_echoed_wherever_it_arrives() {
         let (ours, mut theirs) = tokio::io::duplex(1024);
         let iap2 = Iap2::wrap(ours);
 
-        // A detect between two session messages: only the messages reach the session, and the
-        // echo goes out in between.
+        // Only the two messages reach the session; the echo goes out in between.
         let data = Packet::new(ControlByte::with_ack(), 0x2a, 0, 2, control_payload());
         peer_sends(&mut theirs, data).await;
         theirs.write_all(&hex(DETECT)).await.unwrap();
@@ -806,9 +773,8 @@ mod tests {
         );
     }
 
-    /// The tunnel's shape: the accessory detects, and only some seconds after it is answered does
-    /// it SYN - by which time the first attempt has timed out. A transport that has said something
-    /// must therefore still be retried, which is what separates it from a silent one.
+    /// Over the tunnel the accessory SYNs seconds after its detect is answered, by which time the
+    /// first attempt has timed out - so a transport that has said anything must still be retried.
     #[tokio::test(start_paused = true)]
     async fn a_late_syn_is_still_picked_up() {
         use crate::ops::syn::Syn;
@@ -821,7 +787,7 @@ mod tests {
             let mut echo = [0u8; 6];
             theirs.read_exact(&mut echo).await.unwrap();
             tokio::time::sleep(std::time::Duration::from_secs(7)).await;
-            theirs.write_all(&hex(BENCH_SYN)).await.unwrap();
+            theirs.write_all(&hex(ACCESSORY_SYN)).await.unwrap();
 
             let mut buf = [0u8; 128];
             let n = theirs.read(&mut buf).await.unwrap();

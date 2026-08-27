@@ -9,7 +9,7 @@
 //! This is a byte pipe, not a protocol: `Iap2` still owns framing, sequencing and acknowledgement.
 //! One `iAPSendMessage` is not guaranteed to be one iAP2 frame, so the pipe is a stream and the
 //! link layer re-frames it exactly as it does over RFCOMM - down to the iAP1 detect the accessory
-//! opens with here too (`logs/cfmoto-11-08-1855.pcapng`).
+//! opens with here too.
 
 use catplay_carplay::carplay_tx::{AirPlayTransmitter, AirPlayTransmitterProxyRef};
 use catplay_carplay::msg::{Command, CommandIApSendMessage};
@@ -59,9 +59,8 @@ pub struct Tunnel {
 
 impl Tunnel {
     /// Resolves once the accessory has sent something here. Nothing should attempt a link before
-    /// that: no unit seen so far advertises the iAP channel (both report only `VocoderInfo`), and
-    /// starting a session against one that does not just times out waiting for a SYN, twice, in
-    /// the middle of the AirPlay bring-up.
+    /// that: accessories do not advertise the iAP channel, and starting a session against one that
+    /// has not opened it just times out waiting for a SYN, mid AirPlay bring-up.
     pub fn when_used(&self) -> Arc<Notify> {
         self.used.clone()
     }
@@ -118,10 +117,9 @@ async fn pump(
 
 /// Bring an iAP2 link up over the tunnel.
 ///
-/// Identical to the Bluetooth path, and for the same reason: the accessory opens here with the
-/// iAP1 detect (`FF 55 02 00 EE 10`, once a second until it is echoed) before it will send a SYN,
-/// exactly as it does on RFCOMM. The link layer answers it, so there is nothing transport-specific
-/// left to do here.
+/// Identical to the Bluetooth path: the accessory opens here with the iAP1 detect, once a second
+/// until it is echoed, before it will send a SYN. The link layer answers it, so there is nothing
+/// transport-specific left to do.
 pub async fn start_session(
     stream: TunnelStream,
     used: Arc<Notify>,
@@ -137,8 +135,7 @@ pub async fn start_session(
 ///
 /// The link layer still needs driving - keepalives, retransmits and acknowledgement timers - or
 /// the accessory gives up on us exactly as it does over RFCOMM. Control messages are logged rather
-/// than acted on: nothing has yet captured what an accessory sends over this channel, so acting on
-/// a guess is how the Bluetooth side wasted a day.
+/// than acted on: what an accessory sends over this channel has never been captured.
 pub async fn run<S>(iap2: Iap2<S>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,

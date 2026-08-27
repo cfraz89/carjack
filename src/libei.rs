@@ -27,9 +27,8 @@ use tracing::debug;
 /// (and letting the caller fall back to the D-Bus path).
 const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Queue depth for touch commands. Touch arrives at human rates, so this only ever backs up if the
-/// EI thread has stalled - at which point dropping the newest events (and saying so) beats growing
-/// latency without bound.
+/// Queue depth for touch commands. Touch arrives at human rates, so this only backs up if the EI
+/// thread has stalled - where dropping the newest events beats unbounded latency.
 const COMMAND_QUEUE: usize = 256;
 
 /// A libei connection with a touchscreen device, ready to take CarPlay touches.
@@ -39,14 +38,14 @@ pub struct EiTouch {
 
 /// Work for the EI thread.
 enum Command {
-    /// One touch to inject, in the accessory's coordinate space (mapped into a region on the EI thread,
-    /// which is what owns the region list).
+    /// One touch to inject, in the accessory's coordinate space. The EI thread owns the region
+    /// list, so the mapping happens there.
     Touch {
         event: TouchEvent,
         accessory_size: (u32, u32),
     },
-    /// Lift every finger that's still down - sent when a CarPlay session ends, so an accessory that
-    /// disappears mid-gesture doesn't leave the desktop with a finger held down forever.
+    /// Lift every finger that's still down, so an accessory that disappears mid-gesture doesn't
+    /// leave the desktop with a finger held down.
     ReleaseAll,
 }
 
@@ -69,9 +68,8 @@ impl EiTouch {
         Self::from_stream(std::os::unix::net::UnixStream::from(fd), mapping_id).await
     }
 
-    /// Drive libei over an already-open EI socket. Split out from [`Self::connect`] so the socket's
-    /// provenance (the portal here, but equally `LIBEI_SOCKET` or a test server) is the caller's
-    /// business.
+    /// Drive libei over an already-open EI socket, leaving its provenance - the portal, but equally
+    /// `LIBEI_SOCKET` or a test server - to the caller.
     pub async fn from_stream(
         stream: std::os::unix::net::UnixStream,
         mapping_id: Option<String>,
@@ -90,12 +88,10 @@ impl EiTouch {
         }
     }
 
-    /// Queue a CarPlay touch for injection. `accessory_size` is the accessory's display size (the space
-    /// `event.x/.y` are in); the EI thread maps it into the device region matching the streamed
-    /// monitor.
+    /// Queue a CarPlay touch for injection. `accessory_size` is the space `event.x/.y` are in; the
+    /// EI thread maps it into the device region matching the streamed monitor.
     ///
-    /// Non-blocking, so it never stalls the session loop; an error means the libei connection is
-    /// gone for good.
+    /// Non-blocking; an error means the libei connection is gone for good.
     pub fn send_touch(&self, event: &TouchEvent, accessory_size: (u32, u32)) -> Result<()> {
         self.send(Command::Touch {
             event: event.clone(),
@@ -103,9 +99,8 @@ impl EiTouch {
         })
     }
 
-    /// Lift every finger still held down. Call this when a CarPlay session ends: the EI connection
-    /// outlives individual sessions, so an accessory that vanishes mid-gesture would otherwise leave the
-    /// desktop with a finger stuck down.
+    /// Lift every finger still held down, at the end of a CarPlay session. The EI connection
+    /// outlives individual sessions, so a gesture cut short would otherwise stay held.
     pub fn release_all(&self) -> Result<()> {
         self.send(Command::ReleaseAll)
     }
@@ -121,8 +116,7 @@ impl EiTouch {
         }
     }
 
-    /// Whether the EI thread is still running (it exits on disconnect or protocol error). Used by
-    /// the live test to prove an injected touch didn't make the compositor hang up on us.
+    /// Whether the EI thread is still running - it exits on disconnect or protocol error.
     #[cfg(test)]
     pub fn is_connected(&self) -> bool {
         !self.commands.is_closed()
@@ -188,8 +182,8 @@ async fn ei_loop(
 
     loop {
         tokio::select! {
-            // Devices are offered asynchronously after the handshake; if none can take touch, tell
-            // the caller so it can fall back rather than silently swallowing every touch.
+            // Devices are offered asynchronously after the handshake; if none can take touch, the
+            // caller has to be told so it can fall back.
             () = &mut deadline, if session.ready.is_some() => {
                 session.fail_ready(eyre!(
                     "no libei touchscreen became available within {READY_TIMEOUT:?} (does the \
@@ -226,8 +220,8 @@ async fn ei_loop(
 /// to emit events on it.
 struct EiSession {
     connection: event::Connection,
-    /// `mapping_id` of the video stream, to pick the region the accessory is actually looking at when the
-    /// server offers several (multi-monitor).
+    /// `mapping_id` of the video stream, to pick the region the accessory is looking at when the
+    /// server offers several.
     mapping_id: Option<String>,
     /// EI event timestamps are microseconds on an arbitrary but monotonic clock.
     started: Instant,
@@ -303,8 +297,8 @@ impl EiSession {
             EiEvent::DevicePaused(paused) => {
                 if let Some(touch) = self.touch.as_mut().filter(|t| t.device == paused.device) {
                     touch.emulating = false;
-                    // Mutter releases our slots on pause; forget them so a later `up` from the accessory
-                    // is dropped instead of aborting the compositor.
+                    // Mutter releases our slots on pause; forget them so a later `up` is dropped
+                    // instead of aborting the compositor.
                     self.slots.clear();
                     debug!("EI touchscreen paused");
                 }
@@ -338,16 +332,16 @@ impl EiSession {
     /// Map a queued touch into the device's region and emit it, if the slot's state allows it.
     ///
     /// Coordinates go into the region in logical pixels, offset by its position - no display-scale
-    /// division, since that's what halved touch on the old D-Bus path.
+    /// division.
     ///
     /// Every event is filtered through [`SlotTracker`] first: Mutter's EIS treats an `up` for a
-    /// slot it never acquired as a fatal `g_assert`, aborting gnome-shell (the whole session), and
-    /// a `motion` for an unknown slot silently moves the wrong finger. The accessory can produce either
-    /// after a dropped event or a paused device, so nothing reaches the wire unfiltered.
+    /// slot it never acquired as a fatal `g_assert`, taking gnome-shell down with it, and a
+    /// `motion` for an unknown slot silently moves the wrong finger. The accessory can produce
+    /// either after a dropped event or a paused device.
     fn inject(&mut self, event: &TouchEvent, accessory_size: (u32, u32)) {
         let Some(touch) = self.touch.as_ref().filter(|t| t.emulating) else {
-            // Paused, or gone: dropping is correct, not an error. The tracker is cleared on pause,
-            // so a later `up` for this gesture is dropped too rather than crashing the compositor.
+            // Dropping is correct, not an error: the tracker is cleared on pause, so this
+            // gesture's later `up` is dropped too.
             debug!("libei touch dropped: no device emulating");
             return;
         };
@@ -421,9 +415,9 @@ impl EiSession {
     }
 }
 
-/// Which touch slots are currently down, so carjack only ever emits a well-formed sequence
-/// (`down` -> `motion`* -> `up`) per slot - Mutter's EIS aborts the whole compositor on an `up`
-/// for a slot it never acquired, so anything malformed the accessory sends has to be filtered here.
+/// Which touch slots are currently down, so only a well-formed `down` -> `motion`* -> `up` per
+/// slot is emitted - Mutter's EIS aborts the whole compositor on an `up` for a slot it never
+/// acquired.
 #[derive(Default)]
 struct SlotTracker {
     down: std::collections::BTreeSet<u32>,
@@ -466,8 +460,7 @@ impl SlotTracker {
     }
 }
 
-/// The region to address: the one whose `mapping_id` matches the video stream (that's what the id is
-/// for - correlating a region with the stream the client shows), else the only/first one.
+/// The region whose `mapping_id` matches the video stream, else the first one.
 fn pick_region<'a>(
     regions: &'a [event::Region],
     mapping_id: Option<&str>,
@@ -480,9 +473,9 @@ fn pick_region<'a>(
     regions.first()
 }
 
-/// Map an accessory-space touch into `region`: scale by the region's size, offset by its position, and keep
-/// the result inside it - out-of-region coordinates are *silently discarded* by the EIS
-/// implementation, and an accessory reports touch right at the edge of its display.
+/// Map an accessory-space touch into `region`, keeping the result inside it - the EIS
+/// implementation *silently discards* out-of-region coordinates, and accessories report touch
+/// right at the edge of their display.
 fn region_position(
     region: &event::Region,
     x: f64,
@@ -504,7 +497,7 @@ fn region_position(
     )
 }
 
-/// Region geometry as short strings, for logging (`event::Region` is neither `Clone` nor `Debug`).
+/// Region geometry as short strings - `event::Region` is neither `Clone` nor `Debug`.
 fn describe_regions(regions: &[event::Region]) -> Vec<String> {
     regions
         .iter()
@@ -561,8 +554,7 @@ mod tests {
         );
     }
 
-    /// A region that isn't at the origin (a second monitor) must have its offset added, so touch
-    /// lands on that monitor rather than the primary one.
+    /// A region away from the origin needs its offset added, or touch lands on the wrong monitor.
     #[test]
     fn region_offset_is_applied() {
         let r = region(1728, 0, 1920, 1080, None);
@@ -572,14 +564,13 @@ mod tests {
         );
     }
 
-    /// The safety net that matters most: Mutter *aborts the whole session* on an `up` for a slot it
-    /// never acquired, so no malformed sequence from the accessory may ever reach the wire.
+    /// Mutter *aborts the whole session* on an `up` for a slot it never acquired.
     #[test]
     fn slot_tracker_only_allows_well_formed_sequences() {
         use TouchEventType::{Down, Motion, Up};
         let mut slots = SlotTracker::default();
 
-        // Nothing is down: motion and up must be refused (up is the compositor-killing one).
+        // Nothing down: motion and up must be refused - up is the compositor-killing one.
         assert!(!slots.allows(Up, 0));
         assert!(!slots.allows(Motion, 0));
         assert!(slots.allows(Down, 0));

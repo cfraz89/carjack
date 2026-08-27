@@ -24,23 +24,20 @@ use crate::compositor::CapturedFrame;
 use crate::config::{CodecChoice, ZeroCopyMode};
 use libcarjack::airplay::{EncodedFrame, VideoCodec};
 
-/// The configured target video bitrate, in kbit/s. A newtype because encoders disagree on units -
-/// most take kbit/s, openh264enc and v4l2 take bit/s - so encoder descriptions spell the unit they
-/// want as a `{kbps}`/`{bps}` placeholder and [`Bitrate::apply`] fills it in.
+/// Target video bitrate. Encoders disagree on units - most take kbit/s, openh264enc and v4l2 take
+/// bit/s - so descriptions spell theirs as a `{kbps}`/`{bps}` placeholder for [`Bitrate::apply`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bitrate {
     kbps: u32,
 }
 
 impl Bitrate {
-    /// From kbit/s, which is how it's configured.
     pub fn from_kbps(kbps: u32) -> Self {
         Self { kbps }
     }
 
-    /// Substitute this bitrate into a gst-launch-style encoder description, replacing `{kbps}` with
-    /// kbit/s and `{bps}` with bit/s. A description with neither placeholder is returned unchanged
-    /// (`v4l2h264enc`'s bare default, and any `CARPLAY_ENCODER` override that pins its own rate).
+    /// A description with neither placeholder is returned unchanged - `v4l2h264enc`'s bare default,
+    /// and any `CARPLAY_ENCODER` override that pins its own rate.
     fn apply(self, desc: &str) -> String {
         desc.replace("{kbps}", &self.kbps.to_string())
             .replace("{bps}", &(self.kbps as u64 * 1000).to_string())
@@ -59,8 +56,7 @@ impl std::fmt::Display for Bitrate {
     }
 }
 
-/// Zero-copy `AsRef<[u8]>` view of an SHM frame's pixels, so re-pushing the same frame (the
-/// repeater does 30x/sec) is just an `Arc` refcount bump rather than a full memcpy each tick.
+/// `AsRef<[u8]>` view of an SHM frame, so re-pushing one is a refcount bump rather than a memcpy.
 struct FrameData(Arc<CapturedFrame>);
 
 impl AsRef<[u8]> for FrameData {
@@ -72,40 +68,34 @@ impl AsRef<[u8]> for FrameData {
     }
 }
 
-/// How the appsrc feeder turns each `CapturedFrame` into a `gst::Buffer` (and what caps it
-/// announces on the appsrc). Chosen together with the encode chain by [`build_backend`], so the
-/// buffer kind always matches what the first pipeline element can consume.
+/// How the appsrc feeder turns each `CapturedFrame` into a `gst::Buffer`. Chosen together with the
+/// encode chain by [`build_backend`], so the buffer kind always matches the first pipeline element.
 enum FrameFeeder {
-    /// Software path: system-memory BGRx pushed as plain `video/x-raw`.
+    /// System-memory BGRx pushed as plain `video/x-raw`.
     Shm,
-    /// VA-API / v4l2 zero-copy: the compositor's dmabuf pushed as `video/x-raw(memory:DMABuf)`
-    /// (DMA_DRM), imported directly by the postproc element (`vapostproc` / `v4l2convert`).
+    /// The compositor's dmabuf pushed as `video/x-raw(memory:DMABuf)` (DMA_DRM), imported by the
+    /// postproc element (`vapostproc` / `v4l2convert`).
     DmaDrm(DmaBufAllocator),
-    /// NVIDIA zero-copy: each dmabuf imported into `GstCudaMemory` via CUDA/EGL interop, pushed
-    /// as `video/x-raw(memory:CUDAMemory)` straight into `nvh264enc` (which does RGB->NV12). The
-    /// importer (its CUDA context) is created once at startup and shared across encode sessions.
+    /// Each dmabuf imported into `GstCudaMemory` via CUDA/EGL interop and pushed as
+    /// `video/x-raw(memory:CUDAMemory)` straight into `nvh264enc`, which does RGB->NV12.
     #[cfg(feature = "cuda")]
     Cuda(Arc<cuda_dmabuf::CudaImporter>),
 }
 
-/// The resolved encode backend, decided once at startup ([`resolve_backend`]) and reused for
-/// every session's encoder. Cloneable so each session's encode task gets its own handle (the CUDA
-/// importer is shared behind an `Arc`).
+/// The resolved encode backend, decided once at startup ([`resolve_backend`]) and reused for every
+/// session's encoder.
 #[derive(Clone)]
 pub enum EncodeBackend {
-    /// Zero-copy through a row of [`HW_BACKENDS`]. `importer` is `Some` exactly for backends whose
-    /// [`Import`] is `Cuda` - it owns the CUDA context, so it's built once at startup and shared
-    /// by every session.
+    /// Zero-copy through a row of [`HW_BACKENDS`].
     Hw {
         backend: &'static HwBackend,
         codec: VideoCodec,
-        /// Only on the `cuda` feature: the CUDA context shared across sessions. `Some` exactly for
-        /// backends whose [`Import`] is `Cuda`.
+        /// The CUDA context, shared across sessions. `Some` exactly for [`Import::Cuda`] backends.
         #[cfg(feature = "cuda")]
         importer: Option<Arc<cuda_dmabuf::CudaImporter>>,
     },
-    /// System-memory path: the compositor reads frames back and a hardware encoder fed system
-    /// memory takes them, or a CPU one if the machine has none.
+    /// The compositor reads frames back and a hardware encoder fed system memory takes them, or a
+    /// CPU one if the machine has none.
     Software { codec: VideoCodec },
 }
 
@@ -113,20 +103,17 @@ pub enum EncodeBackend {
 /// the encoder built to match, so the two cannot disagree.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FrameFormat {
-    /// BGRx read back into system memory: the software path, and any hardware encoder that has to
-    /// be fed system memory.
+    /// BGRx read back into system memory.
     Shm,
     /// The rendered ARGB dmabuf itself, converted downstream by the backend's `postproc` (or by
     /// the CUDA importer).
     Argb,
-    /// ARGB rendered, then converted to NV12 on the GPU by [`crate::nv12`] and that dmabuf
-    /// forwarded - for an encoder that imports NV12 but has no postproc element available.
+    /// ARGB converted to NV12 on the GPU by [`crate::nv12`] and that dmabuf forwarded - for an
+    /// encoder that imports NV12 but has no postproc element available.
     Nv12,
 }
 
 impl EncodeBackend {
-    /// Whether this backend consumes the compositor's dmabuf directly (so the compositor must
-    /// forward dmabufs); false means the software path consuming CPU-read-back frames.
     pub fn is_zero_copy(&self) -> bool {
         !matches!(self, Self::Software { .. })
     }
@@ -144,8 +131,6 @@ impl EncodeBackend {
         }
     }
 
-    /// The codec this backend encodes - what the accessory is told the stream is, and which parameter
-    /// sets are pulled out of a keyframe.
     pub fn codec(&self) -> VideoCodec {
         match self {
             Self::Hw { codec, .. } | Self::Software { codec } => *codec,
@@ -170,7 +155,6 @@ impl EncodeBackend {
         }
     }
 
-    /// Short human-readable name of the selected backend, for logging.
     pub fn describe(&self) -> String {
         match self {
             Self::Hw { backend, codec, .. } => {
@@ -181,11 +165,9 @@ impl EncodeBackend {
     }
 }
 
-/// Initialise GStreamer up front, off the async runtime.
-///
-/// The first `gst::init()` builds the plugin registry, which takes seconds; keep that out of a
-/// session. The app path gets this free via [`resolve_backend`]; desktop mode has to ask.
-/// Blocking and idempotent.
+/// Initialise GStreamer up front, off the async runtime: the first `gst::init()` builds the plugin
+/// registry, which takes seconds. The app path gets this free via [`resolve_backend`]; desktop mode
+/// has to ask. Blocking and idempotent.
 pub fn init_gstreamer() -> Result<()> {
     gst::init()?;
     Ok(())
@@ -217,8 +199,8 @@ pub fn resolve_backend(
             )
         }),
         ZeroCopyMode::Auto => Ok(try_zero_copy(render_node, codec).unwrap_or_else(|| {
-            // Which encoder that leaves is worth saying here: no zero-copy chain does not mean no
-            // hardware encoder, only that frames reach it through system memory.
+            // No zero-copy chain does not mean no hardware encoder, only that frames reach it
+            // through system memory - so name what that leaves.
             match system_memory_encoder(codec) {
                 Some((desc, true)) => tracing::warn!(
                     "zerocopy=auto: no zero-copy backend available on {render_node}; encoding on \
@@ -262,15 +244,13 @@ pub fn resolve_codec(choice: CodecChoice, accessory_declares_hevc: bool) -> Vide
     VideoCodec::H264
 }
 
-/// Whether any encoder for `codec` exists here - hardware row or software default.
 fn encoder_installed(codec: VideoCodec) -> bool {
     let _ = gst::init();
     HW_BACKENDS.iter().any(|b| b.encodes(codec))
         || sw_encoder_candidates(codec).any(|d| element_available(encoder_name(d)))
 }
 
-/// Try to construct a zero-copy backend for `render_node` by probing [`HW_BACKENDS`], honouring an
-/// explicit `CARPLAY_ENCODE_BACKEND` override. `None` if none are usable.
+/// A zero-copy backend for `render_node`, or `None` if none are usable.
 ///
 /// Rows matching the node's actual kernel driver are tried first - a zero-copy import only works
 /// within one GPU, so plain table order can reach a backend whose elements probe fine but whose
@@ -278,8 +258,7 @@ fn encoder_installed(codec: VideoCodec) -> bool {
 fn try_zero_copy(render_node: &str, codec: VideoCodec) -> Option<EncodeBackend> {
     let driver = crate::config::render_node_driver(render_node);
     let mut candidates: Vec<&HwBackend> = Vec::new();
-    // Why each row was passed over, so a board that falls back to software says which of the two
-    // reasons it was: wrong GPU, or the plugin isn't installed.
+    // Why each row was passed over: wrong GPU, or the plugin isn't installed.
     let mut rejected: Vec<String> = Vec::new();
     for backend in HW_BACKENDS.iter().filter(|b| wanted(b)) {
         if !backend.can_import_from(driver.as_deref()) {
@@ -328,10 +307,8 @@ fn try_zero_copy(render_node: &str, codec: VideoCodec) -> Option<EncodeBackend> 
                     importer: None,
                 });
             }
-            // The elements existing is not enough here: this row leans on the compositor being
-            // able to render NV12 on this GPU, which is a driver capability, not a gst one. Ask
-            // before choosing it - a backend chosen and then unable to produce a frame would take
-            // the session down, where falling through just costs the zero-copy path.
+            // The elements existing is not enough: this row leans on the compositor being able to
+            // render NV12 on this GPU, which is a driver capability, not a gst one.
             Import::Nv12DmaBuf => {
                 if crate::nv12::supported(render_node) {
                     return Some(EncodeBackend::Hw {
@@ -346,9 +323,8 @@ fn try_zero_copy(render_node: &str, codec: VideoCodec) -> Option<EncodeBackend> 
                     backend.name
                 );
             }
-            // CUDA is the one backend that needs state (a CUDA context bound to `render_node`)
-            // rather than just elements, so it can fail this late - e.g. the compositor renders on
-            // a non-NVIDIA node. Fall through to the next backend if it does.
+            // CUDA needs state (a context bound to `render_node`) rather than just elements, so it
+            // can fail this late - e.g. the compositor renders on a non-NVIDIA node.
             #[cfg(feature = "cuda")]
             Import::Cuda => match cuda_dmabuf::CudaImporter::new(render_node) {
                 Ok(imp) => {
@@ -371,8 +347,8 @@ fn try_zero_copy(render_node: &str, codec: VideoCodec) -> Option<EncodeBackend> 
 }
 
 /// DRM modifiers this backend's postproc can import for Argb8888 (`AR24`); empty means
-/// unconstrained. The compositor allocates from this, or GBM picks one the encoder cannot take
-/// and negotiation fails only once frames flow.
+/// unconstrained. The compositor allocates from this, or GBM picks one the encoder cannot take and
+/// negotiation fails only once frames flow.
 pub fn importable_modifiers(backend: &EncodeBackend) -> Vec<u64> {
     let EncodeBackend::Hw { backend, .. } = backend else {
         return Vec::new();
@@ -408,7 +384,7 @@ pub fn importable_modifiers(backend: &EncodeBackend) -> Vec<u64> {
 }
 
 /// `"AR24:0x0100000000000002"` -> that modifier, keeping only the compositor's fourcc. A bare
-/// `"AR24"` carries no modifier, which means linear.
+/// `"AR24"` means linear.
 fn collect_argb_modifier(drm_format: &str, out: &mut Vec<u64>) {
     let (fourcc, modifier) = match drm_format.split_once(':') {
         Some((f, m)) => (
@@ -432,20 +408,17 @@ pub fn driver_has_zero_copy_backend(driver: &str) -> bool {
         .any(|b| wanted(b) && b.matches_driver(Some(driver)) && b.encodes(VideoCodec::H264))
 }
 
-/// Whether `CARPLAY_ENCODE_BACKEND` allows this backend (unset = all of them). Applies to both
-/// the internal-compositor and desktop paths.
+/// Whether `CARPLAY_ENCODE_BACKEND` allows this backend (unset = all of them).
 fn wanted(b: &HwBackend) -> bool {
     std::env::var("CARPLAY_ENCODE_BACKEND")
         .ok()
         .is_none_or(|f| f.eq_ignore_ascii_case(b.name))
 }
 
-/// Run a GStreamer pipeline that H264-encodes the composited desktop frames (from the internal
-/// compositor, via `frame_rx`) and hands each encoded access unit to `video_tx`.
+/// Encode the compositor's frames (`frame_rx`) and hand each access unit to `video_tx`.
 ///
-/// Uses an in-process `appsink` rather than piping `gst-launch` through an fd: the sink
-/// delivers one `alignment=au` buffer per callback, so each message on the channel is
-/// already exactly one complete access unit - no byte-stream reframing needed.
+/// An in-process `appsink` rather than `gst-launch` through an fd: the sink delivers one
+/// `alignment=au` buffer per callback, so each message is already one complete access unit.
 pub async fn encode_h264_to_channel(
     frame_rx: watch::Receiver<Option<Arc<CapturedFrame>>>,
     video_tx: mpsc::Sender<EncodedFrame>,
@@ -465,8 +438,7 @@ pub async fn encode_h264_to_channel(
             .map_err(|_| eyre!("failed to create {label} ({name})"))
     };
 
-    // appsrc fed by the compositor's frame stream. do-timestamp stamps each pushed buffer with
-    // the pipeline running-time (buffers arrive with no PTS, and the encoder needs timestamps).
+    // do-timestamp: buffers arrive with no PTS, and the encoder needs timestamps.
     let src = gst::ElementFactory::make("appsrc")
         .name("source")
         .build()
@@ -478,8 +450,7 @@ pub async fn encode_h264_to_channel(
     src.set_property("do-timestamp", true);
     pipeline.add(&src).map_err(|_| eyre!("add source"))?;
 
-    // Leaky queue: drops the oldest frame (rather than growing latency) if the encoder or the
-    // accessory's WiFi momentarily falls behind.
+    // Drop the oldest frame rather than grow latency when the encoder or the WiFi falls behind.
     let queue = mk("queue", "queue")?;
     queue.set_property_from_str("leaky", "downstream");
     queue.set_property("max-size-buffers", 3u32);
@@ -488,9 +459,6 @@ pub async fn encode_h264_to_channel(
     pipeline.add(&queue).map_err(|_| eyre!("add queue"))?;
     src.link(&queue).map_err(|_| eyre!("link src-queue"))?;
 
-    // Build the pipeline for the backend chosen at startup. The compositor was started in a
-    // matching mode (dmabuf for zero-copy, CPU-readback SHM for software), so the frame variant
-    // the feeder receives always matches what this pipeline's first element can consume.
     let (encoder, feeder) = build_backend(&pipeline, &queue, &backend, bitrate)?;
     tracing::info!("Encode backend: {} at {bitrate}", backend.describe());
 
@@ -561,7 +529,6 @@ pub async fn encode_h264_to_channel(
                     match importer.import(&plane) {
                         Ok(buf) => buf,
                         Err(e) => {
-                            // The plane description is the whole story for an EGL import failure.
                             tracing::warn!(
                                 fourcc = %fourcc_str(plane.fourcc),
                                 modifier = format!("{:#018x}", plane.modifier),
@@ -590,17 +557,12 @@ pub async fn encode_h264_to_channel(
         }
     }));
 
-    // `_frame_feeder` stays alive for the whole call, feeding the appsrc while the pipeline runs.
     drive_video_pipeline(&pipeline, &encoder, codec, video_tx, keyframe_rx).await
 }
 
 /// Stream the user's existing desktop, captured via the xdg-desktop-portal ScreenCast PipeWire
-/// `node_id`, scaled/re-timed to the accessory's `width`x`height` @ 30fps. Input goes back through the
-/// portal (see `src/portal.rs`), not here. `pipewiresrc` is a live source with its own
-/// timestamps, so no appsrc/feeder is needed.
-///
-/// `zerocopy` picks GPU convert/scale (a [`HW_BACKENDS`] row's `desktop` chain, preferring the
-/// backend on the GPU that renders the desktop) or software (`videoscale ! videoconvert`).
+/// `node_id`, scaled/re-timed to the accessory's `width`x`height` @ 30fps. Input goes back through
+/// the portal (see `src/portal.rs`), not here.
 pub async fn encode_pipewire_to_channel(
     node_id: u32,
     width: u32,
@@ -621,9 +583,8 @@ pub async fn encode_pipewire_to_channel(
     src.set_property_from_str("path", &node_id.to_string());
     pipeline.add(&src).map_err(|_| eyre!("add pipewiresrc"))?;
 
-    // Report the desktop's *actual* frame size (from the negotiated pipewiresrc caps) so touch can
-    // be scaled to it - that's the coordinate space the accessory's view maps into, regardless of what
-    // the portal reported or how the desktop is scaled.
+    // The negotiated caps, not what the portal reported: that is the coordinate space the
+    // accessory's view maps into, so touch scales to it.
     if let Some(pad) = src.static_pad("src") {
         pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
             if let Some(gst::PadProbeData::Event(ev)) = &info.data {
@@ -654,10 +615,9 @@ pub async fn encode_pipewire_to_channel(
     drive_video_pipeline(&pipeline, &encoder, codec, video_tx, keyframe_rx).await
 }
 
-/// Build the desktop encode chain from `src` (a `pipewiresrc`), scaling/re-timing to the accessory's
-/// `width`x`height` @ 30fps, and return the H264 encoder element. Picks a [`HW_BACKENDS`] row's
-/// GPU path when `zerocopy` allows and its elements exist - preferring the backend on the GPU that
-/// renders the desktop - else software convert/scale.
+/// The desktop encode chain from `src` (a `pipewiresrc`), returning its encoder element. Picks a
+/// [`HW_BACKENDS`] row's GPU path when `zerocopy` allows and its elements exist - preferring the
+/// backend on the GPU that renders the desktop - else software convert/scale.
 fn build_pipewire_encode(
     pipeline: &gst::Pipeline,
     src: &gst::Element,
@@ -690,10 +650,8 @@ fn build_pipewire_encode(
         }
     };
 
-    // A GPU import chain + encoder from the backend's `desktop` elements, importing the portal's
-    // dmabuf and converting/scaling on the GPU. Genuinely zero-copy for the postproc backends; on
-    // NVIDIA the final GL->CUDA handoff still downloads to system memory (interop fails), but it's
-    // still the right choice when the desktop is NVIDIA-rendered.
+    // Genuinely zero-copy for the postproc backends; on NVIDIA the final GL->CUDA handoff still
+    // downloads to system memory (interop fails), but stays the right choice for an NVIDIA desktop.
     let build_hw = |b: &HwBackend| -> Result<gst::Element> {
         let desc = b
             .encoder_desc(codec, bitrate)
@@ -724,9 +682,8 @@ fn build_pipewire_encode(
         Ok(encoder)
     };
 
-    // GPU convert/scale with a system-memory handoff, for a GPU whose vendor postproc is missing.
-    // `gldownload` cannot hand these encoders a dmabuf, so a readback remains - but the conversion
-    // and scaling stay on the GPU, and what comes back is NV12 rather than four bytes per pixel.
+    // For a GPU whose vendor postproc is missing. `gldownload` cannot hand these encoders a dmabuf,
+    // so a readback remains - but what comes back is NV12 rather than four bytes per pixel.
     let build_gl = || -> Result<gst::Element> {
         let (enc_name, encoder) = make_encoder(&software_encoder_desc(codec, bitrate)?)?;
         let rate = mk("videorate", "videorate")?;
@@ -740,8 +697,7 @@ fn build_pipewire_encode(
         pipeline.add(&encoder).map_err(|_| eyre!("add encoder"))?;
         gst::Element::link_many(std::iter::once(src).chain(chain.iter()))
             .map_err(|_| eyre!("link gl chain"))?;
-        // NV12 named here and nowhere earlier: it is what makes the GL side do the conversion
-        // rather than handing back RGBA for the CPU to convert.
+        // Naming NV12 is what makes the GL side convert, rather than hand back RGBA for the CPU to.
         chain
             .last()
             .expect("chain is never empty")
@@ -763,9 +719,8 @@ fn build_pipewire_encode(
     };
 
     if !matches!(zerocopy, ZeroCopyMode::Off) {
-        // Prefer the backend that runs on the GPU the desktop buffer actually lives on - encoding
-        // an Intel/AMD desktop on NVIDIA (or vice versa) would be a cross-GPU copy. Sorting rather
-        // than filtering keeps the others as fallbacks, in table order.
+        // Encoding an Intel/AMD desktop on NVIDIA (or vice versa) would be a cross-GPU copy.
+        // Sorting rather than filtering keeps the others as fallbacks, in table order.
         let driver = crate::config::desktop_render_driver();
         let mut candidates: Vec<&HwBackend> = HW_BACKENDS.iter().filter(|b| wanted(b)).collect();
         candidates.sort_by_key(|b| !b.matches_driver(driver.as_deref()));
@@ -794,7 +749,6 @@ fn build_pipewire_encode(
         tracing::warn!("no GL convert/scale either, falling back to the CPU");
     }
 
-    // Software: CPU convert + scale.
     let (enc_name, encoder) = make_encoder(&software_encoder_desc(codec, bitrate)?)?;
     let rate = mk("videorate", "videorate")?;
     let scale = mk("videoscale", "videoscale")?;
@@ -811,8 +765,7 @@ fn build_pipewire_encode(
 }
 
 /// Link `encoder` -> the codec's parser -> `appsink`, forward each access unit to `video_tx`, set
-/// the pipeline PLAYING, and run its bus until EOS/error. The pipeline is torn down when this
-/// future is dropped. Shared by the internal-compositor and portal source paths.
+/// the pipeline PLAYING, and run its bus until EOS/error. Torn down when this future is dropped.
 async fn drive_video_pipeline(
     pipeline: &gst::Pipeline,
     encoder: &gst::Element,
@@ -844,9 +797,8 @@ async fn drive_video_pipeline(
     // configuration is what starts it.
     let answer_with_config = Arc::new(AtomicBool::new(true));
 
-    // Forced keyframes, asked for by the accessory. An upstream force-key-unit event on the encoder's
-    // src pad works portably across every backend, no per-backend special-casing needed.
-    // `all_headers` re-sends SPS/PPS with the IDR, letting a desynced accessory latch back on.
+    // Forced keyframes, asked for by the accessory. An upstream force-key-unit event on the
+    // encoder's src pad works across every backend; `all_headers` re-sends SPS/PPS with the IDR.
     let _keyframe_pump = {
         let encoder = encoder.clone();
         let answer_with_config = answer_with_config.clone();
@@ -870,8 +822,8 @@ async fn drive_video_pipeline(
         }))
     };
 
-    // Leaky queue: drops the oldest encoded frames if the consumer stalls or is still setting up,
-    // rather than letting an undrained backlog become a permanent delay.
+    // Drop the oldest encoded frames if the consumer stalls, rather than let an undrained backlog
+    // become a permanent delay.
     let sink_queue = mk("queue", "sink_queue")?;
     sink_queue.set_property_from_str("leaky", "downstream");
     sink_queue.set_property("max-size-buffers", 3u32);
@@ -907,7 +859,7 @@ async fn drive_video_pipeline(
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                // The parser knows which frames are keyframes; only those carry the configuration.
+                // Only keyframes carry the configuration.
                 let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
                 let config = (keyframe && answer_with_config.swap(false, Ordering::Relaxed))
                     .then(|| sample.caps().and_then(|caps| codec_config(caps, codec)))
@@ -922,7 +874,6 @@ async fn drive_video_pipeline(
             .build(),
     );
 
-    // Ensure the pipeline is torn down if this future is dropped.
     struct StopGuard(gst::Pipeline);
     impl Drop for StopGuard {
         fn drop(&mut self) {
@@ -953,8 +904,8 @@ async fn drive_video_pipeline(
     Ok(())
 }
 
-/// How the compositor's rendered dmabuf gets into a backend's chain (internal `source = "app"`
-/// path only - the desktop path always starts from `pipewiresrc`).
+/// How the compositor's rendered dmabuf gets into a backend's chain. Compositor path only - the
+/// desktop path always starts from `pipewiresrc`.
 #[derive(Clone, Copy, PartialEq)]
 enum Import {
     /// Pushed as `video/x-raw(memory:DMABuf)` (DMA_DRM) and imported by the backend's `postproc`.
@@ -968,46 +919,41 @@ enum Import {
     Cuda,
 }
 
-/// A GPU-side zero-copy encode backend: one platform's way of getting frames onto the GPU plus the
-/// hardware H264 encoder that consumes them. A backend is selected only when all of its elements
-/// exist, so a machine without the driver falls through to the next backend, then to software.
+/// One platform's way of getting frames onto the GPU plus the hardware encoder that consumes them.
+/// A backend is selected only when all of its elements exist, so a machine without the driver falls
+/// through to the next backend, then to software.
 ///
 /// Both video sources share this table: the compositor path uses `import`/`postproc`, the desktop
 /// path uses `desktop`/`desktop_memory`. Adding a platform = one row.
-///
-/// `pub` only because [`EncodeBackend::Hw`] names it; every field is private.
 pub struct HwBackend {
     /// Value for `CARPLAY_ENCODE_BACKEND` to force this backend, and what gets logged.
     name: &'static str,
-    /// DRM driver names this backend's GPU uses - the desktop path prefers the backend matching
-    /// the GPU that renders the desktop, to avoid a cross-GPU copy.
+    /// DRM driver names this backend's GPU uses.
     drivers: &'static [&'static str],
-    /// How the compositor's dmabuf enters the chain.
     import: Import,
-    /// Compositor path: dmabuf-importing convert element (RGB->NV12 on-GPU). `None` when the
-    /// import already yields encoder-ready memory (CUDA).
+    /// Dmabuf-importing convert element (RGB->NV12 on-GPU). `None` when the import already yields
+    /// encoder-ready memory (CUDA).
     postproc: Option<&'static str>,
     /// Desktop path: elements between `pipewiresrc` and `videorate` that import the portal's
     /// dmabuf and convert+scale on the GPU (the desktop isn't the accessory's resolution).
     desktop: &'static [&'static str],
     /// The memory feature `desktop` hands the encoder (`memory:DMABuf`, `memory:GLMemory`, ...).
     desktop_memory: &'static str,
-    /// gst-launch-style hardware encoder description, tuned for real time (VBR, no B-frames, ~1s
-    /// keyframes). One string serves every path this backend appears on - compositor, desktop,
-    /// and the system-memory fallback in [`software_encoder_desc`] - so the tuning has to hold on
-    /// both GPU and system memory (see the nvenc gop-size note below). `CARPLAY_ENCODER` overrides
-    /// it wholesale.
+    /// gst-launch-style encoder description, tuned for real time. One string serves every path this
+    /// backend appears on - compositor, desktop, and the system-memory fallback in
+    /// [`software_encoder_desc`] - so the tuning has to hold on both GPU and system memory (see the
+    /// nvenc gop-size note below). `CARPLAY_ENCODER` overrides it wholesale.
     ///
     /// VBR, not CBR: CBR pads every frame with filler to the exact target, so a static screen costs
     /// as much as a moving one. An iPhone's stream is variable and idles at nothing.
     encoder: &'static str,
-    /// The same for HEVC, where this backend has one. `None` means this row cannot encode HEVC and
-    /// is skipped when that codec is asked for.
+    /// `None` means this row cannot encode HEVC and is skipped when that codec is asked for.
     encoder_hevc: Option<&'static str>,
     /// Caps to hand the encoder on the compositor path, when what the postproc offers first is not
-    /// what the accessory wants. `vah265enc` takes `vapostproc`'s YUY2 and encodes 4:2:2 (`main-422-10`,
-    /// which decodes as Range Extensions) unless NV12 is spelled out; a phone sends 8-bit 4:2:0.
-    /// The memory feature has to be named too, or negotiation falls back to system memory.
+    /// what the accessory wants. `vah265enc` takes `vapostproc`'s YUY2 and encodes 4:2:2
+    /// (`main-422-10`, which decodes as Range Extensions) unless NV12 is spelled out; a phone sends
+    /// 8-bit 4:2:0. The memory feature has to be named too, or negotiation falls back to system
+    /// memory.
     encoder_input: Option<&'static str>,
 }
 
@@ -1024,9 +970,8 @@ const DESKTOP_GL_CHAIN: &[&str] = &[
 
 /// Probed in order; the first whose elements all exist wins.
 const HW_BACKENDS: &[HwBackend] = &[
-    // NVIDIA. `cuda-dmabuf` hands nvh264enc GstCudaMemory directly on the compositor path (no
-    // postproc); the desktop path goes through GL instead, since the CUDA importer only takes the
-    // compositor's own dmabuf.
+    // The desktop path goes through GL, since the CUDA importer only takes the compositor's own
+    // dmabuf.
     #[cfg(feature = "cuda")]
     HwBackend {
         name: "cuda",
@@ -1035,10 +980,8 @@ const HW_BACKENDS: &[HwBackend] = &[
         postproc: None,
         desktop: &["glupload", "glcolorconvert", "glcolorscale"],
         desktop_memory: "memory:GLMemory",
-        // gop-size=60, not the 30 other rows use: this encoder also serves system memory (the
-        // desktop GL path's GL->CUDA handoff downloads, and the no-CPU-encoder fallback), and
-        // nvenc emits an IDR every frame at gop-size=30 specifically when fed system memory. 60 is
-        // the one value that behaves on every path this row appears on.
+        // gop-size=60, not the 30 other rows use: nvenc emits an IDR every frame at gop-size=30
+        // when fed system memory, which this row also serves.
         encoder: "nvh264enc preset=p4 tune=ultra-low-latency rc-mode=vbr bitrate={kbps} \
                   gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true",
         encoder_hevc: Some(
@@ -1048,15 +991,11 @@ const HW_BACKENDS: &[HwBackend] = &[
         // The CUDA importer already hands the encoder what it wants.
         encoder_input: None,
     },
-    // Qualcomm / embedded (the deployment target). v4l2 stateful encoders take DMABuf directly;
-    // rate/keyframe control goes through V4L2 controls (`extra-controls`) rather than gst
-    // properties.
+    // Qualcomm / embedded. Rate control goes through V4L2 controls, not gst properties.
     //
-    // No `postproc` on the compositor path: `v4l2convert` needs an m2m converter device, which
-    // Qualcomm SoCs do not have (`gst-inspect-1.0 v4l2convert` finds nothing on a QCS6490), so
-    // the compositor converts to NV12 itself and the encoder imports that. The desktop path still
-    // names `v4l2convert` - it has no compositor to convert for, and falls back to software
-    // convert/scale where the element is missing.
+    // No `postproc`: `v4l2convert` needs an m2m converter device, which Qualcomm SoCs do not have,
+    // so the compositor converts to NV12 itself and the encoder imports that. The desktop path
+    // still names `v4l2convert` and falls back to software convert/scale where it is missing.
     HwBackend {
         name: "v4l2",
         drivers: &["msm", "msm_drm"],
@@ -1069,12 +1008,11 @@ const HW_BACKENDS: &[HwBackend] = &[
         encoder_hevc: Some(
             "v4l2h265enc extra-controls=controls,video_bitrate_mode=0,video_bitrate={bps}",
         ),
-        // The compositor's dmabuf already arrives as DMA_DRM/NV12 with the plane offsets on it;
-        // a filter here would only re-state what appsrc has already negotiated.
+        // The compositor's dmabuf already arrives as DMA_DRM/NV12 with the plane offsets on it.
         encoder_input: None,
     },
     // Intel / AMD VA-API. vapostproc imports the dmabuf and outputs NV12 in VAMemory, which
-    // vah264enc consumes on the same GPU - fully zero-copy.
+    // vah264enc consumes on the same GPU.
     HwBackend {
         name: "vaapi",
         drivers: &["i915", "xe", "amdgpu", "radeon"],
@@ -1095,8 +1033,7 @@ const HW_BACKENDS: &[HwBackend] = &[
 
 impl HwBackend {
     /// The encoder description for this backend on any path, still holding its bitrate placeholder.
-    /// `CARPLAY_ENCODER` wins over the row's tuned default - the override applies to hardware
-    /// backends too, not just software - and is assumed to match the codec being asked for.
+    /// `CARPLAY_ENCODER` wins over the row's tuned default, and is assumed to match the codec.
     fn encoder_template(&self, codec: VideoCodec) -> Option<String> {
         if let Some(desc) = encoder_override() {
             return Some(desc);
@@ -1107,7 +1044,6 @@ impl HwBackend {
         }
     }
 
-    /// The encoder to build for this backend, with the configured `bitrate` substituted in.
     fn encoder_desc(&self, codec: VideoCodec, bitrate: Bitrate) -> Option<String> {
         self.encoder_template(codec).map(|t| bitrate.apply(&t))
     }
@@ -1124,7 +1060,7 @@ impl HwBackend {
     }
 
     /// Compositor-path elements this machine does not have - why [`available`](Self::available)
-    /// said no, for logging.
+    /// said no.
     fn missing_elements(&self, codec: VideoCodec) -> Vec<String> {
         let mut missing = Vec::new();
         if let Some(p) = self.postproc.filter(|p| !element_available(p)) {
@@ -1162,9 +1098,9 @@ impl HwBackend {
         })
     }
 
-    /// A dmabuf import cannot cross GPUs, and a mismatched one fails only once frames flow - the
-    /// pipeline builds, then rejects the caps mid-session. So it must be ruled out here, unlike
-    /// `Cuda`, which reports failure up front. Permissive when the driver is unknown.
+    /// A dmabuf import cannot cross GPUs, and a mismatched one fails only once frames flow, so it
+    /// must be ruled out here - unlike `Cuda`, which reports failure up front. Permissive when the
+    /// driver is unknown.
     fn can_import_from(&self, driver: Option<&str>) -> bool {
         match self.import {
             Import::DmaBuf | Import::Nv12DmaBuf => driver.is_none() || self.matches_driver(driver),
@@ -1173,7 +1109,7 @@ impl HwBackend {
         }
     }
 
-    /// `"name: elem ! elem ! encoder"`, for logging and the no-backend-available error.
+    /// `"name: elem ! elem ! encoder"`.
     fn describe_elements(&self, codec: VideoCodec) -> String {
         let chain = self.postproc.map(|p| format!("{p} ! ")).unwrap_or_default();
         let enc = self
@@ -1184,20 +1120,18 @@ impl HwBackend {
     }
 }
 
-/// Explicit encoder override, applied to every path (hardware, desktop and software). It replaces
-/// the whole description, so the configured bitrate only reaches it if the override itself spells a
-/// `{kbps}`/`{bps}` placeholder.
+/// Encoder override, applied to every path. It replaces the whole description, so the configured
+/// bitrate only reaches it if the override itself spells a `{kbps}`/`{bps}` placeholder.
 fn encoder_override() -> Option<String> {
     std::env::var("CARPLAY_ENCODER").ok()
 }
 
-/// The factory name of a gst-launch-style encoder description ("nvh264enc gop-size=6" -> "nvh264enc").
+/// `"nvh264enc gop-size=6"` -> `"nvh264enc"`.
 fn encoder_name(desc: &str) -> &str {
     desc.split_whitespace().next().unwrap_or(desc)
 }
 
-/// Build the encoder element from a gst-launch-style description, returning its factory name too
-/// (for logging).
+/// The encoder element for a gst-launch-style description, and its factory name.
 fn make_encoder(desc: &str) -> Result<(String, gst::Element)> {
     let (name, props) = parse_encoder_string(desc)?;
     let encoder = gst::ElementFactory::make(&name)
@@ -1214,9 +1148,8 @@ fn element_available(name: &str) -> bool {
     gst::ElementFactory::find(name).is_some()
 }
 
-/// Build the encode chain onto `pipeline` (linking from `tail`) for the resolved backend, and
-/// return the encoder element (whose src pad is H264) plus the [`FrameFeeder`] describing how to
-/// push frames into it.
+/// Build the encode chain onto `pipeline`, linking from `tail`, and return its encoder element
+/// plus the [`FrameFeeder`] for pushing frames into it.
 fn build_backend(
     pipeline: &gst::Pipeline,
     tail: &gst::Element,
@@ -1237,9 +1170,8 @@ fn build_backend(
         } => {
             #[cfg(feature = "cuda")]
             if let Some(importer) = importer {
-                // Share our CUDA context with the encoder so the imported GstCudaMemory and the
-                // encoder live on the same context. Must be set before the encoder is added to the
-                // bin (the bin propagates its contexts to children as they're added).
+                // So the imported GstCudaMemory and the encoder share a context. Must be set before
+                // the encoder is added - the bin propagates contexts to children as they're added.
                 pipeline.set_context(&importer.gst_context());
             }
             let encoder = build_hw_chain(pipeline, tail, backend, codec, bitrate)?;
@@ -1255,16 +1187,15 @@ fn build_backend(
     }
 }
 
-/// Software encoder default. x264enc is the most widely available H264 encoder, but its defaults
-/// are tuned for *file* encoding and would add seconds of lag: `ultrafast`/`zerolatency` and
-/// `bframes=0` remove reordering/lookahead delay, `key-int-max=30` matches the hardware backends'
-/// ~1s keyframes, `pass=qual` is x264's bitrate-targeted VBR (`cbr` would pad a static screen to
-/// the full rate).
+/// x264enc's defaults are tuned for *file* encoding and would add seconds of lag:
+/// `ultrafast`/`zerolatency` and `bframes=0` remove reordering/lookahead delay, `key-int-max=30`
+/// matches the hardware backends' ~1s keyframes, and `pass=qual` is x264's bitrate-targeted VBR
+/// (`cbr` would pad a static screen to the full rate).
 const DEFAULT_SW_ENCODER: &str = "x264enc speed-preset=ultrafast tune=zerolatency pass=qual \
     bitrate={kbps} key-int-max=30 bframes=0 byte-stream=true";
 
-/// Tried in order when [`DEFAULT_SW_ENCODER`] isn't installed. openh264enc is the usual stand-in
-/// where gst-plugins-ugly is absent; baseline-only, so there's no B-frame reordering to disable.
+/// Tried in order when [`DEFAULT_SW_ENCODER`] isn't installed. openh264enc is baseline-only, so
+/// there's no B-frame reordering to disable.
 const SW_ENCODER_FALLBACKS: &[&str] =
     &["openh264enc complexity=low rate-control=bitrate bitrate={bps} gop-size=30"];
 
@@ -1273,7 +1204,6 @@ const DEFAULT_SW_ENCODER_HEVC: &str = "x265enc speed-preset=ultrafast tune=zerol
     bitrate={kbps} key-int-max=30 option-string=bframes=0";
 const SW_ENCODER_FALLBACKS_HEVC: &[&str] = &[];
 
-/// Software encoder descriptions to try for `codec`, most preferred first.
 fn sw_encoder_candidates(codec: VideoCodec) -> impl Iterator<Item = &'static str> + Clone {
     let (first, rest) = match codec {
         VideoCodec::H264 => (DEFAULT_SW_ENCODER, SW_ENCODER_FALLBACKS),
@@ -1286,8 +1216,7 @@ fn sw_encoder_candidates(codec: VideoCodec) -> impl Iterator<Item = &'static str
 ///
 /// A hardware encoder fed system memory is preferred over a CPU one: losing the zero-copy import
 /// does not lose the GPU's encoder block, and on an embedded board CPU encode is the difference
-/// between a stream and a slideshow. `CARJACK_SW_ENCODE=1` forces the CPU encoder instead. Each
-/// row's `encoder` is tuned to hold up on system memory too, so it's usable as-is.
+/// between a stream and a slideshow. `CARJACK_SW_ENCODE=1` forces the CPU encoder instead.
 fn software_encoder_desc(codec: VideoCodec, bitrate: Bitrate) -> Result<String> {
     let (desc, hardware) = system_memory_encoder(codec).ok_or_else(|| {
         eyre!(
@@ -1315,8 +1244,7 @@ fn software_encoder_desc(codec: VideoCodec, bitrate: Bitrate) -> Result<String> 
 }
 
 /// The choice [`software_encoder_desc`] makes, still holding its bitrate placeholder, and whether
-/// it landed on hardware - split out so the startup fallback warning can name the encoder before a
-/// pipeline exists.
+/// it landed on hardware. Split out so the startup warning can name it before a pipeline exists.
 fn system_memory_encoder(codec: VideoCodec) -> Option<(String, bool)> {
     if let Some(desc) = encoder_override() {
         return Some((desc, false));
@@ -1334,10 +1262,7 @@ fn system_memory_encoder(codec: VideoCodec) -> Option<(String, bool)> {
         .map(|d| (d.to_string(), false))
 }
 
-/// Zero-copy hardware chain: `appsrc ! [postproc] ! <encoder>`, per the backend's [`HwBackend`]
-/// row. For a `postproc` backend (VA-API / v4l2) the appsrc pushes DMA_DRM and the postproc does
-/// RGB->NV12 on the GPU; for CUDA the importer has already produced encoder-ready GstCudaMemory,
-/// so the encoder is linked straight to the source. No scale/convert either way - the compositor
+/// Zero-copy hardware chain: `appsrc ! [postproc] ! <encoder>`. No scale/convert - the compositor
 /// already renders at the accessory's exact resolution.
 fn build_hw_chain(
     pipeline: &gst::Pipeline,
@@ -1378,11 +1303,9 @@ fn build_hw_chain(
     Ok(encoder)
 }
 
-/// Software (non-zero-copy) chain: `appsrc(video/x-raw) ! videoconvert ! <encoder>`.
-///
-/// `videoscale`/`videorate` are absent - the compositor already renders at the accessory's exact
-/// resolution at a steady rate. `videoconvert` stays since most encoders reject the compositor's
-/// BGRx.
+/// Software chain: `appsrc(video/x-raw) ! videoconvert ! <encoder>`. No `videoscale`/`videorate` -
+/// the compositor already renders at the accessory's resolution and rate - but `videoconvert`
+/// stays, since most encoders reject the compositor's BGRx.
 fn build_software_chain(
     pipeline: &gst::Pipeline,
     src_tail: &gst::Element,
@@ -1426,8 +1349,8 @@ fn dmabuf_caps(dmabuf: &Dmabuf) -> Result<gst::Caps> {
         .map_err(|e| eyre!("build dma-drm caps: {e}"))
 }
 
-/// `video/x-raw(memory:CUDAMemory)` caps matching what the CUDA importer produces (a pitched
-/// BGRA buffer). The compositor renders Argb8888, whose little-endian bytes are B,G,R,A = BGRA.
+/// Caps matching what the CUDA importer produces. The compositor renders Argb8888, whose
+/// little-endian bytes are B,G,R,A = BGRA.
 #[cfg(feature = "cuda")]
 fn cuda_caps(dmabuf: &Dmabuf) -> gst::Caps {
     gst::Caps::builder("video/x-raw")
@@ -1439,14 +1362,14 @@ fn cuda_caps(dmabuf: &Dmabuf) -> gst::Caps {
         .build()
 }
 
-/// A DRM fourcc as its four characters, for logs.
+/// A DRM fourcc as its four characters.
 #[cfg(feature = "cuda")]
 fn fourcc_str(fourcc: u32) -> String {
     String::from_utf8_lossy(&fourcc.to_le_bytes()).into_owned()
 }
 
-/// Extract plane 0 of a dmabuf as a `cuda_dmabuf::DmabufPlane` (the compositor renders a single
-/// interleaved RGBA plane). The fd is borrowed for the import and stays owned by the frame.
+/// Plane 0 of a dmabuf - the compositor renders a single interleaved RGBA plane. The fd is
+/// borrowed for the import and stays owned by the frame.
 #[cfg(feature = "cuda")]
 fn first_plane(dmabuf: &Dmabuf) -> Option<cuda_dmabuf::DmabufPlane> {
     let fd = dmabuf.handles().next()?;
@@ -1463,8 +1386,8 @@ fn first_plane(dmabuf: &Dmabuf) -> Option<cuda_dmabuf::DmabufPlane> {
     })
 }
 
-/// Wrap a dmabuf's plane fds as a dmabuf-backed `gst::Buffer` with a `VideoMeta`, so the
-/// postproc can import it. Fds are dup'd; GStreamer owns its copies.
+/// A dmabuf's plane fds as a dmabuf-backed `gst::Buffer` with a `VideoMeta`, so the postproc can
+/// import it. Fds are dup'd; GStreamer owns its copies.
 fn wrap_dmabuf(allocator: &DmaBufAllocator, dmabuf: &Dmabuf) -> Result<gst::Buffer> {
     let (width, height) = (dmabuf.width(), dmabuf.height());
     let mut buffer = gst::Buffer::new();
@@ -1488,10 +1411,9 @@ fn wrap_dmabuf(allocator: &DmaBufAllocator, dmabuf: &Dmabuf) -> Result<gst::Buff
     };
 
     match plane_rows(dmabuf.format().code, height) {
-        // A planar format the compositor cuts from a single allocation (its NV12: luma and chroma
-        // are byte ranges of one fd). It has to arrive as *one* memory with the plane offsets on
-        // the video meta - a memory per plane makes v4l2 read them as separate buffers and refuse
-        // the import.
+        // A planar format the compositor cuts from a single allocation. It has to arrive as *one*
+        // memory with the plane offsets on the video meta - a memory per plane makes v4l2 read them
+        // as separate buffers and refuse the import.
         Some(rows) => {
             let size = rows
                 .iter()
@@ -1504,7 +1426,7 @@ fn wrap_dmabuf(allocator: &DmaBufAllocator, dmabuf: &Dmabuf) -> Result<gst::Buff
                 .ok_or_else(|| eyre!("dmabuf has no plane 0"))?;
             add(fd, size)?;
         }
-        // Anything else: one memory per plane, sized to the plane, as before.
+        // Anything else: one memory per plane, sized to the plane.
         None => {
             for (fd, (offset, stride)) in dmabuf.handles().zip(offsets.iter().zip(&strides)) {
                 add(fd, *stride as usize * height as usize + offset)?;
@@ -1525,12 +1447,10 @@ fn wrap_dmabuf(allocator: &DmaBufAllocator, dmabuf: &Dmabuf) -> Result<gst::Buff
     Ok(buffer)
 }
 
-/// The pixel format to put on the buffer's `GstVideoMeta`.
-///
-/// For a DMA_DRM buffer the meta normally mirrors the caps and says `DmaDrm`, which is what the
-/// postproc backends take. v4l2's dmabuf import is not like that: it resolves the caps to the real
-/// pixel format first and then asserts the meta agrees, so an NV12 buffer has to say NV12 or
-/// `gst_video_frame_map_id` fails on every frame and the encoder silently produces nothing.
+/// The pixel format for the buffer's `GstVideoMeta`. For a DMA_DRM buffer the meta normally
+/// mirrors the caps and says `DmaDrm`, which is what the postproc backends take. v4l2 instead
+/// resolves the caps to the real pixel format and asserts the meta agrees, so an NV12 buffer has to
+/// say NV12 or `gst_video_frame_map_id` fails on every frame and the encoder produces nothing.
 fn meta_format(fourcc: Fourcc) -> gst_video::VideoFormat {
     match fourcc {
         Fourcc::Nv12 => gst_video::VideoFormat::Nv12,
@@ -1540,17 +1460,16 @@ fn meta_format(fourcc: Fourcc) -> gst_video::VideoFormat {
 }
 
 /// Rows per plane for the single-allocation planar formats the compositor publishes, or `None` for
-/// anything else - which is every packed RGB format, one full-height plane.
+/// anything else - every packed RGB format, one full-height plane.
 fn plane_rows(fourcc: Fourcc, height: u32) -> Option<Vec<u32>> {
     match fourcc {
-        // 4:2:0: a full-height luma plane, then a half-height interleaved chroma plane.
+        // Full-height luma, then half-height interleaved chroma.
         Fourcc::Nv12 | Fourcc::Nv21 => Some(vec![height, height.div_ceil(2)]),
         _ => None,
     }
 }
 
-/// Split an encoder description like `"nvh264enc gop-size=6"` into
-/// a factory name and property list.
+/// `"nvh264enc gop-size=6"` -> a factory name and property list.
 fn parse_encoder_string(s: &str) -> Result<(String, Vec<(String, String)>)> {
     let mut parts = s.split_whitespace();
     let name = parts
@@ -1602,7 +1521,6 @@ fn coded_slices(data: &[u8], codec: VideoCodec) -> Vec<u8> {
     sample
 }
 
-/// The parser's `avcC`/`hvcC`, as the Annex-B parameter sets catplay writes the config frame from.
 fn codec_config(caps: &gst::CapsRef, codec: VideoCodec) -> Option<AvccConfig> {
     let record = caps.structure(0)?.get::<gst::Buffer>("codec_data").ok()?;
     let record = record.map_readable().ok()?;
@@ -1610,7 +1528,7 @@ fn codec_config(caps: &gst::CapsRef, codec: VideoCodec) -> Option<AvccConfig> {
 }
 
 /// The parameter sets inside an `avcC`/`hvcC`, Annex-B with start codes and in decode order -
-/// which is the form catplay's config frame writer parses.
+/// the form catplay's config frame writer parses.
 fn codec_config_from_record(record: &[u8], codec: VideoCodec) -> Option<AvccConfig> {
     let config = match codec {
         VideoCodec::Hevc => {
@@ -1634,8 +1552,8 @@ fn codec_config_from_record(record: &[u8], codec: VideoCodec) -> Option<AvccConf
 
 #[cfg(test)]
 mod tests {
-    /// The head of a real `vah265enc` access unit (`/tmp/enc-hevc3.h265`, 800x1280 Main): an AUD,
-    /// then VPS/SPS/PPS, then the IDR slice. Truncated - only the parameter sets matter here.
+    /// The head of a real `vah265enc` access unit: an AUD, then VPS/SPS/PPS, then the IDR slice.
+    /// Truncated - only the parameter sets matter here.
     const HEVC_KEYFRAME_HEAD: &[&[u8]] = &[
         &[0x46, 0x01, 0x10],                               // 35, AUD
         &[0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60], // 32, VPS
@@ -1654,8 +1572,7 @@ mod tests {
     }
 
     /// The sample must open on its slice: a receiver reads the first NAL to decide whether the
-    /// frame opens the stream, and the parser leaves an access unit delimiter and the parameter
-    /// sets in front of every keyframe.
+    /// frame opens the stream, and the parser puts an AUD and the parameter sets before every one.
     #[test]
     fn the_sample_keeps_only_the_slices() {
         let au = length_prefixed(HEVC_KEYFRAME_HEAD);
@@ -1690,10 +1607,8 @@ mod tests {
         );
     }
 
-    /// A real `hvcC` from this pipeline's own parser (`vah265enc ! h265parse`, 800x1280), and the
-    /// VPS/SPS/PPS inside it. The config frame is written from these, so what the accessory sees
-    /// is the same sample entry the old path built by scraping them out of the bitstream - the one
-    /// verified against the iPhone's.
+    /// A real `hvcC` from this pipeline's own parser (`vah265enc ! h265parse`), and the VPS/SPS/PPS
+    /// inside it. The config frame is written from these.
     const HVCC_RECORD: &str = "01016000000090000000000078f000fcfdf8f800000f0320000100184001\
         0c01ffff016000000300900000030000030078130240210001002e4201010160000003009000000300000300\
         78a0064200501684e491b6affc0004000404000003000400000300782022000100074401c0764c0890";
@@ -1761,8 +1676,8 @@ mod tests {
         );
     }
 
-    /// Machine-gated. This returned empty once because the element was dropped before its pad was
-    /// queried, and an orphaned pad answers with template ANY caps instead of the real list.
+    /// Machine-gated. An orphaned pad answers with template ANY caps instead of the real list, so
+    /// the element has to outlive the query.
     #[test]
     fn an_available_dmabuf_backend_reports_its_modifiers() {
         let _ = gst::init();
@@ -1784,9 +1699,8 @@ mod tests {
         );
     }
 
-    /// A dmabuf backend on the wrong GPU used to be selectable, then died mid-session on
-    /// `caps ... not accepted` - vaapi picked for an NVIDIA render node because its elements
-    /// exist for a second, Intel GPU.
+    /// A dmabuf backend offered for the wrong GPU - vaapi on an NVIDIA render node, because a
+    /// second Intel GPU makes its elements exist - dies mid-session on `caps ... not accepted`.
     #[test]
     fn dmabuf_backends_are_confined_to_their_own_gpu() {
         for b in HW_BACKENDS
@@ -1804,11 +1718,10 @@ mod tests {
         }
     }
 
-    /// The order was arrived at by testing, not by reading docs, and every part of it is load
-    /// bearing: `glcolorscale` will not accept an NV12 target, so the convert to NV12 has to come
-    /// after the scale, and it will not scale straight off `glupload`'s output either, so a
-    /// convert has to come before it. Dropping either one gives `not-negotiated` at runtime, where
-    /// nothing here would catch it.
+    /// Every part of the order is load bearing: `glcolorscale` will not accept an NV12 target, so
+    /// the convert to NV12 has to follow the scale, and it will not scale straight off `glupload`'s
+    /// output either, so a convert has to precede it. Dropping either gives runtime
+    /// `not-negotiated`.
     #[test]
     fn the_desktop_gl_chain_keeps_its_verified_order() {
         assert_eq!(
@@ -1823,9 +1736,9 @@ mod tests {
         );
     }
 
-    /// Only a row with no postproc element should be asking the compositor to convert: vaapi and
-    /// cuda do their own conversion downstream, and quietly moving them onto the compositor's NV12
-    /// pass would change what every Intel/AMD/NVIDIA machine encodes.
+    /// Only a row with no postproc should ask the compositor to convert: vaapi and cuda convert
+    /// downstream, and moving them onto the compositor's NV12 pass would change what every
+    /// Intel/AMD/NVIDIA machine encodes.
     #[test]
     fn only_backends_without_a_postproc_ask_the_compositor_for_nv12() {
         for b in HW_BACKENDS {
@@ -1846,8 +1759,7 @@ mod tests {
         );
     }
 
-    /// The compositor is started from this and the encoder built to match, so a wrong answer here
-    /// is a pipeline that negotiates and then never produces a frame.
+    /// A wrong answer here is a pipeline that negotiates and then never produces a frame.
     #[test]
     fn frame_format_follows_the_backend() {
         let hw = |name: &str| EncodeBackend::Hw {
@@ -1867,9 +1779,8 @@ mod tests {
         );
     }
 
-    /// sysfs reports the platform driver bound to the render node, not the DRM driver name: the
-    /// Qualcomm board carjack targets reads `msm_dpu`, which used to match no row at all and put
-    /// the whole board on software encode.
+    /// sysfs reports the platform driver bound to the render node, not the DRM driver name: a
+    /// Qualcomm board reads `msm_dpu`, and matching no row puts the whole board on software encode.
     #[test]
     fn driver_names_match_their_family() {
         let v4l2 = HW_BACKENDS.iter().find(|b| b.name == "v4l2").unwrap();
@@ -1894,8 +1805,8 @@ mod tests {
         assert_eq!(b.apply("x264enc bitrate=8000"), "x264enc bitrate=8000");
     }
 
-    /// Every tuned encoder description has to take the configured bitrate - a row that hardcodes
-    /// one (or misspells the placeholder) would silently ignore `[graphics] bitrate`.
+    /// A row that hardcodes a bitrate, or misspells the placeholder, silently ignores
+    /// `[graphics] bitrate`.
     #[test]
     fn every_encoder_takes_the_configured_bitrate() {
         let b = Bitrate::from_kbps(4500);
@@ -1916,7 +1827,7 @@ mod tests {
                 !applied.contains('{'),
                 "'{applied}' still holds an unsubstituted placeholder"
             );
-            // Parseable, and the bitrate landed in a property rather than in the factory name.
+            // The bitrate must land in a property, not in the factory name.
             let (name, props) = parse_encoder_string(&applied).unwrap();
             assert_eq!(name, encoder_name(desc));
             assert!(

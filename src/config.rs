@@ -83,9 +83,8 @@ pub struct Graphics {
     /// Video codec: `"auto"` (HEVC, which is what an iPhone sends), `"hevc"`, or `"h264"` for an
     /// accessory that needs the older one.
     pub codec: CodecChoice,
-    /// Target bitrate in kbit/s. Variable, so this is the ceiling rather than what a static screen
-    /// costs. Kept modest by default since the accessory's WiFi link is the bottleneck - overshooting it
-    /// shows up as stutter, not detail.
+    /// Target bitrate in kbit/s. Variable, so this is a ceiling. Kept modest by default: the
+    /// accessory's WiFi link is the bottleneck, and overshooting it shows up as stutter.
     pub bitrate: u32,
 }
 
@@ -144,11 +143,9 @@ impl ZeroCopyMode {
     }
 }
 
-/// Which codec to encode the screen stream in.
-///
-/// `Auto` resolves to HEVC: every capture of a real iPhone shows it sending HEVC, including to a
-/// unit that advertises no codec support at all, so there is nothing reliable to negotiate against
-/// - see `encode::resolve_codec`.
+/// Which codec to encode the screen stream in. `Auto` resolves to HEVC: an iPhone sends it even to
+/// a unit that advertises no codec support, so there is nothing reliable to negotiate against - see
+/// `encode::resolve_codec`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CodecChoice {
     #[default]
@@ -179,9 +176,8 @@ impl<'de> Deserialize<'de> for CodecChoice {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Display {
-    /// Initial compositor size/rate, used before the accessory reports its real display over AirPlay.
-    /// Set these to your accessory's values so an app that can't live-resize (Waydroid) boots correct
-    /// and the later reconfigure is a no-op.
+    /// Initial compositor size/rate, used before the accessory reports its display over AirPlay.
+    /// Set to the accessory's values so an app that can't live-resize boots correct.
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -288,10 +284,8 @@ pub struct Cli {
 }
 
 impl Config {
-    /// Load config from `--config` (or `~/.config/carjack/config.toml` if present, else
-    /// `/etc/carjack/config.toml` - the systemd service's `HOME` has no `.config`, so it lands
-    /// there - else all-defaults), then apply overrides: environment variables, then CLI flags
-    /// (highest precedence).
+    /// Load config from [`config_file`], then apply overrides: environment variables, then CLI
+    /// flags (highest precedence).
     pub fn load(cli: &Cli) -> Result<Config> {
         let path = config_file(cli)?;
 
@@ -515,10 +509,9 @@ fn driver_rank(driver: &str) -> u8 {
 }
 
 fn pick_auto(nodes: &[(String, String)]) -> &(String, String) {
-    // A GPU this build can actually zero-copy encode on beats a nominally faster one it cannot:
-    // on a non-cuda build nvidia has no encode path, so ranking it first forces software encode
-    // while an Intel/AMD GPU sits idle. min_by_key keeps the first on ties - the lowest-numbered
-    // node, so the choice stays predictable.
+    // A GPU this build can zero-copy encode on beats a nominally faster one it cannot: on a
+    // non-cuda build nvidia has no encode path, so ranking it first would force software encode
+    // with an Intel/AMD GPU sitting idle. `min_by_key` keeps the lowest-numbered node on ties.
     nodes
         .iter()
         .min_by_key(|(_, drv)| {
@@ -677,8 +670,7 @@ mod tests {
         let cfg = Config::load(&cli).unwrap();
         assert_eq!(cfg.bluetooth_device(), Some("AA:BB:CC:DD:EE:FF"));
 
-        // Unset (and whitespace-only) reads as "no target", which `main` rejects at startup rather
-        // than falling back to picking a device itself.
+        // Unset and whitespace-only both read as "no target", which `main` rejects at startup.
         let blank = Config {
             bluetooth: Bluetooth {
                 device: "   ".into(),
@@ -707,7 +699,6 @@ mod tests {
     #[test]
     fn cli_flags_override_everything() {
         use clap::Parser;
-        // CLI is applied last, so it wins over defaults, config file, and env.
         let cli = Cli::parse_from([
             "carjack",
             "--drm-device",
@@ -726,9 +717,8 @@ mod tests {
         assert!(cfg.app.resizable);
     }
 
-    /// Machine-gated: only asserts on hosts that expose a render node at all. `auto` must land on
-    /// a GPU this build can zero-copy encode on whenever one exists - preferring nvidia on a
-    /// non-cuda build was silently costing zero-copy on hybrid machines.
+    /// Machine-gated: only asserts on hosts that expose a render node. `auto` must land on a GPU
+    /// this build can zero-copy encode on whenever one exists.
     #[test]
     fn auto_prefers_a_gpu_this_build_can_encode_on() {
         let nodes = enumerate_render_nodes();

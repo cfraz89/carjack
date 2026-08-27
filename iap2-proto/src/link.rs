@@ -1,8 +1,5 @@
 //! Link-layer state: the parameters the SYN handshake negotiated, and the bookkeeping needed to
 //! actually honour them (send window, retransmission, cumulative acknowledgement).
-//!
-//! Everything here used to be parsed out of the accessory's SYN and then dropped on the floor -
-//! we agreed to a window, timers and a packet size and then ignored all three.
 
 use std::collections::VecDeque;
 
@@ -11,10 +8,9 @@ use tokio::time::{Duration, Instant};
 use crate::packet::{ControlByte, Packet};
 use crate::stream::SynPayload;
 
-/// How long the link may sit silent before we send a bare acknowledgement purely to prove we are
-/// still here. The accessory drops the Bluetooth link after roughly `retx_timeout * max_retx`
-/// without hearing anything, which would otherwise fire in the middle of the (on this channel,
-/// entirely silent) AirPlay phase.
+/// How long the link may sit silent before a bare acknowledgement goes out to prove we are still
+/// here. The accessory drops the Bluetooth link after roughly `retx_timeout * max_retx` without
+/// hearing anything, which would otherwise fire during the (on this channel, silent) AirPlay phase.
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The link parameters from the SYN handshake. `SynPayload` is the wire form; this is the same
@@ -22,8 +18,8 @@ pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkParams {
     pub version: u8,
-    /// Payload-bearing packets we may have in flight (unacknowledged) at once. The CFMOTO head
-    /// unit negotiates **1**, i.e. strictly lock-step.
+    /// Payload-bearing packets we may have in flight at once. Head units negotiate values as low
+    /// as **1**, i.e. strictly lock-step.
     pub max_outstanding: u8,
     /// Largest whole packet, header and checksums included, the accessory will accept.
     pub max_length: u16,
@@ -35,8 +31,8 @@ pub struct LinkParams {
     /// Retransmissions before the link is declared dead.
     pub max_retx: u8,
     /// How many received packets one cumulative acknowledgement may cover. **Zero means the
-    /// accessory did not set a limit** (the CFMOTO sends 0), in which case only `cumack_timeout`
-    /// governs and we let replies piggyback wherever possible.
+    /// accessory set no limit**, in which case only `cumack_timeout` governs and replies piggyback
+    /// wherever possible.
     pub max_cumack: u8,
 }
 
@@ -169,8 +165,8 @@ impl LinkState {
     pub fn record_sent(&mut self, packet: &Packet, payload: Vec<u8>) {
         self.last_tx = Instant::now();
         if payload.is_empty() {
-            // A bare acknowledgement carries no sequence number of its own and is never
-            // retransmitted - but it does discharge whatever we owed.
+            // A bare acknowledgement takes no sequence number and is never retransmitted, but it
+            // does discharge whatever we owed.
             self.pending_acks = 0;
             self.first_pending_at = None;
             return;
@@ -200,11 +196,9 @@ impl LinkState {
 
     /// Retire everything the accessory's cumulative `ack` field covers, returning how many.
     ///
-    /// The comparison is deliberately bounded by what is actually in flight rather than a plain
-    /// "is this sequence number at or before the ack" test. Sequence numbers are a wrapping
-    /// `u8`, and an accessory that has not heard from us yet sends `ack = 0` - which under a
-    /// naive half-space comparison "covers" our initial `0x9D` and would retire a packet that
-    /// was never acknowledged at all.
+    /// Bounded by what is in flight rather than a plain "at or before the ack" test: sequence
+    /// numbers wrap, and an accessory that has not heard from us sends `ack = 0`, which a naive
+    /// half-space comparison reads as covering our initial `0x9D`.
     pub fn retire_acked(&mut self, ack: u8) -> usize {
         let mut retired = 0;
         while let Some(front) = self.unacked.front() {
@@ -245,10 +239,8 @@ impl LinkState {
 
     /// When the link next needs attention - `now` if something is already due.
     ///
-    /// Separate from (and deliberately free of side effects, unlike) `next_action`, so a caller
-    /// can wait on it inside a `select!` and then run `next_action` to completion outside one.
-    /// Doing the work inside the `select!` would risk it being cancelled part-way through a
-    /// transmit, losing or duplicating a packet.
+    /// Side-effect free, unlike `next_action`, so a caller can wait on it inside a `select!` and
+    /// run `next_action` outside one - a transmit cancelled part-way loses or duplicates a packet.
     pub fn next_deadline(&self) -> Instant {
         let now = Instant::now();
 
@@ -341,9 +333,9 @@ mod tests {
         state.record_sent(&packet, vec![1, 2, 3]);
     }
 
-    /// The CFMOTO head unit's SYN, byte for byte from `cfmoto_11.pcapng` frame 820.
+    /// A real head unit's SYN, byte for byte.
     #[test]
-    fn cfmoto_syn_parameters_are_carried_through() {
+    fn syn_parameters_are_carried_through() {
         let syn = SynPayload::from_bytes(&[
             0x01, 0x01, 0x10, 0x00, 0x03, 0xe8, 0x01, 0xf4, 0x0f, 0x00, 0x02, 0x00, 0x02,
         ])
@@ -359,9 +351,8 @@ mod tests {
         assert_eq!(params.cumack_threshold(), u32::MAX);
     }
 
-    /// An accessory that has not heard from us yet sends `ack = 0`. Our sequence numbers start
-    /// at `0x9D`, and a naive wrapping comparison treats 0 as "after" that - which would retire
-    /// a packet the accessory has not actually received.
+    /// An accessory that has not heard from us sends `ack = 0`, which a naive wrapping comparison
+    /// treats as "after" our initial `0x9D`.
     #[test]
     fn an_unrelated_ack_retires_nothing() {
         let mut state = LinkState::new();
@@ -420,9 +411,8 @@ mod tests {
         assert_eq!(state.ack_field(), 0x30);
     }
 
-    /// With no `max_cumack` limit (what the CFMOTO sends) a received packet is not acknowledged
-    /// straight away - the timer gives our reply a chance to carry the ack instead, which is
-    /// what keeps the handshake down to one packet per exchange.
+    /// With no `max_cumack` limit a received packet is not acknowledged straight away - the timer
+    /// gives our reply a chance to carry the ack, keeping the handshake to one packet per exchange.
     #[test]
     fn a_reply_piggybacks_the_pending_ack() {
         let mut state = LinkState::new();

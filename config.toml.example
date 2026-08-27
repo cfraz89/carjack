@@ -41,6 +41,9 @@ height = 720
 fps = 30
 
 [app]
+# Stock Waydroid boots on the 3-button nav bar, which eats the bottom of the accessory's screen
+# and leaves the edge swipes nothing to hit - turn on gesture nav under Settings > System >
+# Gestures. carjack's own images (waydroid-build) are built with it as the default.
 command = "waydroid show-full-ui"
 # Can the app live-resize?
 #   true  - launched at startup and resize itself when we detect accessory size

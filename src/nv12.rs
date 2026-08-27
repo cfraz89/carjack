@@ -2,14 +2,12 @@
 //!
 //! Some hardware encoders import an NV12 dmabuf directly but have no postproc element to convert
 //! with: Qualcomm's venus (`v4l2h264enc`) takes `video/x-raw(memory:DMABuf), drm-format=NV12`, but
-//! `v4l2convert` only exists on SoCs that have an m2m scaler, which Qualcomm has not. Without a
-//! converter the whole board falls back to reading every frame back to system memory. This module
-//! is the missing converter, done in the compositor's own GLES context.
+//! `v4l2convert` only exists on SoCs with an m2m scaler, which Qualcomm has not - so without this,
+//! the whole board falls back to reading every frame back to system memory.
 //!
 //! The awkward part is allocating the NV12 buffer at all: GBM refuses `NV12` on Adreno for every
-//! usage flag (`gbm_device_is_format_supported` says no, and every `gbm_bo_create` variant fails).
-//! So the buffer is allocated as a *linear* `R8` surface `height * 3 / 2` rows tall, and its two
-//! regions are imported as separate EGLImages:
+//! usage flag. So the buffer is allocated as a *linear* `R8` surface `height * 3 / 2` rows tall,
+//! and its two regions are imported as separate EGLImages:
 //!
 //! ```text
 //!   offset 0            R8,   width x height       -> luma,   one byte per pixel
@@ -19,8 +17,8 @@
 //! Linear means those bytes already *are* the NV12 layout, so the same allocation goes to the
 //! encoder as `drm-format=NV12` with the two plane offsets spelled out - one fd, no copy.
 //!
-//! Verified on Adreno 643 (msm/freedreno, Mesa 25.0.7): both regions come back as complete
-//! framebuffers, writes land at the expected byte offsets, and `v4l2h264enc` accepts the result.
+//! Verified on Adreno (msm/freedreno): both regions come back as complete framebuffers, writes
+//! land at the expected byte offsets, and `v4l2h264enc` accepts the result.
 
 use eyre::{Result, eyre};
 use smithay::backend::allocator::dmabuf::{AsDmabuf, Dmabuf, DmabufFlags};
@@ -45,8 +43,7 @@ const VERTEX_SHADER: &str = "\
 attribute vec2 position;
 varying vec2 v_uv;
 void main() {
-    // Same y direction on the way in and out: we sample the render target and write the NV12
-    // planes with one convention, so the image keeps the orientation the compositor drew.
+    // Same y direction in and out, so the image keeps the orientation the compositor drew.
     v_uv = position * 0.5 + 0.5;
     gl_Position = vec4(position, 0.0, 1.0);
 }
@@ -66,8 +63,8 @@ void main() {
 }
 ";
 
-/// Chroma pass: Cb in `.r`, Cr in `.g`, which land in that byte order in a GR88 target
-/// (verified on Adreno: `.r` is byte 0, `.g` is byte 1 - the NV12 interleave).
+/// Chroma pass: Cb in `.r`, Cr in `.g`, which land in a GR88 target as byte 0 and byte 1 - the
+/// NV12 interleave.
 const CHROMA_SHADER: &str = "\
 #version 100
 precision mediump float;
@@ -134,8 +131,7 @@ pub struct Nv12Converter {
     program_luma: u32,
     program_chroma: u32,
     vbo: u32,
-    /// The compositor's ARGB render target, imported once - it is reused every frame, so there is
-    /// no reason to re-import it.
+    /// The compositor's ARGB render target, imported once and reused every frame.
     source: Plane,
     targets: Vec<Target>,
     next: usize,
@@ -144,8 +140,7 @@ pub struct Nv12Converter {
 
 impl Nv12Converter {
     /// Build the conversion for a compositor rendering `width`x`height` into `argb`, with `pool`
-    /// NV12 targets to cycle through (a published buffer is held by GStreamer until the encoder is
-    /// done with it, so one is not enough).
+    /// NV12 targets to cycle through - GStreamer holds a published buffer until it is consumed.
     pub fn new(
         renderer: &mut GlesRenderer,
         allocator: &mut GbmAllocator<DrmDeviceFd>,
@@ -207,8 +202,8 @@ impl Nv12Converter {
 
         renderer
             .with_context(|gl| unsafe {
-                // Start from known state: the compositor's own render left whatever it left, and
-                // a stale scissor or an enabled blend would quietly corrupt the conversion.
+                // Start from known state - a stale scissor or an enabled blend left by the
+                // compositor's own render would quietly corrupt the conversion.
                 gl.Disable(ffi::BLEND);
                 gl.Disable(ffi::SCISSOR_TEST);
                 gl.Disable(ffi::DEPTH_TEST);
@@ -227,8 +222,8 @@ impl Nv12Converter {
                     set_vec3(gl, program, c"cr_coeff", matrix.cr);
                 });
 
-                // The encoder is a different device driving the same memory; make sure the writes
-                // have actually landed before it is told the buffer is ready.
+                // The encoder is a different device on the same memory, so the writes have to have
+                // landed before it is told the buffer is ready.
                 gl.Finish();
 
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
@@ -240,8 +235,8 @@ impl Nv12Converter {
         Ok(target.dmabuf.clone())
     }
 
-    /// Free every GL object and EGLImage. Needed because they outlive any single frame and the
-    /// pool is rebuilt whenever the accessory changes the display size.
+    /// Free every GL object and EGLImage. They outlive any single frame, and the pool is rebuilt
+    /// whenever the accessory changes the display size.
     pub fn destroy(mut self, renderer: &mut GlesRenderer) {
         let display = renderer.egl_context().display().clone();
         let _ = renderer.with_context(|gl| unsafe {
@@ -259,9 +254,8 @@ impl Nv12Converter {
 }
 
 impl Plane {
-    /// Release the GL objects and the EGLImage behind them. The pool is rebuilt whenever the
-    /// accessory changes the display size, so leaking these would leak a frame's worth of GPU
-    /// memory per reconfigure.
+    /// Release the GL objects and the EGLImage behind them - leaking these costs a frame's worth
+    /// of GPU memory per reconfigure.
     ///
     /// # Safety
     /// The renderer's context must be current.
@@ -319,8 +313,8 @@ fn allocate_target(
     height: u32,
 ) -> Result<Target> {
     let rows = height * NV12_ROWS_NUM / NV12_ROWS_DEN;
-    // Linear is not a preference here: the whole scheme rests on the bytes being exactly where
-    // NV12 says they are, which no tiled modifier would give us.
+    // Linear is not a preference: the scheme rests on the bytes being exactly where NV12 says
+    // they are, which no tiled modifier gives.
     let buffer = allocator
         .create_buffer(width, rows, Fourcc::R8, &[Modifier::Linear])
         .map_err(|e| eyre!("allocate {width}x{rows} R8 buffer for NV12: {e}"))?;
@@ -343,8 +337,7 @@ fn allocate_target(
         .ok_or_else(|| eyre!("NV12 buffer has no fd"))?;
     let uv_offset = stride * height;
 
-    // The same memory, described the way the encoder wants it: one fd, luma at 0, chroma at
-    // `uv_offset`, both at the surface's stride.
+    // The same memory as the encoder wants it: one fd, luma at 0, chroma at `uv_offset`.
     let mut builder = Dmabuf::builder(
         (width as i32, height as i32),
         Fourcc::Nv12,
@@ -458,8 +451,8 @@ fn import_plane(
             if status != ffi::FRAMEBUFFER_COMPLETE {
                 gl.DeleteFramebuffers(1, &fbo);
                 gl.DeleteTextures(1, &texture);
-                // The GPU can hold the format but refuse to render into it; that is the whole
-                // question this path turns on, so say which format failed.
+                // A GPU can hold the format but refuse to render into it, which is the whole
+                // question this path turns on - so name the format.
                 return Err(eyre!(
                     "{:?} is not renderable on this GPU (framebuffer status {status:#x})",
                     dmabuf.format().code
@@ -546,12 +539,9 @@ unsafe fn info_log(gl: &ffi::Gles2, program: u32) -> String {
     }
 }
 
-/// Whether this GPU can do the conversion at all - asked at startup, before a backend that needs
-/// it is chosen, because "no zero-copy backend" is a far better outcome than a compositor that
-/// comes up and then cannot produce a frame.
-///
-/// Cheap enough to run once (a 64x64 allocation and two EGL imports), and it exercises exactly
-/// the operations the real pool depends on.
+/// Whether this GPU can do the conversion at all. Asked at startup, before a backend that needs it
+/// is chosen: "no zero-copy backend" beats a compositor that comes up and cannot produce a frame.
+/// A 64x64 allocation and two EGL imports - the operations the real pool depends on.
 pub fn supported(render_node: &str) -> bool {
     match probe(render_node) {
         Ok(()) => true,
@@ -602,8 +592,8 @@ mod tests {
         }
     }
 
-    /// Full-scale white has to land at the top of the limited range (235/255), not at 1.0 - the
-    /// coefficients carry that scaling, so a typo in them shows up here.
+    /// Full-scale white lands at the top of the limited range (235/255), not at 1.0 - the
+    /// coefficients carry that scaling, so a typo shows up here.
     #[test]
     fn white_lands_at_the_top_of_the_limited_range() {
         for m in [&BT601, &BT709] {

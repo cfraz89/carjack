@@ -166,13 +166,10 @@ pub enum ControlMessageId {
     RequestWiFiInformation,
     #[deku(id = "0x5701")]
     WiFiInformation,
-    // Two dialects of the same exchange are in the wild, differing in *both* opcode and
-    // payload shape, so carjack has to speak whichever the accessory declares (see
-    // `MESSAGES_RECEIVED_FROM_DEVICE`):
-    //   - 0x5702/0x5703, parameters flat (SSID=1, passphrase=2). The AUTO BOX bench unit
-    //     answers this one; `carjack.log` 2026-07-17 has it returning `carplay_wifi_9900`.
-    //   - 0x4300/0x4301, parameters nested in groups. The CFMOTO bike accepts *only* this
-    //     one, and declares it in its IdentificationInformation (`iphone-cfmoto.pklg`).
+    // Two dialects of the same exchange are in the wild, differing in *both* opcode and payload
+    // shape, so carjack speaks whichever the accessory declares in `MESSAGES_RECEIVED_FROM_DEVICE`:
+    //   - 0x5702/0x5703, parameters flat (SSID=1, passphrase=2).
+    //   - 0x4300/0x4301, parameters nested in groups. Some accessories accept only this one.
     #[deku(id = "0x5702")]
     RequestAccessoryWiFiConfigurationInformation,
     #[deku(id = "0x5703")]
@@ -334,9 +331,8 @@ impl ParameterId {
     pub const AUTH_CHALLENGE: Self = Self(0x0001);
     pub const AUTH_DATA: Self = Self(0x0000);
     pub const ACCESSORY_NAME: Self = Self(0x0000);
-    /// `IdentificationInformation` parameter 7: the message IDs the accessory will accept
-    /// from us. Head units differ on which WiFi-config dialect they implement, so this is
-    /// what carjack keys off rather than guessing.
+    /// `IdentificationInformation` parameter 7: the message IDs the accessory will accept from us,
+    /// which is what settles the WiFi-config dialect.
     pub const MESSAGES_RECEIVED_FROM_DEVICE: Self = Self(0x0007);
     pub const DEVICE_NAME: Self = Self(0x0000);
     /// `DeviceTimeUpdate`: seconds since the Unix epoch, minutes east of UTC, DST flag.
@@ -605,9 +601,8 @@ impl ControlMessage {
         }
     }
 
-    /// StartIdentification carries no parameters - it is purely the device telling the
-    /// accessory to send its IdentificationInformation. An iPhone's is 6 bytes on the
-    /// wire (`4040 0006 1d00`); the identity fields belong to the accessory's reply.
+    /// StartIdentification carries no parameters - the identity fields belong to the accessory's
+    /// IdentificationInformation reply.
     pub fn start_identification() -> Self {
         Self::new(ControlMessageId::StartIdentification, vec![])
     }
@@ -638,9 +633,8 @@ impl ControlMessage {
         Self::new(ControlMessageId::AuthenticationSucceeded, vec![])
     }
 
-    /// Tells the accessory wireless CarPlay is active. One `u8` in parameter 0 - the previous
-    /// two-parameter form was a guess and matches nothing an iPhone sends. An iPhone sends this
-    /// unprompted once it has the WiFi configuration (`iphone-first-pair.pklg` t=124.605).
+    /// Tells the accessory wireless CarPlay is active: one `u8` in parameter 0. An iPhone sends
+    /// this unprompted once it has the WiFi configuration.
     pub fn wireless_carplay_update(active: bool) -> Self {
         Self::new(
             ControlMessageId::WirelessCarPlayUpdate,
@@ -663,8 +657,7 @@ impl ControlMessage {
     }
 
     /// What an iPhone sends the moment it has the accessory's WiFi configuration, before anything
-    /// else (`iphone-first-pair.pklg` t=123.544). Without it the unit asks for the clock over HFP
-    /// (`AT+CCLK?`) instead, which we cannot answer.
+    /// else. Without it the unit asks for the clock over HFP (`AT+CCLK?`), which we cannot answer.
     pub fn device_time_update(unix_seconds: u64, offset_minutes: u16, dst: u8) -> Self {
         Self::new(
             ControlMessageId::DeviceTimeUpdate,
@@ -684,8 +677,8 @@ impl ControlMessage {
         )
     }
 
-    /// The 0x5702 dialect: no parameters. What the AUTO BOX bench unit answers (with a flat
-    /// 0x5703 carrying SSID in parameter 1 and passphrase in parameter 2).
+    /// The 0x5702 dialect: no parameters. Answered with a flat 0x5703 carrying SSID in parameter 1
+    /// and passphrase in parameter 2.
     pub fn request_accessory_wifi_config() -> Self {
         Self::new(
             ControlMessageId::RequestAccessoryWiFiConfigurationInformation,
@@ -752,17 +745,14 @@ mod tests {
             .collect()
     }
 
-    /// Strip the 9-byte iAP2 packet header and the trailing payload checksum, leaving the
-    /// control message as it appeared on the wire.
+    /// Strip the 9-byte iAP2 packet header and the trailing payload checksum.
     fn payload(packet_hex: &str) -> Vec<u8> {
         let bytes = unhex(packet_hex);
         bytes[9..bytes.len() - 1].to_vec()
     }
 
-    // Reference packets from `iphone-cfmoto.pklg`: a working CarPlay session between an
-    // iPhone and the CFMOTO head unit. Encoding against these is the only check available
-    // for the post-authentication sequence without a head unit on the bench.
-    //
+    // Reference packets captured from a working iPhone CarPlay session. Encoding against these is
+    // the only check available for the post-authentication sequence without a head unit attached.
     const IPHONE_DEVICE_INFO: &str =
         "ff5a001f4046780288404000154e09000f0000546573744465766963650004";
     const IPHONE_WIFI_REQUEST: &str = "ff5a005540477802514040004b4300002600000005000001001d0001303132333435363738394142434445463031323334353637\
@@ -778,8 +768,7 @@ mod tests {
         assert_eq!(msg.to_bytes().unwrap(), payload(IPHONE_DEVICE_INFO));
     }
 
-    /// From `iphone-first-pair.pklg` t=123.544/123.545/124.605 - the three messages carjack never
-    /// sent, captured against the AUTO BOX bench unit.
+    /// The three messages an iPhone sends once it has the WiFi configuration.
     const IPHONE_TIME_UPDATE: &str =
         "ff5a002740a0f801be4040001d4e0b000c0000000000006a6edf2d0006000102580005000200b2";
     const IPHONE_LANGUAGE_UPDATE: &str = "ff5a001740a1f801bd4040000d4e0a00070000656e0041";
@@ -837,8 +826,8 @@ mod tests {
         );
     }
 
-    /// The captured iPhone message, against Apple's names: the wireless bearer's identifier is
-    /// the phone's Bluetooth address, and the wired one's is a USB identifier.
+    /// The wireless bearer's identifier is the phone's Bluetooth address, the wired one's a USB
+    /// identifier.
     #[test]
     fn iphone_carplay_availability_parses_as_bearer_attributes() {
         let bytes = payload(IPHONE_WIFI_REQUEST);
@@ -861,8 +850,8 @@ mod tests {
         }
     }
 
-    /// The credentials sit in a nested group, not at the top level - reading them flat
-    /// yields an empty SSID rather than an error, so this is worth pinning down.
+    /// The credentials sit in a nested group, not at the top level - reading them flat yields an
+    /// empty SSID rather than an error.
     #[test]
     fn wifi_config_response_parses() {
         let bytes = payload(ACCESSORY_WIFI_CONFIG);
@@ -885,8 +874,8 @@ mod tests {
             group.get_param::<u8>(ParameterId::WIFI_CONFIG_CHANNEL),
             Some(157)
         );
-        // The address of the AirPlay receiver, which is what we actually connect out to -
-        // this unit never invites us, so discovery alone leaves both sides waiting.
+        // The AirPlay receiver's address, which is what we connect out to - an accessory that
+        // never invites leaves both sides waiting on discovery alone.
         assert_eq!(
             group.get_param::<String>(ParameterId::WIFI_CONFIG_IPV6),
             Some(String::from("fe80::9083:8eff:feef:a7d3"))
@@ -902,8 +891,8 @@ mod tests {
                 .get_param::<String>(ParameterId::WIFI_CONFIG_MAC),
             Some(String::from("3D:20:3D:D3:EB:06"))
         );
-        // The accessory's HomeKit pairing id - the same value an invite carries as `pi`, and
-        // the only route to one on a unit that never invites.
+        // The accessory's HomeKit pairing id - what an invite carries as `pi`, and the only route
+        // to one on an accessory that never invites.
         assert_eq!(
             msg.parameters
                 .get_param::<String>(ParameterId::WIFI_CONFIG_UUID),
@@ -921,9 +910,8 @@ mod tests {
         assert_eq!(encoded[..10], reference[..10]);
     }
 
-    /// The AUTO BOX bench unit's 0x5703, rebuilt from the parameter bytes logged verbatim in
-    /// `carjack.log` (2026-07-17). Flat parameters, no group - the opposite of the bike's
-    /// 0x4301 above, which is why both dialects have to be supported.
+    /// A real 0x5703: flat parameters, no group - the opposite of the 0x4301 above, which is why
+    /// both dialects have to be supported.
     #[test]
     fn legacy_wifi_config_response_parses() {
         let bytes = unhex(
