@@ -93,6 +93,12 @@ cuda = ["dep:cuda-dmabuf", "cuda-dmabuf/cuda"]
 name = "screenshot"
 path = ".claude/skills/run-carjack/screenshot.rs"
 
+# Injects a synthetic edge swipe into the compositor and reports whether the client reacted -
+# the bottom-row gesture test that needs no head unit. Beside the skill, like `screenshot`.
+[[example]]
+name = "touchtest"
+path = ".claude/skills/run-carjack/touchtest.rs"
+
 # `just deb` (cargo-deb). Mirrors what `just install-carjack-service` does by hand: binaries,
 # systemd units and the polkit rule, wired up via DynamicUser services (no package user to create).
 [package.metadata.deb]

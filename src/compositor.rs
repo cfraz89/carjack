@@ -513,16 +513,26 @@ impl State {
             tracing::warn!("inject_touch: seat has no touch handle");
             return;
         };
-        let loc = self.touch_location(&event);
+        // A touch at the panel's bottom edge lands one row past the view: a HID logical maximum is
+        // the pixel count, not count - 1. An out-of-bounds DOWN latches no focus, so the whole
+        // Down/Motion/Up sequence is dropped - which is exactly the bottom-edge home swipe.
+        let loc = Point::<f64, Logical>::from((
+            event.x.clamp(0.0, (self.width - 1) as f64),
+            event.y.clamp(0.0, (self.height - 1) as f64),
+        ));
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         let time = self.start_time.elapsed().as_millis() as u32;
         let slot = Some(event.slot).into();
         match event.event_type {
             TouchEventType::Down => {
-                let focus = self.touch_focus(loc);
+                let focus = self.surface_under(loc);
+                // Both the reported and the clamped point: the accessory's bottom edge arrives
+                // one row past the surface, and only the clamped one decides whether focus latches.
                 tracing::debug!(
-                    "inject_touch DOWN slot={} ({},{}) focus={}",
+                    "inject_touch DOWN slot={} reported=({},{}) clamped=({},{}) focus={}",
                     event.slot,
+                    event.x,
+                    event.y,
                     loc.x,
                     loc.y,
                     focus.is_some()
