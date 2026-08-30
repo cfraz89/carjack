@@ -12,7 +12,10 @@ polkit.addRule(function (action, subject) {
         (action.id == "org.freedesktop.NetworkManager.network-control" ||
             action.id == "org.freedesktop.NetworkManager.settings.modify.own" ||
             action.id == "org.freedesktop.NetworkManager.settings.modify.system" ||
-            action.id == "org.freedesktop.NetworkManager.wifi.scan")
+            action.id == "org.freedesktop.NetworkManager.wifi.scan" ||
+            // The setup AP is a WPA2 `ipv4.method=shared` connection, which NetworkManager gates
+            // on its own action rather than on settings.modify - see src/wifi_connect/setup_ap.rs.
+            action.id == "org.freedesktop.NetworkManager.wifi.share.protected")
     ) {
         return polkit.Result.YES;
     }
