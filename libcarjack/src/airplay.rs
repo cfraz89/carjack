@@ -146,25 +146,20 @@ pub async fn connect_airplay(
         disp.height_pixels
     );
 
-    // The stream is the view, not the panel: the accessory places it at the view's origin, so a
-    // panel-sized frame lands under whatever the accessory keeps for itself.
+    // The accessory scales the stream across its whole panel, so it is sized to the panel; a
+    // reserved strip is blank rows, left by the compositor drawing the app at the view.
+    let (width, height) = (disp.width_pixels, disp.height_pixels);
     let view = panel_view(&info, &disp_uuid);
-    let (width, height) = match &view {
-        Some(v) => {
-            tracing::info!(
-                "Accessory panel reserves part of itself: video at ({}, {}) sized {}x{}",
-                v.origin_x,
-                v.origin_y,
-                v.width,
-                v.height
-            );
-            (v.width as u32, v.height as u32)
-        }
-        None => {
-            tracing::debug!("Accessory gave no panel geometry; video covers the display");
-            (disp.width_pixels, disp.height_pixels)
-        }
-    };
+    match &view {
+        Some(v) => tracing::info!(
+            "Accessory panel reserves part of itself: video at ({}, {}) sized {}x{}",
+            v.origin_x,
+            v.origin_y,
+            v.width,
+            v.height
+        ),
+        None => tracing::debug!("Accessory gave no panel geometry; video covers the display"),
+    }
 
     let multi_codec = info
         .features
@@ -267,7 +262,6 @@ pub async fn run_video_stream(
         keyframe_tx.clone(),
         tunnel,
         handover,
-        view,
     )));
 
     let latency = Duration::from_millis(100);
@@ -477,7 +471,6 @@ async fn handle_accessory_commands(
     keyframe_tx: mpsc::Sender<()>,
     tunnel: crate::iap2_tunnel::Tunnel,
     handover: CancellationToken,
-    view: Option<VideoView>,
 ) {
     let mut touching = false;
     while let Some(mut cmd) = tx.pop_command().await {
@@ -497,14 +490,28 @@ async fn handle_accessory_commands(
                 cmd.respond_ok();
             }
             Command::HidSendReport(r) => {
-                if let Some(mut event) = parse_touch_report(r.hid_report.as_ref(), &mut touching) {
-                    // The touchscreen's logical maximum is the whole panel, so a reserved strip
-                    // offsets every report by the view's origin.
-                    if let Some(v) = &view {
-                        event.x -= v.origin_x as f64;
-                        event.y -= v.origin_y as f64;
+                let report = r.hid_report.as_ref();
+                if let Some(event) = parse_touch_report(report, &mut touching) {
+                    // The touchscreen's logical maximum is the whole panel, which is also the
+                    // compositor's coordinate space, so reports pass through unshifted - the app
+                    // sits at the view's origin there and picks up only what lands on it.
+                    // The only view onto what the accessory reports at the screen edges, where the
+                    // Android system gestures live - see `RUST_LOG=libcarjack::airplay=debug`.
+                    tracing::debug!(
+                        "touch {:?} panel=({},{}) report={report:02x?}",
+                        event.event_type,
+                        event.x,
+                        event.y,
+                    );
+                    if touch_tx.try_send(event).is_err() {
+                        // A dropped Down loses the whole gesture: the compositor latches focus at
+                        // Down, so the motions that follow land nowhere.
+                        tracing::warn!("touch queue full, dropped a report");
                     }
-                    let _ = touch_tx.try_send(event);
+                } else if matches!(report.len(), 5 | 12) {
+                    // A no-contact report while no contact is held: normal between gestures, but
+                    // it is also what a missed Down looks like, so keep it visible at trace level.
+                    tracing::trace!("touch idle report={report:02x?}");
                 }
                 cmd.respond_ok();
             }

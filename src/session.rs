@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
-use carjack::compositor::Compositor;
+use carjack::compositor::{Compositor, ViewRect};
 use carjack::config::{CodecChoice, Config, ZeroCopyMode};
 use carjack::display_cache::{DisplayCache, DisplayProps};
 use carjack::encode::{self, Bitrate, EncodeBackend};
@@ -537,7 +537,13 @@ pub async fn run_session(
     .await?;
 
     // Reconfigure the already-running compositor to match the accessory's size and rate exactly.
-    let resized = compositor.reconfigure(conn.width, conn.height, conn.max_fps)?;
+    let view = conn.view.as_ref().map(|v| ViewRect {
+        x: v.origin_x as i32,
+        y: v.origin_y as i32,
+        width: v.width as i32,
+        height: v.height as i32,
+    });
+    let resized = compositor.reconfigure(conn.width, conn.height, conn.max_fps, view)?;
     remember_accessory_display(cache, &conn, &accessory_addr_rx);
 
     // A non-resizable app only has the right size once the accessory reports it, so launch (or

@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use carjack::compositor::{CapturedFrame, Compositor};
+use carjack::compositor::{CapturedFrame, Compositor, ViewRect};
 use carjack::config::{Cli, Config};
 use carjack::encode::{Bitrate, EncodeBackend, encode_h264_to_channel, resolve_backend};
 use clap::Parser;
@@ -203,7 +203,7 @@ async fn reconfigure_switches_frame_size() -> Result<()> {
     );
 
     // Reconfigure to a different size + refresh; frames must switch to it.
-    comp.reconfigure(800, 480, 60)?;
+    comp.reconfigure(800, 480, 60, None)?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
         assert!(
@@ -211,6 +211,30 @@ async fn reconfigure_switches_frame_size() -> Result<()> {
             "frames never switched to the reconfigured size"
         );
         if wait_for_frame_size(&mut rx).await? == (800, 480) {
+            break;
+        }
+    }
+
+    // A reserved strip must not shrink the stream: the accessory scales whatever it is sent over
+    // the whole panel, so the frame stays panel-sized and the app moves down inside it.
+    comp.reconfigure(
+        800,
+        1280,
+        60,
+        Some(ViewRect {
+            x: 0,
+            y: 224,
+            width: 800,
+            height: 1056,
+        }),
+    )?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "frames never switched to the panel size with a view set"
+        );
+        if wait_for_frame_size(&mut rx).await? == (800, 1280) {
             break;
         }
     }

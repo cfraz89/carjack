@@ -49,7 +49,7 @@ async fn time_to_first_keyframe(
         30,
     )?;
 
-    let resized = comp.reconfigure(accessory_size.0, accessory_size.1, accessory_fps)?;
+    let resized = comp.reconfigure(accessory_size.0, accessory_size.1, accessory_fps, None)?;
     println!(
         "  reconfigure({}x{} @ {accessory_fps}) -> resized={resized}",
         accessory_size.0, accessory_size.1

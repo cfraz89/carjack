@@ -42,7 +42,7 @@ use smithay::reexports::wayland_server::backend::{ClientData, ClientId, Disconne
 use smithay::reexports::wayland_server::protocol::wl_buffer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle};
-use smithay::utils::{Buffer as BufferCoord, Logical, Point, Rectangle, Transform};
+use smithay::utils::{Buffer as BufferCoord, Logical, Point, Rectangle, Size, Transform};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState, get_parent, is_sync_subsurface,
@@ -94,6 +94,15 @@ struct Ready {
     loop_signal: LoopSignal,
 }
 
+/// Where the app is drawn inside the stream, in stream pixels.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ViewRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 /// A request to re-size/re-time the running compositor, sent once the accessory's real display
 /// parameters are known. `ack` lets [`Compositor::reconfigure`] block until the mode is live.
 struct ReconfigureRequest {
@@ -101,6 +110,8 @@ struct ReconfigureRequest {
     height: u32,
     /// Refresh rate in fps; `0` (accessory didn't report one) falls back to the default.
     fps: u32,
+    /// The accessory's view: origin and size within the stream. `None` covers the whole of it.
+    view: Option<ViewRect>,
     /// Reports back `Ok(true)` if the mode actually changed, `Ok(false)` if it was already at
     /// these parameters, or the failure.
     ack: std::sync::mpsc::Sender<std::result::Result<bool, String>>,
@@ -206,13 +217,20 @@ impl Compositor {
 
     /// Re-size and re-time the running compositor, blocking until the mode is applied. Returns
     /// whether it actually changed (`false` = already at these parameters).
-    pub fn reconfigure(&self, width: u32, height: u32, fps: u32) -> Result<bool> {
+    pub fn reconfigure(
+        &self,
+        width: u32,
+        height: u32,
+        fps: u32,
+        view: Option<ViewRect>,
+    ) -> Result<bool> {
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
         self.control_tx
             .send(ReconfigureRequest {
                 width,
                 height,
                 fps,
+                view,
                 ack: ack_tx,
             })
             .map_err(|e| eyre!("send reconfigure to compositor: {e}"))?;
@@ -262,6 +280,11 @@ struct State {
 
     width: i32,
     height: i32,
+    /// Where the client sits inside the stream, and how big it is. The accessory scales whatever
+    /// frame it is sent across its whole panel, so a reserved strip has to be blank rows in a
+    /// panel-sized frame; sending a view-sized frame just stretches the app over the strip.
+    view_offset: Point<i32, Logical>,
+    view_size: Size<i32, Logical>,
 
     space: Space<Window>,
     popups: PopupManager,
@@ -412,12 +435,23 @@ impl State {
         width: u32,
         height: u32,
         fps: u32,
+        view: Option<ViewRect>,
     ) -> std::result::Result<bool, String> {
         let fps = if fps == 0 { TARGET_FPS as u32 } else { fps };
         let frame_interval = Duration::from_micros(1_000_000 / fps as u64);
+        let view = view.unwrap_or(ViewRect {
+            x: 0,
+            y: 0,
+            width: width as i32,
+            height: height as i32,
+        });
+        let view_offset: Point<i32, Logical> = (view.x, view.y).into();
+        let view_size: Size<i32, Logical> = (view.width, view.height).into();
         if self.width == width as i32
             && self.height == height as i32
             && self.frame_interval == frame_interval
+            && self.view_offset == view_offset
+            && self.view_size == view_size
         {
             return Ok(false); // already at these parameters
         }
@@ -459,6 +493,8 @@ impl State {
         self.width = width as i32;
         self.height = height as i32;
         self.frame_interval = frame_interval;
+        self.view_offset = view_offset;
+        self.view_size = view_size;
 
         let mode = Mode {
             size: (width as i32, height as i32).into(),
@@ -473,16 +509,18 @@ impl State {
         self.output.set_preferred(mode);
         self.damage_tracker = OutputDamageTracker::from_output(&self.output);
 
-        let size = (self.width, self.height);
-        for window in self.space.elements() {
+        // Cloned out first: remapping borrows the space that `elements()` is walking.
+        let windows: Vec<Window> = self.space.elements().cloned().collect();
+        for window in windows {
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|s| {
-                    s.size = Some(size.into());
+                    s.size = Some(view_size);
                     s.states.set(xdg_toplevel::State::Fullscreen);
                     s.states.set(xdg_toplevel::State::Activated);
                 });
                 toplevel.send_configure();
             }
+            self.space.map_element(window, view_offset, true);
         }
 
         // So a subscriber connecting right after this returns - the encoder does - latches its
@@ -508,12 +546,14 @@ impl State {
                 // Both points: the accessory's bottom edge arrives one row past the surface, and
                 // only the clamped one decides whether focus latches.
                 tracing::debug!(
-                    "inject_touch DOWN slot={} reported=({},{}) clamped=({},{}) focus={}",
+                    "inject_touch DOWN slot={} reported=({},{}) clamped=({},{}) output={}x{} focus={}",
                     event.slot,
                     event.x,
                     event.y,
                     loc.x,
                     loc.y,
+                    self.width,
+                    self.height,
                     focus.is_some()
                 );
                 touch.down(
@@ -530,6 +570,14 @@ impl State {
             }
             TouchEventType::Motion => {
                 let focus = self.touch_focus(loc);
+                tracing::trace!(
+                    "inject_touch MOTION slot={} reported=({},{}) clamped=({},{})",
+                    event.slot,
+                    event.x,
+                    event.y,
+                    loc.x,
+                    loc.y
+                );
                 touch.motion(
                     self,
                     focus,
@@ -542,6 +590,12 @@ impl State {
                 touch.frame(self);
             }
             TouchEventType::Up => {
+                tracing::debug!(
+                    "inject_touch UP slot={} reported=({},{})",
+                    event.slot,
+                    event.x,
+                    event.y
+                );
                 touch.up(self, &UpEvent { slot, serial, time });
                 touch.frame(self);
             }
@@ -781,7 +835,7 @@ fn run(
     loop_handle
         .insert_source(control_rx, |event, _, state: &mut State| {
             if let calloop::channel::Event::Msg(req) = event {
-                let res = state.reconfigure(req.width, req.height, req.fps);
+                let res = state.reconfigure(req.width, req.height, req.fps, req.view);
                 if let Err(ref e) = res {
                     tracing::warn!("compositor: reconfigure failed: {e}");
                 }
@@ -851,6 +905,9 @@ fn run(
         start_time: std::time::Instant::now(),
         width: width as i32,
         height: height as i32,
+        // No accessory yet, so the app covers the whole stream until one reports its view.
+        view_offset: (0, 0).into(),
+        view_size: (width as i32, height as i32).into(),
         space,
         popups,
         seat,
@@ -942,16 +999,16 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        // Force every app fullscreen at the accessory's resolution - single-app kiosk.
-        let size = (self.width, self.height);
+        // Force every app fullscreen at the accessory's view - single-app kiosk.
+        let size = self.view_size;
         surface.with_pending_state(|state| {
-            state.size = Some(size.into());
+            state.size = Some(size);
             state.states.set(xdg_toplevel::State::Fullscreen);
             state.states.set(xdg_toplevel::State::Activated);
         });
         surface.send_configure();
         let window = Window::new_wayland_window(surface);
-        self.space.map_element(window, (0, 0), true);
+        self.space.map_element(window, self.view_offset, true);
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
