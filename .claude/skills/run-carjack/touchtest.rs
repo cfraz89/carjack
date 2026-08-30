@@ -28,6 +28,9 @@ struct Args {
     fps: u32,
     command: Option<String>,
     start_y: Option<u32>,
+    /// `false` swipes up from the bottom edge (home), `true` swipes down from the top edge
+    /// (the notification shade) - the two gestures live on opposite edges.
+    down: bool,
     settle_ms: u64,
     pre_swipe: Option<String>,
     pre_swipe_ms: u64,
@@ -43,6 +46,7 @@ fn parse_args() -> Result<Args> {
         fps: 30,
         command: None,
         start_y: None,
+        down: false,
         settle_ms: 2500,
         pre_swipe: None,
         pre_swipe_ms: 6000,
@@ -64,6 +68,11 @@ fn parse_args() -> Result<Args> {
             "--fps" => a.fps = next(i)?.parse()?,
             "--command" => a.command = Some(next(i)?),
             "--start-y" => a.start_y = Some(next(i)?.parse()?),
+            "--down" => {
+                a.down = true;
+                i += 1;
+                continue;
+            }
             "--settle-ms" => a.settle_ms = next(i)?.parse()?,
             "--warmup-swipe" => {
                 a.warmup_swipe = true;
@@ -168,7 +177,7 @@ async fn main() -> Result<()> {
     if args.warmup_swipe {
         let y0 = args.start_y.unwrap_or(args.height - 1);
         println!("warm-up swipe from ({}, {y0}) to clear the keyguard", args.width / 2);
-        swipe_up(&comp, (args.width / 2) as f64, y0, args.height).await?;
+        swipe(&comp, (args.width / 2) as f64, y0, args.height, false).await?;
         tokio::time::sleep(Duration::from_millis(3000)).await;
     }
 
@@ -196,11 +205,14 @@ async fn main() -> Result<()> {
     write_png(&format!("{}-before.png", args.out), &before, w, h)?;
 
     // Start on the bottom row unless told otherwise; `height` itself is the out-of-bounds case.
-    let start_y = args.start_y.unwrap_or(args.height - 1);
+    let start_y = args
+        .start_y
+        .unwrap_or(if args.down { 0 } else { args.height - 1 });
     let x = (args.width / 2) as f64;
-    println!("swiping up from ({x}, {start_y}) on a {}x{} surface", args.width, args.height);
+    let dir = if args.down { "down" } else { "up" };
+    println!("swiping {dir} from ({x}, {start_y}) on a {}x{} surface", args.width, args.height);
 
-    swipe_up(&comp, x, start_y, args.height).await?;
+    swipe(&comp, x, start_y, args.height, args.down).await?;
 
     println!("waiting for the client to react");
     tokio::time::sleep(Duration::from_millis(2500)).await;
@@ -226,9 +238,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// One swipe-up gesture: DOWN at `start_y`, ~200 ms of smooth travel, then UP. The travel has to
-/// be gradual - a single jump to the destination reads as a tap, not a fling.
-async fn swipe_up(comp: &Compositor, x: f64, start_y: u32, height: u32) -> Result<()> {
+/// One vertical swipe: DOWN at `start_y`, ~200 ms of smooth travel, then UP. The travel has to
+/// be gradual - a single jump to the destination reads as a tap, not a fling. `down` swipes
+/// towards the bottom (the shade pull) instead of up (home).
+async fn swipe(comp: &Compositor, x: f64, start_y: u32, height: u32, down: bool) -> Result<()> {
     comp.send_touch(&TouchEvent {
         event_type: TouchEventType::Down,
         slot: 0,
@@ -236,9 +249,15 @@ async fn swipe_up(comp: &Compositor, x: f64, start_y: u32, height: u32) -> Resul
         y: start_y as f64,
     })?;
     let steps = 12;
-    let travel = (height as f64 * 0.45).min(start_y as f64);
+    let reach = if down {
+        (height - 1).saturating_sub(start_y) as f64
+    } else {
+        start_y as f64
+    };
+    let travel = (height as f64 * 0.45).min(reach);
+    let sign = if down { 1.0 } else { -1.0 };
     for s in 1..=steps {
-        let y = start_y as f64 - travel * (s as f64 / steps as f64);
+        let y = start_y as f64 + sign * travel * (s as f64 / steps as f64);
         comp.send_touch(&TouchEvent { event_type: TouchEventType::Motion, slot: 0, x, y })?;
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
@@ -246,7 +265,7 @@ async fn swipe_up(comp: &Compositor, x: f64, start_y: u32, height: u32) -> Resul
         event_type: TouchEventType::Up,
         slot: 0,
         x,
-        y: start_y as f64 - travel,
+        y: start_y as f64 + sign * travel,
     })?;
     Ok(())
 }
