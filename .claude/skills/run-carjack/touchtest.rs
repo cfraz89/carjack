@@ -81,9 +81,7 @@ fn parse_args() -> Result<Args> {
             }
             "--tap" => {
                 let v = next(i)?;
-                let (x, y) = v
-                    .split_once(',')
-                    .ok_or_else(|| eyre!("--tap wants X,Y"))?;
+                let (x, y) = v.split_once(',').ok_or_else(|| eyre!("--tap wants X,Y"))?;
                 a.tap = Some((x.trim().parse()?, y.trim().parse()?));
             }
             "--pre-swipe" => a.pre_swipe = Some(next(i)?),
@@ -113,7 +111,9 @@ async fn grab(
                 ..
             } => return Ok((data.clone(), *width, *height)),
             CapturedFrame::Dmabuf(_) => {
-                return Err(eyre!("zero-copy frame has no CPU pixels; needs the SHM path"));
+                return Err(eyre!(
+                    "zero-copy frame has no CPU pixels; needs the SHM path"
+                ));
             }
         }
     }
@@ -131,7 +131,11 @@ fn diff_fraction(a: &[u8], b: &[u8]) -> f64 {
             changed += 1;
         }
     }
-    if total == 0 { 0.0 } else { changed as f64 / total as f64 }
+    if total == 0 {
+        0.0
+    } else {
+        changed as f64 / total as f64
+    }
 }
 
 #[tokio::main]
@@ -141,7 +145,11 @@ async fn main() -> Result<()> {
         .try_init();
     let args = parse_args()?;
 
-    let cfg = Config::load(&Cli::parse_from(["carjack", "--bt-device", "touchtest-unused"]))?;
+    let cfg = Config::load(&Cli::parse_from([
+        "carjack",
+        "--bt-device",
+        "touchtest-unused",
+    ]))?;
     let node = carjack::config::resolve_render_node(&cfg.graphics.drm_device)?;
     println!("render node: {node}");
 
@@ -154,7 +162,10 @@ async fn main() -> Result<()> {
         args.height,
         args.fps,
     )?;
-    println!("compositor up {}x{} on {:?}", args.width, args.height, comp.socket_name);
+    println!(
+        "compositor up {}x{} on {:?}",
+        args.width, args.height, comp.socket_name
+    );
 
     let mut child = match &args.command {
         Some(cmd) => {
@@ -176,16 +187,29 @@ async fn main() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(args.settle_ms)).await;
     if args.warmup_swipe {
         let y0 = args.start_y.unwrap_or(args.height - 1);
-        println!("warm-up swipe from ({}, {y0}) to clear the keyguard", args.width / 2);
+        println!(
+            "warm-up swipe from ({}, {y0}) to clear the keyguard",
+            args.width / 2
+        );
         swipe(&comp, (args.width / 2) as f64, y0, args.height, false).await?;
         tokio::time::sleep(Duration::from_millis(3000)).await;
     }
 
     if let Some((tx, ty)) = args.tap {
         println!("tapping ({tx}, {ty}) to open an app");
-        comp.send_touch(&TouchEvent { event_type: TouchEventType::Down, slot: 0, x: tx, y: ty })?;
+        comp.send_touch(&TouchEvent {
+            event_type: TouchEventType::Down,
+            slot: 0,
+            x: tx,
+            y: ty,
+        })?;
         tokio::time::sleep(Duration::from_millis(60)).await;
-        comp.send_touch(&TouchEvent { event_type: TouchEventType::Up, slot: 0, x: tx, y: ty })?;
+        comp.send_touch(&TouchEvent {
+            event_type: TouchEventType::Up,
+            slot: 0,
+            x: tx,
+            y: ty,
+        })?;
         tokio::time::sleep(Duration::from_millis(args.pre_swipe_ms)).await;
     }
 
@@ -210,7 +234,10 @@ async fn main() -> Result<()> {
         .unwrap_or(if args.down { 0 } else { args.height - 1 });
     let x = (args.width / 2) as f64;
     let dir = if args.down { "down" } else { "up" };
-    println!("swiping {dir} from ({x}, {start_y}) on a {}x{} surface", args.width, args.height);
+    println!(
+        "swiping {dir} from ({x}, {start_y}) on a {}x{} surface",
+        args.width, args.height
+    );
 
     swipe(&comp, x, start_y, args.height, args.down).await?;
 
@@ -258,7 +285,12 @@ async fn swipe(comp: &Compositor, x: f64, start_y: u32, height: u32, down: bool)
     let sign = if down { 1.0 } else { -1.0 };
     for s in 1..=steps {
         let y = start_y as f64 + sign * travel * (s as f64 / steps as f64);
-        comp.send_touch(&TouchEvent { event_type: TouchEventType::Motion, slot: 0, x, y })?;
+        comp.send_touch(&TouchEvent {
+            event_type: TouchEventType::Motion,
+            slot: 0,
+            x,
+            y,
+        })?;
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
     comp.send_touch(&TouchEvent {

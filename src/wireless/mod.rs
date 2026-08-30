@@ -20,6 +20,8 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
+use carjack::config::Target;
+
 use crate::wireless::bluetooth::{dial_accessory, find_target_device, relink, request_is_target};
 
 /// Handed to the caller: the channel a CarPlay session streams the accessory's credentials over,
@@ -42,7 +44,7 @@ struct LinkCtx {
     host: Arc<IapHost>,
     /// Resolved in the background; paging is the only thing that needs a `Device`.
     device: tokio::sync::watch::Receiver<Option<Device>>,
-    target: String,
+    target: Target,
     wanted: Option<Address>,
     connect_attempt: Arc<Semaphore>,
 }
@@ -122,7 +124,8 @@ async fn attempt_iap2_link(
 
 pub async fn wireless_carplay(
     host: Arc<IapHost>,
-    target: String,
+    target: Target,
+    remembered: Option<Address>,
     handoff: WifiOffhand,
     ready_tx: oneshot::Sender<()>,
     accessory_addr_tx: tokio::sync::watch::Sender<Option<String>>,
@@ -142,7 +145,7 @@ pub async fn wireless_carplay(
         let target = target.clone();
         let connect_attempt = connect_attempt.clone();
         async move {
-            match find_target_device(&adapter, &target).await {
+            match find_target_device(&adapter, &target, remembered).await {
                 Ok(device) => {
                     // Surface the MAC early so the caller can ready settings/cached display before
                     // WiFi or AirPlay report the real one.
@@ -158,7 +161,7 @@ pub async fn wireless_carplay(
         }
     }));
 
-    let wanted: Option<Address> = target.parse().ok();
+    let wanted: Option<Address> = target.address().and_then(|a| a.parse().ok());
 
     let iap2 = ({
         |mut ctx: LinkCtx| async move {

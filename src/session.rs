@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 use carjack::compositor::{Compositor, ViewRect};
-use carjack::config::{CodecChoice, Config, ZeroCopyMode};
+use carjack::config::{CodecChoice, Config, Target, ZeroCopyMode};
 use carjack::display_cache::{DisplayCache, DisplayProps};
 use carjack::encode::{self, Bitrate, EncodeBackend};
 
@@ -209,7 +209,8 @@ impl WifiJoin {
 /// source modes.
 async fn establish_carplay(
     host: Arc<IapHost>,
-    bt_device: &str,
+    bt_device: &Target,
+    remembered: Option<bluer::Address>,
     wifi: &Arc<dyn WifiBackend>,
 ) -> Result<Established> {
     let (touch_tx, touch_rx) = mpsc::channel::<TouchEvent>(64);
@@ -225,7 +226,8 @@ async fn establish_carplay(
     // setup; AbortOnDropHandle tears it down when dropped, not detached.
     let mut carplay_handle = AbortOnDropHandle::new(tokio::spawn(wireless_carplay(
         host.clone(),
-        bt_device.to_owned(),
+        bt_device.clone(),
+        remembered,
         WifiOffhand {
             creds_tx: wifi_tx,
             handover: handover.clone(),
@@ -531,7 +533,8 @@ pub async fn run_session(
         handover,
     } = establish_carplay(
         host.clone(),
-        config.bluetooth_device().unwrap_or_default(),
+        &config.bluetooth_device().unwrap_or(Target::Auto),
+        cache.last_mac().and_then(|m| m.parse().ok()),
         wifi,
     )
     .await?;
@@ -573,7 +576,7 @@ pub async fn run_desktop_session(
     zerocopy: ZeroCopyMode,
     codec: CodecChoice,
     bitrate: Bitrate,
-    bt_device: &str,
+    bt_device: &Target,
     wifi: &Arc<dyn WifiBackend>,
 ) -> Result<()> {
     let Established {
@@ -583,7 +586,13 @@ pub async fn run_desktop_session(
         mut touch_rx,
         accessory_addr_rx: _,
         handover,
-    } = establish_carplay(host.clone(), bt_device, wifi).await?;
+    } = establish_carplay(
+        host.clone(),
+        bt_device,
+        DisplayCache::load().last_mac().and_then(|m| m.parse().ok()),
+        wifi,
+    )
+    .await?;
     let (width, height) = (conn.width, conn.height);
     let codec = encode::resolve_codec(codec, conn.hevc_expected);
     tracing::info!("Streaming desktop to accessory at {width}x{height}");

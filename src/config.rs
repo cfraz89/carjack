@@ -47,6 +47,46 @@ pub struct Bluetooth {
     pub device: String,
 }
 
+/// The head unit a run is aiming at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// Take whichever CarPlay-capable unit is in range, strongest signal first.
+    Auto,
+    /// One specific unit, by MAC or advertised name.
+    Selector(String),
+}
+
+impl Target {
+    /// `None` for an unset (or whitespace-only) setting, which means nothing to connect to.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            None
+        } else if s.eq_ignore_ascii_case("auto") {
+            Some(Self::Auto)
+        } else {
+            Some(Self::Selector(s.to_owned()))
+        }
+    }
+
+    /// The MAC this target names, if it names one at all.
+    pub fn address(&self) -> Option<&str> {
+        match self {
+            Self::Auto => None,
+            Self::Selector(s) => s.contains(':').then_some(s.as_str()),
+        }
+    }
+}
+
+impl std::fmt::Display for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Selector(s) => f.write_str(s),
+        }
+    }
+}
+
 /// Video source: run our own app, or capture the existing desktop via the portal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -280,7 +320,6 @@ pub struct Cli {
     /// Override [bluetooth] device: the head unit's MAC or advertised name.
     #[arg(long, value_name = "MAC|NAME")]
     pub bt_device: Option<String>,
-
 }
 
 impl Config {
@@ -315,10 +354,9 @@ impl Config {
         self.app.command.trim()
     }
 
-    /// The configured head unit (MAC or name), or `None` if unset.
-    pub fn bluetooth_device(&self) -> Option<&str> {
-        let device = self.bluetooth.device.trim();
-        (!device.is_empty()).then_some(device)
+    /// The configured head unit, or `None` if unset.
+    pub fn bluetooth_device(&self) -> Option<Target> {
+        Target::parse(&self.bluetooth.device)
     }
 }
 
@@ -660,7 +698,10 @@ mod tests {
         assert_eq!(cfg.desktop_command(), "foo");
         assert_eq!(cfg.display.width, 800);
         assert_eq!(cfg.graphics.bitrate, 6000);
-        assert_eq!(cfg.bluetooth_device(), Some("MYCAR-1234"));
+        assert_eq!(
+            cfg.bluetooth_device(),
+            Some(Target::Selector("MYCAR-1234".into()))
+        );
     }
 
     #[test]
@@ -668,7 +709,10 @@ mod tests {
         use clap::Parser;
         let cli = Cli::parse_from(["carjack", "--bt-device", "AA:BB:CC:DD:EE:FF"]);
         let cfg = Config::load(&cli).unwrap();
-        assert_eq!(cfg.bluetooth_device(), Some("AA:BB:CC:DD:EE:FF"));
+        assert_eq!(
+            cfg.bluetooth_device(),
+            Some(Target::Selector("AA:BB:CC:DD:EE:FF".into()))
+        );
 
         // Unset and whitespace-only both read as "no target", which `main` rejects at startup.
         let blank = Config {
@@ -679,6 +723,40 @@ mod tests {
         };
         assert_eq!(blank.bluetooth_device(), None);
         assert_eq!(Config::default().bluetooth_device(), None);
+    }
+
+    #[test]
+    fn target_parses_auto_and_selectors() {
+        assert_eq!(Target::parse("auto"), Some(Target::Auto));
+        assert_eq!(Target::parse("  AUTO  "), Some(Target::Auto));
+        assert_eq!(Target::parse(""), None);
+        assert_eq!(Target::parse("   "), None);
+        assert_eq!(
+            Target::parse("MYCAR-1234"),
+            Some(Target::Selector("MYCAR-1234".into()))
+        );
+        // Only a MAC names an address; an advertised name has to be resolved by discovery.
+        assert_eq!(
+            Target::parse("AA:BB:CC:DD:EE:FF").unwrap().address(),
+            Some("AA:BB:CC:DD:EE:FF")
+        );
+        assert_eq!(Target::parse("MYCAR-1234").unwrap().address(), None);
+        assert_eq!(Target::Auto.address(), None);
+        assert_eq!(Target::Auto.to_string(), "auto");
+    }
+
+    #[test]
+    fn auto_is_a_target_not_a_unit_name() {
+        assert_eq!(
+            parse_toml("[bluetooth]\ndevice = \"auto\"\n").bluetooth_device(),
+            Some(Target::Auto)
+        );
+        use clap::Parser;
+        let cli = Cli::parse_from(["carjack", "--bt-device", "auto"]);
+        assert_eq!(
+            Config::load(&cli).unwrap().bluetooth_device(),
+            Some(Target::Auto)
+        );
     }
 
     #[test]

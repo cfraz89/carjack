@@ -55,6 +55,12 @@ impl DisplayCache {
         self.file.last.as_ref().and_then(|m| self.get(m))
     }
 
+    /// MAC of the accessory that last ran a session through to AirPlay. `[bluetooth] device =
+    /// "auto"` prefers it, so the usual case is the car you were in yesterday rather than a scan.
+    pub fn last_mac(&self) -> Option<&str> {
+        self.file.last.as_deref()
+    }
+
     /// Record an accessory's display and mark it the most recent, persisting if anything changed.
     pub fn remember(&mut self, mac: &str, props: DisplayProps) {
         let unchanged = self.file.displays.get(mac) == Some(&props);

@@ -17,13 +17,18 @@ use tokio_stream::StreamExt;
 use libcarjack::uuid::{CARPLAY_DEVICE_UUID, IAP_ACCESSORY_UUID, IAP_DEVICE_UUID};
 use libcarjack::{carplay_init::DeviceIdentity, sdp::iap::iap_service_record};
 
-use carjack::config::Hfp;
+use carjack::config::{Hfp, Target};
 
 use crate::wireless::hfp;
 
 const IAP_CHANNEL: u16 = 1;
 
 const DISCOVERY_WAIT: Duration = Duration::from_secs(60);
+
+/// How long `auto` gathers inquiry results before ranking them, so the unit in this car wins on
+/// signal strength rather than on which one BlueZ happened to report first.
+const AUTO_SCAN_WINDOW: Duration = Duration::from_secs(6);
+const AUTO_SCAN_TICK: Duration = Duration::from_millis(500);
 
 /// A page timeout usually just means the controller missed; it often answers on a later try.
 const PAGE_ATTEMPTS: usize = 3;
@@ -220,19 +225,41 @@ pub(crate) fn dial_accessory(device: &Device) {
 pub(crate) async fn request_is_target(
     adapter: &Adapter,
     from: Address,
-    target: &str,
+    target: &Target,
     wanted: Option<Address>,
 ) -> bool {
-    match wanted {
-        Some(addr) => from == addr,
-        None => match adapter.device(from) {
-            Ok(device) => device_matches(&device, target, None).await,
+    match target {
+        Target::Auto => match adapter.device(from) {
+            // Nothing but a CarPlay unit dials our iAP profile, so SDP that has not resolved yet
+            // is not a reason to refuse the request.
+            Ok(device) => match device.uuids().await {
+                Ok(Some(uuids)) => uuids.contains(&IAP_ACCESSORY_UUID),
+                Ok(None) | Err(_) => true,
+            },
             Err(_) => false,
+        },
+        Target::Selector(selector) => match wanted {
+            Some(addr) => from == addr,
+            None => match adapter.device(from) {
+                Ok(device) => device_matches(&device, selector, None).await,
+                Err(_) => false,
+            },
         },
     }
 }
 
-pub(crate) async fn find_target_device(adapter: &Adapter, target: &str) -> Result<Device> {
+pub(crate) async fn find_target_device(
+    adapter: &Adapter,
+    target: &Target,
+    remembered: Option<Address>,
+) -> Result<Device> {
+    match target {
+        Target::Selector(selector) => find_selected_device(adapter, selector).await,
+        Target::Auto => find_any_head_unit(adapter, remembered).await,
+    }
+}
+
+async fn find_selected_device(adapter: &Adapter, target: &str) -> Result<Device> {
     let wanted: Option<Address> = target.parse().ok();
 
     // Prefer whatever BlueZ already knows (bonded, or currently connected).
@@ -275,6 +302,90 @@ pub(crate) async fn find_target_device(adapter: &Adapter, target: &str) -> Resul
     tracing::info!(%target, address = ?found.address(), "Discovered configured head unit");
     let device = prepare_device(found).await?;
     Ok(device)
+}
+
+/// Whether BlueZ has resolved this device as offering the iAP accessory service - the one thing
+/// every CarPlay head unit hosts, and nothing else does.
+async fn offers_iap(device: &Device) -> bool {
+    device
+        .uuids()
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|uuids| uuids.contains(&IAP_ACCESSORY_UUID))
+}
+
+/// Head units BlueZ is seeing *right now*, with their signal strength.
+///
+/// The liveness test is RSSI: bluer documents it as `None` for a device that is known but not
+/// currently present, so it separates the units in range from everything BlueZ has ever bonded.
+/// The UUID is re-checked per device because BlueZ ORs the discovery filters of all its clients
+/// together - ours alone does not guarantee what gets reported.
+async fn present_head_units(adapter: &Adapter) -> Vec<(Address, i16)> {
+    let mut found = Vec::new();
+    for addr in adapter.device_addresses().await.unwrap_or_default() {
+        let Ok(device) = adapter.device(addr) else {
+            continue;
+        };
+        let Ok(Some(rssi)) = device.rssi().await else {
+            continue;
+        };
+        if offers_iap(&device).await {
+            found.push((addr, rssi));
+        }
+    }
+    found
+}
+
+async fn find_any_head_unit(adapter: &Adapter, remembered: Option<Address>) -> Result<Device> {
+    adapter
+        .set_discovery_filter(DiscoveryFilter {
+            uuids: std::collections::HashSet::from([IAP_ACCESSORY_UUID]),
+            discoverable: true,
+            transport: bluer::DiscoveryTransport::BrEdr,
+            rssi: Some(-100),
+            ..DiscoveryFilter::default()
+        })
+        .await?;
+    tracing::info!("Looking for any CarPlay head unit in range");
+
+    // Held for the whole scan: dropping the stream stops discovery, and with it the RSSI updates
+    // that `present_head_units` reads.
+    let _discovery = adapter.discover_devices_with_changes().await?;
+
+    let deadline = tokio::time::Instant::now() + AUTO_SCAN_WINDOW;
+    let give_up = tokio::time::Instant::now() + DISCOVERY_WAIT;
+    let mut ticker = tokio::time::interval(AUTO_SCAN_TICK);
+    let best = loop {
+        ticker.tick().await;
+        let present = present_head_units(adapter).await;
+
+        // The unit from last time, back in range: no reason to spend the rest of the window
+        // ranking it against neighbours.
+        if let Some(remembered) = remembered
+            && present.iter().any(|(addr, _)| *addr == remembered)
+        {
+            tracing::info!(address = ?remembered, "Found the head unit from the last session");
+            break remembered;
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline
+            && let Some((addr, rssi)) = present.iter().max_by_key(|(_, rssi)| *rssi)
+        {
+            tracing::info!(
+                address = ?addr, rssi,
+                candidates = present.len(),
+                "Picked the strongest CarPlay head unit in range"
+            );
+            break *addr;
+        }
+        if now >= give_up {
+            return Err(eyre!("No CarPlay head unit came into range"));
+        }
+    };
+
+    prepare_device(adapter.device(best)?).await
 }
 
 async fn device_matches(device: &Device, target: &str, wanted: Option<Address>) -> bool {

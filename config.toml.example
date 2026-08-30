@@ -1,9 +1,13 @@
 source = "app"
 
 [bluetooth]
+#   device = "auto"                # whichever CarPlay unit is in range, strongest signal first
 #   device = "AA:BB:CC:DD:EE:FF"   # by MAC
 #   device = "MYCAR-1234"          # by advertised name
-device = "MYCAR-1234"
+# "auto" scans for units hosting the iAP accessory service and takes the strongest, so it picks the
+# unit in this car over one parked next door. The unit that last ran a session through to AirPlay
+# wins outright when it is in range, which also skips the scan window.
+device = "auto"
 
 [graphics]
 #   "auto"

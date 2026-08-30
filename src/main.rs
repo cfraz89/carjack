@@ -6,7 +6,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 
 use carjack::compositor::Compositor;
-use carjack::config::{Cli, Config, Source};
+use carjack::config::{Cli, Config, Source, Target};
 use carjack::display_cache::DisplayCache;
 use carjack::encode::{self, Bitrate};
 use clap::Parser;
@@ -39,8 +39,8 @@ async fn main() -> Result<()> {
 
     if config.bluetooth_device().is_none() {
         return Err(eyre!(
-            "no head unit configured - set [bluetooth] device (its MAC or advertised name) in \
-             config.toml, or pass --bt-device, or set CARJACK.BLUETOOTH.DEVICE"
+            "no head unit configured - set [bluetooth] device in config.toml to \"auto\", or to a \
+             unit's MAC or advertised name; or pass --bt-device, or set CARJACK.BLUETOOTH.DEVICE"
         ));
     }
 
@@ -213,7 +213,7 @@ async fn run_desktop(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
     let zerocopy = config.graphics.zerocopy;
     let codec = config.graphics.codec;
     let bitrate = Bitrate::from_kbps(config.graphics.bitrate);
-    let bt_device = config.bluetooth_device().unwrap_or_default().to_owned();
+    let bt_device = config.bluetooth_device().unwrap_or(Target::Auto);
 
     let exit = loop {
         tokio::select! {
