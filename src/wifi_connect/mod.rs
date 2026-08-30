@@ -1,7 +1,8 @@
 //! WiFi backend abstraction. NetworkManager is the only implementation; the trait is the seam
 //! [`crate::session`] holds, so it stays a trait.
 
-mod networkmanager;
+pub(crate) mod networkmanager;
+pub mod setup_ap;
 
 use std::future::Future;
 use std::time::Duration;

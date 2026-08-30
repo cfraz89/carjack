@@ -36,7 +36,7 @@ static NETWORK_MANAGER: OnceCell<NetworkManagerProxy<'static>> = OnceCell::const
 
 /// The NetworkManager proxy, built once. Its D-Bus connection is what the accessory's profile binds its
 /// activation to, so it has to outlive every session.
-async fn get_network_manager() -> &'static NetworkManagerProxy<'static> {
+pub(crate) async fn get_network_manager() -> &'static NetworkManagerProxy<'static> {
     NETWORK_MANAGER
         .get_or_init(async || {
             let connection = zbus::Connection::system()

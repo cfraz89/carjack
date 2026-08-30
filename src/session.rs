@@ -520,6 +520,7 @@ pub async fn run_session(
     compositor: &Compositor,
     backend: &EncodeBackend,
     config: &Config,
+    target: &Target,
     app: &mut DesktopApp,
     cache: &mut DisplayCache,
     wifi: &Arc<dyn WifiBackend>,
@@ -533,7 +534,7 @@ pub async fn run_session(
         handover,
     } = establish_carplay(
         host.clone(),
-        &config.bluetooth_device().unwrap_or(Target::Auto),
+        target,
         cache.last_mac().and_then(|m| m.parse().ok()),
         wifi,
     )

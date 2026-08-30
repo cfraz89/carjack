@@ -80,6 +80,7 @@ zbus = { version = "5.18.0", features = ["tokio"] }
 thiserror = "2.0.19"
 chrono = "0.4"
 reis = { version = "0.7.0", features = ["tokio"] }
+topcoat = "0.6.2"
 
 [features]
 # NVIDIA zero-copy encode (`nvh264enc` via `cuda-dmabuf`). Off by default so the project builds on
@@ -104,7 +105,9 @@ path = ".claude/skills/run-carjack/touchtest.rs"
 [package.metadata.deb]
 maintainer = "Christopher Fraser <cfraz89@gmail.com>"
 copyright = "2026, Christopher Fraser <cfraz89@gmail.com>"
-depends = "$auto"
+# dnsmasq-base and nftables are what `ipv4.method=shared` needs to serve DHCP and NAT on the setup
+# AP; neither is picked up by $auto, which only reads the linked libraries.
+depends = "$auto, dnsmasq-base, nftables"
 section = "utility"
 priority = "optional"
 extended-description = """\
@@ -119,6 +122,9 @@ assets = [
     ["carjack.service", "usr/lib/systemd/user/carjack.service", "644"],
     # Stops PipeWire taking the hands-free gateway UUID src/wireless/hfp.rs registers.
     ["wireplumber/51-carjack-hfp-ag.conf", "etc/wireplumber/wireplumber.conf.d/51-carjack-hfp-ag.conf", "644"],
+    # Advertises the config portal over DHCP option 114 on the setup AP. System-wide because the
+    # dnsmasq it configures is NetworkManager's, not carjack's.
+    ["dnsmasq-shared-carjack.conf", "etc/NetworkManager/dnsmasq-shared.d/carjack.conf", "644"],
 ]
 
 [dev-dependencies]

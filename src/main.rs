@@ -18,6 +18,7 @@ mod app_service;
 mod libei;
 mod portal;
 mod session;
+mod setup_portal;
 mod usb;
 mod wifi_connect;
 mod wireless;
@@ -38,10 +39,10 @@ async fn main() -> Result<()> {
     let config = Config::load(&Cli::parse())?;
 
     if config.bluetooth_device().is_none() {
-        return Err(eyre!(
-            "no head unit configured - set [bluetooth] device in config.toml to \"auto\", or to a \
-             unit's MAC or advertised name; or pass --bt-device, or set CARJACK.BLUETOOTH.DEVICE"
-        ));
+        tracing::info!(
+            "No head unit configured; taking any CarPlay unit in range. Pick one from the config \
+             portal, or set [bluetooth] device in config.toml"
+        );
     }
 
     // Shared HomeKit identity across both source paths and runs - in the state dir, not the cache,
@@ -99,11 +100,65 @@ async fn shutdown_requested() {
     }
 }
 
+/// Consecutive failed sessions against a named head unit before the run gives up on it and takes
+/// whatever CarPlay unit is in range instead. A unit that is off, asleep or gone is otherwise
+/// retried forever, with a working one sitting right next to it.
+const AUTO_FALLBACK_AFTER: u32 = 3;
+
+/// Count a failed session, and hand back the target the next one should use.
+fn after_failure(target: Target, failures: &mut u32) -> Target {
+    *failures += 1;
+    if *failures < AUTO_FALLBACK_AFTER {
+        return target;
+    }
+    match target {
+        Target::Auto => Target::Auto,
+        Target::Selector(selector) => {
+            tracing::warn!(
+                %selector,
+                "Head unit has not answered in {AUTO_FALLBACK_AFTER} attempts; falling back to \
+                 any CarPlay unit in range for the rest of this run"
+            );
+            *failures = 0;
+            Target::Auto
+        }
+    }
+}
+
 /// Await a stop request or the retry backoff between sessions; returns `true` if we should stop.
 async fn backoff_or_ctrl_c() -> bool {
     tokio::select! {
         _ = shutdown_requested() => true,
         _ = tokio::time::sleep(Duration::from_secs(2)) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_named_unit_gives_way_to_auto_after_enough_failures() {
+        let mut failures = 0;
+        let mut target = Target::Selector("MYCAR-1234".into());
+        for _ in 1..AUTO_FALLBACK_AFTER {
+            target = after_failure(target, &mut failures);
+            assert_eq!(target, Target::Selector("MYCAR-1234".into()));
+        }
+        target = after_failure(target, &mut failures);
+        assert_eq!(target, Target::Auto);
+    }
+
+    /// Once it is on auto there is nothing further to fall back to, and the counter must not run
+    /// away either.
+    #[test]
+    fn auto_stays_auto() {
+        let mut failures = 0;
+        let mut target = Target::Auto;
+        for _ in 0..AUTO_FALLBACK_AFTER * 3 {
+            target = after_failure(target, &mut failures);
+            assert_eq!(target, Target::Auto);
+        }
     }
 }
 
@@ -157,6 +212,16 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
         app.launch();
     }
 
+    let portal = setup_portal::Portal::start(
+        config.wifi.clone(),
+        host.adapter.clone(),
+        &host.bluetooth_address().await.unwrap_or_default(),
+    )
+    .await;
+
+    let mut target = config.bluetooth_device().unwrap_or(Target::Auto);
+    let mut failures = 0u32;
+
     // Each session runs the full flow (Bluetooth -> WiFi -> AirPlay); on failure, restart from a
     // fresh Bluetooth connection instead of exiting.
     let exit = loop {
@@ -165,7 +230,7 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
                 tracing::info!("Ctrl-C received, shutting down");
                 break Ok(());
             }
-            result = session::run_session(&host, &compositor, &backend, &config, &mut app, &mut cache, &wifi) => {
+            result = session::run_session(&host, &compositor, &backend, &config, &target, &mut app, &mut cache, &wifi) => {
                 match result {
                     Ok(()) => {
                         tracing::info!("Session ended cleanly, exiting");
@@ -173,6 +238,7 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
                     }
                     Err(e) => {
                         tracing::warn!("Session failed, restarting from Bluetooth: {e}");
+                        target = after_failure(target, &mut failures);
                         if backoff_or_ctrl_c().await {
                             break Ok(());
                         }
@@ -181,6 +247,7 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
             }
         }
     };
+    portal.stop();
 
     // The app is a client of the service, which is a client of the compositor.
     app.kill();
@@ -213,7 +280,8 @@ async fn run_desktop(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
     let zerocopy = config.graphics.zerocopy;
     let codec = config.graphics.codec;
     let bitrate = Bitrate::from_kbps(config.graphics.bitrate);
-    let bt_device = config.bluetooth_device().unwrap_or(Target::Auto);
+    let mut target = config.bluetooth_device().unwrap_or(Target::Auto);
+    let mut failures = 0u32;
 
     let exit = loop {
         tokio::select! {
@@ -221,7 +289,7 @@ async fn run_desktop(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
                 tracing::info!("Ctrl-C received, shutting down");
                 break Ok(());
             }
-            result = session::run_desktop_session(&host, &rd, zerocopy, codec, bitrate, &bt_device, &wifi) => {
+            result = session::run_desktop_session(&host, &rd, zerocopy, codec, bitrate, &target, &wifi) => {
                 // Lift anything still held: the input session outlives accessory sessions.
                 rd.end_session();
                 match result {
@@ -231,6 +299,7 @@ async fn run_desktop(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
                     }
                     Err(e) => {
                         tracing::warn!("Session failed, restarting from Bluetooth: {e}");
+                        target = after_failure(target, &mut failures);
                         if backoff_or_ctrl_c().await {
                             break Ok(());
                         }

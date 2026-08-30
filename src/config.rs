@@ -349,8 +349,8 @@ pub struct Cli {
     #[arg(long, action = clap::ArgAction::Set, value_name = "BOOL")]
     pub resizable: Option<bool>,
 
-    /// Override [bluetooth] device: the head unit's MAC or advertised name.
-    #[arg(long, value_name = "MAC|NAME")]
+    /// Override [bluetooth] device: "auto", or the head unit's MAC or advertised name.
+    #[arg(long, value_name = "AUTO|MAC|NAME")]
     pub bt_device: Option<String>,
 }
 
@@ -363,6 +363,10 @@ impl Config {
         let mut builder = config::Config::builder();
         if let Some(p) = &path {
             builder = builder.add_source(config::File::from(p.clone()));
+        }
+        // The config portal's own file, over the hand-written one - see `crate::stored_settings`.
+        if let Some(p) = crate::stored_settings::StoredSettings::path().filter(|p| p.exists()) {
+            builder = builder.add_source(config::File::from(p));
         }
         // `CARJACK.<dotted.path>` overrides any setting - dots throughout, including the prefix
         // separator (not the crate's default `_`), to match the config paths.
