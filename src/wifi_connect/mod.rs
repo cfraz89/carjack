@@ -38,8 +38,8 @@ pub trait WifiBackend: Send + Sync {
     ) -> Result<AccessoryWifi>;
 }
 
-pub(crate) fn build() -> Box<dyn WifiBackend> {
-    Box::new(networkmanager::NetworkManagerBackend)
+pub(crate) fn build(wifi: carjack::config::Wifi) -> Box<dyn WifiBackend> {
+    Box::new(networkmanager::NetworkManagerBackend { wifi })
 }
 
 /// Log and unwrap the "are we already on this accessory's network" query, so

@@ -9,6 +9,13 @@ source = "app"
 # wins outright when it is in range, which also skips the scan window.
 device = "auto"
 
+# Which adapter does what, on a board with two. Either an interface name or a MAC.
+# Left unset, CarPlay takes the first non-USB adapter (the one on the board) and the uplink takes
+# what is left - so a plug-in dongle becomes the uplink without being named here.
+# [wifi]
+# carplay = "wlp1s0"
+# uplink = "wlx00c0ca123456"
+
 [graphics]
 #   "auto"
 #   "nvidia" / "amdgpu" / "i915" - pick by driver

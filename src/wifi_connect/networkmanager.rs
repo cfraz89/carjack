@@ -19,6 +19,8 @@ use std::time::Duration;
 use tap::TapFallible;
 use tokio::sync::OnceCell;
 
+use carjack::config::{Wifi, WifiRole};
+
 use super::{AccessoryWifi, WifiBackend};
 
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -47,12 +49,14 @@ async fn get_network_manager() -> &'static NetworkManagerProxy<'static> {
         .await
 }
 
-pub(crate) struct NetworkManagerBackend;
+pub(crate) struct NetworkManagerBackend {
+    pub(crate) wifi: Wifi,
+}
 
 #[async_trait]
 impl WifiBackend for NetworkManagerBackend {
     async fn get_wifi_mac(&self) -> Result<String> {
-        get_wifi_mac().await
+        get_wifi_mac(&self.wifi).await
     }
 
     async fn connect_to_accessory_wifi(
@@ -61,21 +65,22 @@ impl WifiBackend for NetworkManagerBackend {
         passphrase: &str,
         accessory_mac: Option<&str>,
     ) -> Result<AccessoryWifi> {
-        connect_to_accessory_wifi(ssid, passphrase, accessory_mac).await
+        connect_to_accessory_wifi(&self.wifi, ssid, passphrase, accessory_mac).await
     }
 }
 
 async fn connect_to_accessory_wifi(
+    wifi: &Wifi,
     ssid: &str,
     passphrase: &str,
     accessory_mac: Option<&str>,
 ) -> Result<AccessoryWifi> {
-    if let Some(accessory_wifi) = super::reuse_if_live(ssid, live_connection(ssid).await) {
+    if let Some(accessory_wifi) = super::reuse_if_live(ssid, live_connection(wifi, ssid).await) {
         return Ok(accessory_wifi);
     }
 
     // The same address we announced over iAP2 - the accessory waits for exactly that station.
-    let announced = get_wifi_mac().await?;
+    let announced = get_wifi_mac(wifi).await?;
     let announced_mac = match MacAddress::from_str(&announced) {
         Ok(mac) => AssignedMacAddress::Address(mac),
         Err(e) => {
@@ -84,14 +89,19 @@ async fn connect_to_accessory_wifi(
         }
     };
 
+    // Resolved once, not per attempt: the profile is pinned to this interface, so which adapter
+    // the accessory's connection lands on must not drift between retries.
+    let device = wifi_device(wifi).await?;
+    let iface = device.interface().await?;
+    tracing::info!(%iface, "Joining the accessory on the CarPlay adapter");
+
     let owned_accessory_mac = accessory_mac.map(str::to_owned);
     super::connect_with_known_settings(
         accessory_mac,
-        enclose!((announced_mac, announced, owned_accessory_mac) |disable_he| { async move {
+        enclose!((announced_mac, announced, owned_accessory_mac, device, iface) |disable_he| { async move {
             let accessory_mac = owned_accessory_mac.as_deref();
-            let profile = accessory_profile(ssid, passphrase, announced_mac, disable_he, accessory_mac);
+            let profile = accessory_profile(ssid, passphrase, announced_mac, disable_he, accessory_mac, &iface);
             let nm = get_network_manager().await;
-            let device = wifi_device().await?;
             let (conn, active) = match accessory_connection(nm, &profile).await {
                 Some(existing) => {
                     tracing::info!(path = ?existing.object_path(), "Reusing this accessory's wifi profile");
@@ -243,6 +253,7 @@ fn accessory_profile(
     announced_mac: AssignedMacAddress,
     disable_he: bool,
     accessory_mac: Option<&str>,
+    iface: &str,
 ) -> ConnectionProfile {
     let wireless = WirelessSetting::default()
         .ssid(ssid)
@@ -250,9 +261,11 @@ fn accessory_profile(
         .assigned_mac_address(announced_mac)
         .disable_he(disable_he);
     // `.connection()` replaces the whole setting, dropping the id `ConnectionProfile::new` put there.
+    // Pinned to the CarPlay adapter so it can never activate on the uplink one.
     let connection = ConnectionSetting::default()
         .id(ssid)
         .uuid(accessory_uuid(ssid, accessory_mac).to_string())
+        .interface_name(iface)
         .autoconnect(false);
     let mut profile = ConnectionProfile::new(ssid)
         .connection(connection)
@@ -262,8 +275,18 @@ fn accessory_profile(
                 .key_mgmt(WirelessSecurityKeyMgmt::WpaPsk)
                 .psk(passphrase),
         )
-        .ipv4(Ipv4Setting::default().method(Ipv4Method::Auto))
-        .ipv6(Ipv6Setting::default().method(Ipv6Method::LinkLocal));
+        // The head unit's DHCP hands out a default route to a network with no internet on it.
+        // Taking it would blackhole everything the uplink adapter is carrying.
+        .ipv4(
+            Ipv4Setting::default()
+                .method(Ipv4Method::Auto)
+                .never_default(true),
+        )
+        .ipv6(
+            Ipv6Setting::default()
+                .method(Ipv6Method::LinkLocal)
+                .never_default(true),
+        );
     if let Some(accessory_mac) = accessory_mac {
         profile = profile.user(UserSetting::default().data(HashMap::from([(
             ACCESSORY_TAG.to_owned(),
@@ -301,8 +324,8 @@ async fn wait_for_activation(active: &ActiveProxy<'_>) -> Result<()> {
 
 /// The current WiFi connection, if it is already on `ssid` and carries an address - i.e. there is
 /// nothing left for `connect_to_accessory_wifi` to do. `None` means "not it, go and connect".
-async fn live_connection(ssid: &str) -> Result<Option<AccessoryWifi>> {
-    let device = wifi_device().await?;
+async fn live_connection(wifi: &Wifi, ssid: &str) -> Result<Option<AccessoryWifi>> {
+    let device = wifi_device(wifi).await?;
     // Compared as SSIDs rather than as text: an access point names itself in bytes, and only the
     // bytes decide whether this is the same network.
     if device.state().await? != DeviceState::Activated
@@ -353,27 +376,109 @@ async fn accessory_wifi(
     })
 }
 
-/// The WiFi device to run the accessory's connection on: whichever one is already up, else the first
-/// the daemon lists.
-async fn wifi_device() -> Result<DeviceProxy<'static>> {
+/// Every WiFi device the daemon knows, ordered by interface name so the roles below are stable
+/// across reboots.
+async fn wifi_devices() -> Result<Vec<DeviceProxy<'static>>> {
     let mut wifi = Vec::new();
     for device in get_network_manager().await.get_devices().await? {
         if device.device_type().await? == DeviceType::Wifi {
-            wifi.push(device);
+            let iface = device.interface().await.unwrap_or_default();
+            wifi.push((iface, device));
         }
     }
-    for device in &wifi {
-        if device.state().await? == DeviceState::Activated {
-            return Ok(device.clone());
-        }
-    }
-    wifi.into_iter()
-        .next()
-        .ok_or(eyre!("No wifi devices on system"))
+    wifi.sort_by(|(a, _), (b, _)| a.cmp(b));
+    Ok(wifi.into_iter().map(|(_, device)| device).collect())
 }
 
-async fn get_wifi_mac() -> Result<String> {
-    let device = wifi_device().await?;
+/// Whether an interface hangs off USB, which is how the plug-in adapter is told from the one
+/// soldered to the board.
+fn is_usb(iface: &str) -> bool {
+    std::fs::read_link(format!("/sys/class/net/{iface}/device"))
+        .map(|p| p.to_string_lossy().contains("usb"))
+        .unwrap_or(false)
+}
+
+/// Whether `selector` names this device, by interface name or by either of its MACs.
+async fn device_is(device: &DeviceProxy<'_>, selector: &str) -> bool {
+    if device
+        .interface()
+        .await
+        .is_ok_and(|i| i.eq_ignore_ascii_case(selector))
+    {
+        return true;
+    }
+    let permanent = match device.cast::<WirelessProxy>().await {
+        Ok(wifi) => wifi
+            .perm_hw_address()
+            .await
+            .ok()
+            .and_then(|a| a.non_empty()),
+        Err(_) => None,
+    };
+    let current = device.hw_address().await.ok();
+    [permanent, current]
+        .into_iter()
+        .flatten()
+        .any(|mac| mac.eq_ignore_ascii_case(selector))
+}
+
+/// The adapter playing `role`.
+///
+/// Unconfigured, the CarPlay role goes to the first non-USB adapter (the one on the board) and the
+/// uplink to the first that is left. Picking "whichever is already up" instead would hand CarPlay
+/// the uplink adapter the moment it associates with a home network - and, through
+/// [`get_wifi_mac`], change the address carjack announces over iAP2 with it.
+pub(crate) async fn role_device(
+    role: WifiRole,
+    selector: Option<&str>,
+) -> Result<DeviceProxy<'static>> {
+    let devices = wifi_devices().await?;
+    if devices.is_empty() {
+        return Err(eyre!("No wifi devices on system"));
+    }
+
+    if let Some(selector) = selector {
+        for device in &devices {
+            if device_is(device, selector).await {
+                return Ok(device.clone());
+            }
+        }
+        return Err(eyre!(
+            "No wifi adapter matching '{selector}' for the {role:?} role"
+        ));
+    }
+
+    let mut carplay = None;
+    for device in &devices {
+        let iface = device.interface().await.unwrap_or_default();
+        if !is_usb(&iface) {
+            carplay = Some(device.clone());
+            break;
+        }
+    }
+    let carplay = carplay.unwrap_or_else(|| devices[0].clone());
+
+    match role {
+        WifiRole::Carplay => Ok(carplay),
+        WifiRole::Uplink => {
+            let carplay_path = carplay.inner().path().to_owned();
+            devices
+                .into_iter()
+                .find(|d| d.inner().path() != &carplay_path)
+                .ok_or(eyre!(
+                    "Only one wifi adapter, and CarPlay has it - the uplink needs a second one"
+                ))
+        }
+    }
+}
+
+/// The adapter the accessory's connection runs on.
+async fn wifi_device(wifi: &Wifi) -> Result<DeviceProxy<'static>> {
+    role_device(WifiRole::Carplay, wifi.selector(WifiRole::Carplay)).await
+}
+
+async fn get_wifi_mac(wifi: &Wifi) -> Result<String> {
+    let device = wifi_device(wifi).await?;
     let wifi: WirelessProxy = device.cast().await?;
     // Derived from the permanent address rather than being it - see `super::announced_wifi_mac`.
     // The accessory's profile pins itself to the same value, so what we announce is what associates.
@@ -412,14 +517,15 @@ mod tests {
     fn live_connection_matches_only_the_current_ssid() {
         runtime().block_on(async {
             let ssid = std::env::var("CARJACK_TEST_SSID").expect("set CARJACK_TEST_SSID");
-            let found = super::live_connection(&ssid)
+            let wifi = carjack::config::Wifi::default();
+            let found = super::live_connection(&wifi, &ssid)
                 .await
                 .expect("querying the current connection failed")
                 .expect("the SSID we are on should match");
             assert!(!found.iface.is_empty());
 
             assert!(
-                super::live_connection("carjack-definitely-not-connected")
+                super::live_connection(&wifi, "carjack-definitely-not-connected")
                     .await
                     .expect("querying an unrelated SSID failed")
                     .is_none()
@@ -446,6 +552,7 @@ mod tests {
                 AssignedMacAddress::Permanent,
                 false,
                 Some("AA:BB:CC:DD:EE:FF"),
+                "wlan0",
             );
 
             let stored = settings
@@ -503,6 +610,7 @@ mod tests {
             AssignedMacAddress::Permanent,
             true,
             None,
+            "wlan0",
         );
         assert_eq!(
             profile.wireless.expect("no wireless setting").disable_he,
@@ -515,10 +623,42 @@ mod tests {
             AssignedMacAddress::Permanent,
             false,
             None,
+            "wlan0",
         );
         assert_eq!(
             profile.wireless.expect("no wireless setting").disable_he,
             Some(false)
+        );
+    }
+
+    /// The accessory's link carries no internet, and on a two-adapter board it is not the only
+    /// link. Both of these keep it from taking over the default route or the wrong radio.
+    #[test]
+    fn the_accessory_profile_is_pinned_and_never_the_default_route() {
+        let profile = super::accessory_profile(
+            "bench-1234",
+            "hunter2hunter2",
+            AssignedMacAddress::Permanent,
+            false,
+            Some("AA:BB:CC:DD:EE:FF"),
+            "wlp2s0",
+        );
+        assert_eq!(
+            profile
+                .connection
+                .as_ref()
+                .expect("no connection setting")
+                .interface_name
+                .as_deref(),
+            Some("wlp2s0")
+        );
+        assert_eq!(
+            profile.ipv4.expect("no ipv4 setting").never_default,
+            Some(true)
+        );
+        assert_eq!(
+            profile.ipv6.expect("no ipv6 setting").never_default,
+            Some(true)
         );
     }
 
@@ -529,6 +669,7 @@ mod tests {
             AssignedMacAddress::Address(announced()),
             false,
             mac,
+            "wlan0",
         )
     }
 
@@ -614,6 +755,7 @@ mod tests {
             AssignedMacAddress::Permanent,
             false,
             None,
+            "wlan0",
         );
         assert!(!super::superseded_by(&someone_elses, &want));
     }

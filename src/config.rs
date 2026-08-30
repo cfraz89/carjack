@@ -15,6 +15,38 @@ pub struct Config {
     pub app: App,
     pub bluetooth: Bluetooth,
     pub hfp: Hfp,
+    pub wifi: Wifi,
+}
+
+/// Which physical adapter plays which role, on a board with more than one.
+///
+/// Both accept an interface name (`wlan0`) or a MAC, and both may be left unset - see
+/// [`Wifi::selector`] for what that resolves to.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Wifi {
+    /// Associates with the head unit's access point.
+    pub carplay: String,
+    /// Carries the internet uplink, and hosts the setup AP when there is nothing to connect to.
+    pub uplink: String,
+}
+
+/// The two things a WiFi adapter can be doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WifiRole {
+    Carplay,
+    Uplink,
+}
+
+impl Wifi {
+    /// The configured selector for a role, or `None` to let the backend work it out.
+    pub fn selector(&self, role: WifiRole) -> Option<&str> {
+        let s = match role {
+            WifiRole::Carplay => self.carplay.trim(),
+            WifiRole::Uplink => self.uplink.trim(),
+        };
+        (!s.is_empty()).then_some(s)
+    }
 }
 
 /// What carjack's hands-free gateway answers the unit's identity probe with. The defaults are an
@@ -756,6 +788,24 @@ mod tests {
         assert_eq!(
             Config::load(&cli).unwrap().bluetooth_device(),
             Some(Target::Auto)
+        );
+    }
+
+    #[test]
+    fn wifi_roles_default_to_unset() {
+        let cfg = parse_toml("");
+        assert_eq!(cfg.wifi.selector(WifiRole::Carplay), None);
+        assert_eq!(cfg.wifi.selector(WifiRole::Uplink), None);
+
+        let cfg = parse_toml("[wifi]\ncarplay = \"wlan0\"\nuplink = \"  \"\n");
+        assert_eq!(cfg.wifi.selector(WifiRole::Carplay), Some("wlan0"));
+        // Whitespace is not a selector, it is an unset field.
+        assert_eq!(cfg.wifi.selector(WifiRole::Uplink), None);
+
+        let cfg = parse_toml("[wifi]\nuplink = \"AA:BB:CC:DD:EE:FF\"\n");
+        assert_eq!(
+            cfg.wifi.selector(WifiRole::Uplink),
+            Some("AA:BB:CC:DD:EE:FF")
         );
     }
 
