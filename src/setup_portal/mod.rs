@@ -17,7 +17,8 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use topcoat::router::{Router, RouterBuilderDiscoverExt};
 
-use carjack::config::Wifi;
+use carjack::config::{Config, Wifi};
+use carjack::stored_settings::StoredSettings;
 
 use crate::wifi_connect::setup_ap::SetupAp;
 
@@ -40,20 +41,16 @@ impl Portal {
     /// Serve the portal, raising the setup AP first if the uplink adapter has nothing better to
     /// do. Never fatal: a board with one adapter still gets the portal on whatever network it is
     /// already on, and a board with none still runs CarPlay.
-    pub async fn start(wifi: Wifi, adapter: Adapter, bluetooth_address: &str) -> Self {
+    ///
+    /// `None` when `[portal] enabled` is false, and then nothing is raised or served.
+    pub async fn start(config: &Config, adapter: Adapter) -> Option<Self> {
+        if !config.portal.enabled {
+            tracing::info!("Config portal disabled by [portal] enabled = false");
+            return None;
+        }
+        let wifi = config.wifi.clone();
         let ap = if SetupAp::uplink_is_idle(&wifi).await {
-            let ssid = ap_ssid();
-            let passphrase = ap_passphrase(bluetooth_address);
-            match SetupAp::raise(&wifi, &ssid, &passphrase).await {
-                Ok(ap) => {
-                    tracing::info!(%ssid, %passphrase, "Setup network is up");
-                    Some(ap)
-                }
-                Err(e) => {
-                    tracing::warn!("Could not raise the setup network: {e}");
-                    None
-                }
-            }
+            raise_ap(&wifi).await
         } else {
             tracing::info!("Uplink adapter is already on a network; not raising the setup one");
             None
@@ -66,10 +63,10 @@ impl Portal {
         });
         let shutdown = CancellationToken::new();
         let server = tokio::spawn(serve(state, shutdown.clone()));
-        Portal {
+        Some(Portal {
             shutdown,
             _server: tokio_util::task::AbortOnDropHandle::new(server),
-        }
+        })
     }
 
     pub fn stop(&self) {
@@ -77,26 +74,73 @@ impl Portal {
     }
 }
 
-/// Above 1024 so the user service can bind it without privileges, and matched by the DHCP option
-/// 114 URL in `dnsmasq-shared-carjack.conf`. Change one and change the other.
-pub const PORT: u16 = 8080;
+/// Raise the setup AP on the stored passphrase, warning loudly while it is still the shipped one.
+pub async fn raise_ap(wifi: &Wifi) -> Option<SetupAp> {
+    let settings = StoredSettings::load();
+    let ssid = ap_ssid();
+    let passphrase = settings.ap_passphrase().to_owned();
+    match SetupAp::raise(wifi, &ssid, &passphrase).await {
+        Ok(ap) => {
+            if settings.ap_passphrase_is_default() {
+                tracing::warn!(
+                    %ssid, %passphrase,
+                    "Setup network is up on the password it shipped with - the portal will ask \
+                     for a new one before it does anything else"
+                );
+            } else {
+                tracing::info!(%ssid, "Setup network is up");
+            }
+            Some(ap)
+        }
+        Err(e) => {
+            tracing::warn!("Could not raise the setup network: {e}");
+            None
+        }
+    }
+}
+
+/// What the packaged DHCP option 114 URL names, and what the packaged sysctl drop-in
+/// (`carjack-sysctl.conf`) lowers `ip_unprivileged_port_start` to so a user service can bind it.
+pub const PORT: u16 = 80;
+
+/// Used when port 80 is refused, which is what happens without that sysctl - a dev box, or a
+/// package installed without it.
+pub const FALLBACK_PORT: u16 = 8080;
 
 /// Serve the portal until `shutdown` fires.
 ///
 /// Bound on all interfaces: reachable on the setup AP, and on whatever network the uplink adapter
 /// later joins, which is how you reach it once the AP is gone.
 pub async fn serve(state: Arc<PortalState>, shutdown: tokio_util::sync::CancellationToken) {
+    let address = crate::wifi_connect::setup_ap::AP_ADDRESS;
     let listener = match TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT))).await {
-        Ok(listener) => listener,
+        Ok(listener) => {
+            tracing::info!("Config portal on http://{address}/");
+            listener
+        }
         Err(e) => {
-            tracing::warn!("Config portal could not bind port {PORT}: {e}");
-            return;
+            match TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, FALLBACK_PORT))).await
+            {
+                Ok(listener) => {
+                    // The option 114 URL is baked into a packaged file and still names port 80,
+                    // so on this path phones will not be sent anywhere useful.
+                    tracing::warn!(
+                        "Port {PORT} refused ({e}); serving the config portal on \
+                         http://{address}:{FALLBACK_PORT}/ instead. Phones will not find it on \
+                         their own - install carjack's sysctl drop-in to get port {PORT}"
+                    );
+                    listener
+                }
+                Err(fallback) => {
+                    tracing::warn!(
+                        "Config portal could not bind port {PORT} ({e}) or {FALLBACK_PORT} \
+                         ({fallback})"
+                    );
+                    return;
+                }
+            }
         }
     };
-    tracing::info!(
-        "Config portal on http://{}:{PORT}/",
-        crate::wifi_connect::setup_ap::AP_ADDRESS
-    );
 
     let router = Router::builder().discover().app_context(state).build();
     tokio::select! {
@@ -109,22 +153,6 @@ pub async fn serve(state: Arc<PortalState>, shutdown: tokio_util::sync::Cancella
     }
 }
 
-/// A WPA2 passphrase for the setup AP, derived from the adapter's Bluetooth address.
-///
-/// Stable for a board, so it can go on a label, and printed at startup because a headless board
-/// has nowhere else to show it. It stops a passer-by joining and reading the page, and it
-/// encrypts the home WiFi passphrase the portal collects - but it is **not** a secret against
-/// someone in Bluetooth range, who can see the address and compute this. Deriving it is the
-/// trade for being able to recover it without a screen; a random per-board key would be stronger
-/// and unknowable on first boot.
-pub fn ap_passphrase(bluetooth_address: &str) -> String {
-    let digits: String = bluetooth_address
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect();
-    format!("carjack-{}", digits.to_lowercase())
-}
-
 /// The SSID the setup AP advertises.
 pub fn ap_ssid() -> String {
     String::from("carjack-setup")
@@ -134,40 +162,66 @@ pub fn ap_ssid() -> String {
 mod tests {
     use super::*;
 
-    /// The `view!` macros are checked at compile time, but whether the router actually serves them
-    /// - layout, route table, status - only shows up at runtime. `/` is the one page that reads
-    /// no hardware, so it is the one that can be asked for without a head unit or an adapter.
-    #[tokio::test]
-    async fn the_status_page_renders() {
-        let router = Router::builder().discover().build();
+    async fn get(router: &topcoat::router::Router, path: &str) -> (u16, String) {
         let request = topcoat::router::request::Request::builder()
-            .uri("/")
+            .uri(path)
             .body(topcoat::router::Body::empty())
             .expect("building a request");
-
         let response = router.handle(request).await;
-        assert_eq!(response.status(), 200);
-
+        let status = response.status().as_u16();
         let body = topcoat::router::to_bytes(response.into_body(), 1 << 20)
             .await
             .expect("reading the body");
-        let html = String::from_utf8_lossy(&body);
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
 
-        // The shell layout wrapped it, and the page itself rendered inside.
+    /// The `view!` macros are checked at compile time, but whether the router actually serves them
+    /// - layout, route table, the password gate - only shows up at runtime. These are the pages
+    /// that read no hardware, so they are the ones reachable without a head unit or an adapter.
+    ///
+    /// One test rather than three: they share a `STATE_DIRECTORY`, and `cargo test` would run
+    /// separate ones concurrently on top of each other.
+    #[tokio::test]
+    async fn the_shipped_password_gates_every_page_until_it_is_changed() {
+        let state_dir =
+            std::env::temp_dir().join(format!("carjack-portal-test-{}", std::process::id()));
+        std::fs::create_dir_all(&state_dir).expect("making a state dir");
+        // SAFETY: the only test in this binary that reads STATE_DIRECTORY, and it does not spawn
+        // threads that would race on the environment.
+        unsafe { std::env::set_var("STATE_DIRECTORY", &state_dir) };
+
+        let router = Router::builder().discover().build();
+
+        // Fresh board: the AP is on the password it shipped with, so nothing else is reachable.
+        assert!(StoredSettings::load().ap_passphrase_is_default());
+        let (status, _) = get(&router, "/").await;
+        assert_eq!(status, 307, "/ should redirect to the password page");
+
+        let (status, html) = get(&router, "/password").await;
+        assert_eq!(status, 200);
         assert!(html.contains("<title>carjack setup</title>"), "{html}");
+        assert!(html.contains("name=\"password\""), "{html}");
+        assert!(
+            html.contains("still on the password carjack ships with"),
+            "{html}"
+        );
+
+        StoredSettings::set_ap_passphrase("a better secret").expect("saving a password");
+
+        // Changed: the rest of the portal opens up.
+        let (status, html) = get(&router, "/").await;
+        assert_eq!(status, 200);
         assert!(html.contains("href=\"/unit\""), "{html}");
         assert!(html.contains("href=\"/wifi\""), "{html}");
         assert!(html.contains("Head unit"), "{html}");
+
+        std::fs::remove_dir_all(&state_dir).ok();
     }
 
+    /// The packaged option 114 URL and sysctl drop-in both name this one.
     #[test]
-    fn the_ap_passphrase_is_long_enough_for_wpa2_and_stable() {
-        let passphrase = ap_passphrase("AA:BB:CC:DD:EE:FF");
-        assert!(
-            passphrase.len() >= 8,
-            "WPA2 needs 8 characters: {passphrase}"
-        );
-        assert_eq!(passphrase, ap_passphrase("aa:bb:cc:dd:ee:ff"));
-        assert_ne!(passphrase, ap_passphrase("11:22:33:44:55:66"));
+    fn the_advertised_port_is_the_privileged_one() {
+        assert_eq!(PORT, 80);
+        assert_ne!(FALLBACK_PORT, PORT);
     }
 }

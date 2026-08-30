@@ -6,7 +6,7 @@ use serde::Deserialize;
 use topcoat::{
     Result,
     context::{Cx, app_context},
-    router::{content::Form, layout, page},
+    router::{Body, Next, content::Form, error::redirect, layer, layout, page, response::Response},
     view::view,
 };
 
@@ -31,6 +31,17 @@ button { font: inherit; padding: .7rem 1.2rem; margin-top: 1.2rem; width: 100%; 
 .ok { padding: .8rem; border: 1px solid currentColor; margin: 1rem 0; }
 ";
 
+/// While the setup AP is still on the password it shipped with, every page is the password page.
+/// Anyone in range knows that password, so nothing else here should be reachable yet.
+#[layer("/")]
+async fn require_a_changed_password(cx: &Cx, body: Body, next: Next<'_>) -> Result<Response> {
+    let path = topcoat::router::request::uri(cx).path();
+    if path != "/password" && StoredSettings::load().ap_passphrase_is_default() {
+        return Err(redirect("/password").into());
+    }
+    next.run(cx, body).await
+}
+
 #[layout("/")]
 async fn shell(slot: Result) -> Result {
     view! {
@@ -47,6 +58,7 @@ async fn shell(slot: Result) -> Result {
                     <a href="/">"Status"</a>
                     <a href="/unit">"Head unit"</a>
                     <a href="/wifi">"WiFi"</a>
+                    <a href="/password">"Password"</a>
                 </nav>
                 (slot?)
             </body>
@@ -143,6 +155,77 @@ async fn save_unit(Form(choice): Form<UnitChoice>) -> Result {
         <div class="ok">(message)</div>
         <p>"carjack picks this up on its next connection attempt."</p>
         <p><a href="/">"Back to status"</a></p>
+    }
+}
+
+#[derive(Deserialize)]
+struct NewPassword {
+    password: String,
+    confirm: String,
+}
+
+#[page("/password")]
+async fn password() -> Result {
+    let first_time = StoredSettings::load().ap_passphrase_is_default();
+
+    view! {
+        <h2>"Setup network password"</h2>
+        if first_time {
+            <p>
+                "This network is still on the password carjack ships with, which is the same on \
+                 every board. Change it before anything else."
+            </p>
+        }
+        <form method="post" action="/password">
+            <label>
+                "New password"
+                <input type="password" name="password" autocomplete="new-password" required="">
+            </label>
+            <label>
+                "Again"
+                <input type="password" name="confirm" autocomplete="new-password" required="">
+            </label>
+            <p class="muted">
+                "8 to 63 characters. Write it down - there is no way to read it back."
+            </p>
+            <button type="submit">"Change password"</button>
+        </form>
+    }
+}
+
+#[page(POST "/password")]
+async fn save_password(cx: &Cx, Form(new): Form<NewPassword>) -> Result {
+    let state: &Arc<PortalState> = app_context(cx);
+    let outcome = if new.password != new.confirm {
+        Err(String::from("Those did not match."))
+    } else {
+        StoredSettings::set_ap_passphrase(&new.password).map_err(|e| e.to_string())
+    };
+
+    // The AP is running on the old key, so it has to come back up on the new one - which drops
+    // whoever is reading this. Nothing else can apply it.
+    if outcome.is_ok()
+        && let Some(ap) = state.ap.lock().await.take()
+    {
+        ap.lower().await;
+        *state.ap.lock().await = super::raise_ap(&state.wifi).await;
+    }
+
+    view! {
+        match &outcome {
+            Ok(()) => {
+                <div class="ok">"Password changed."</div>
+                <p>
+                    "The setup network has restarted on the new password, so this phone has been \
+                     disconnected. Rejoin " <strong>(super::ap_ssid())</strong> " with it and \
+                     carry on."
+                </p>
+            }
+            Err(message) => {
+                <div class="ok">(message)</div>
+                <p><a href="/password">"Try again"</a></p>
+            }
+        }
     }
 }
 

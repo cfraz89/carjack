@@ -125,6 +125,8 @@ assets = [
     # Advertises the config portal over DHCP option 114 on the setup AP. System-wide because the
     # dnsmasq it configures is NetworkManager's, not carjack's.
     ["dnsmasq-shared-carjack.conf", "etc/NetworkManager/dnsmasq-shared.d/carjack.conf", "644"],
+    # Lets the user service bind port 80 for the portal, which the option 114 URL above names.
+    ["carjack-sysctl.conf", "etc/sysctl.d/60-carjack.conf", "644"],
 ]
 
 [dev-dependencies]

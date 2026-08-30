@@ -16,6 +16,23 @@ pub struct Config {
     pub bluetooth: Bluetooth,
     pub hfp: Hfp,
     pub wifi: Wifi,
+    pub portal: Portal,
+}
+
+/// The config portal and the setup access point it is reached on.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Portal {
+    /// Off means no portal and no setup AP - carjack runs on `config.toml` alone. Worth turning
+    /// off on a board that is configured and installed, since the portal can change the head unit
+    /// and the WiFi network of anyone who reaches it.
+    pub enabled: bool,
+}
+
+impl Default for Portal {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Which physical adapter plays which role, on a board with more than one.

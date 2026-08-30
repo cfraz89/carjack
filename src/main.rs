@@ -212,12 +212,7 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
         app.launch();
     }
 
-    let portal = setup_portal::Portal::start(
-        config.wifi.clone(),
-        host.adapter.clone(),
-        &host.bluetooth_address().await.unwrap_or_default(),
-    )
-    .await;
+    let portal = setup_portal::Portal::start(&config, host.adapter.clone()).await;
 
     let mut target = config.bluetooth_device().unwrap_or(Target::Auto);
     let mut failures = 0u32;
@@ -247,7 +242,9 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
             }
         }
     };
-    portal.stop();
+    if let Some(portal) = &portal {
+        portal.stop();
+    }
 
     // The app is a client of the service, which is a client of the compositor.
     app.kill();

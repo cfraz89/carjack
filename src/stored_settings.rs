@@ -18,6 +18,8 @@ pub const FILE: &str = "settings.toml";
 pub struct StoredSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bluetooth: Option<StoredBluetooth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portal: Option<StoredPortal>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +27,18 @@ pub struct StoredBluetooth {
     /// `"auto"`, a MAC, or an advertised name - the same vocabulary as `[bluetooth] device`.
     pub device: String,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredPortal {
+    /// WPA2 key for the setup AP. Absent until someone changes it from [`DEFAULT_AP_PASSPHRASE`].
+    pub ap_passphrase: String,
+}
+
+/// What the setup AP ships with, so a board out of the box can be joined without being told
+/// anything. The portal refuses to do anything else until it has been changed.
+///
+/// Not the plain word "carjack": WPA2 keys are 8-63 characters and that is 7.
+pub const DEFAULT_AP_PASSPHRASE: &str = "carjack1";
 
 impl StoredSettings {
     pub fn path() -> Option<PathBuf> {
@@ -64,6 +78,36 @@ impl StoredSettings {
         });
         settings.save()
     }
+
+    /// The setup AP's WPA2 key: whatever was set, else the shipped default.
+    pub fn ap_passphrase(&self) -> &str {
+        self.portal
+            .as_ref()
+            .map(|p| p.ap_passphrase.as_str())
+            .filter(|p| !p.is_empty())
+            .unwrap_or(DEFAULT_AP_PASSPHRASE)
+    }
+
+    /// Whether the AP is still on the key it shipped with, which the portal makes you fix before
+    /// it will do anything else.
+    pub fn ap_passphrase_is_default(&self) -> bool {
+        self.ap_passphrase() == DEFAULT_AP_PASSPHRASE
+    }
+
+    pub fn set_ap_passphrase(passphrase: &str) -> Result<()> {
+        let passphrase = passphrase.trim();
+        if passphrase.len() < 8 || passphrase.len() > 63 {
+            return Err(eyre!("a WPA2 password must be 8 to 63 characters"));
+        }
+        if passphrase == DEFAULT_AP_PASSPHRASE {
+            return Err(eyre!("that is the default password - pick a different one"));
+        }
+        let mut settings = Self::load();
+        settings.portal = Some(StoredPortal {
+            ap_passphrase: passphrase.to_owned(),
+        });
+        settings.save()
+    }
 }
 
 #[cfg(test)]
@@ -83,6 +127,7 @@ mod tests {
             bluetooth: Some(StoredBluetooth {
                 device: "auto".into(),
             }),
+            portal: None,
         };
         let text = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<StoredSettings>(&text).unwrap(), settings);
@@ -97,5 +142,37 @@ mod tests {
             toml::from_str::<StoredSettings>("").unwrap(),
             StoredSettings::default()
         );
+    }
+
+    #[test]
+    fn an_unset_passphrase_reads_as_the_shipped_default() {
+        let fresh = StoredSettings::default();
+        assert_eq!(fresh.ap_passphrase(), DEFAULT_AP_PASSPHRASE);
+        assert!(fresh.ap_passphrase_is_default());
+
+        // WPA2's own minimum, which is why the default is not the plain word "carjack".
+        assert!(DEFAULT_AP_PASSPHRASE.len() >= 8);
+
+        let changed = StoredSettings {
+            bluetooth: None,
+            portal: Some(StoredPortal {
+                ap_passphrase: "a better secret".into(),
+            }),
+        };
+        assert_eq!(changed.ap_passphrase(), "a better secret");
+        assert!(!changed.ap_passphrase_is_default());
+    }
+
+    /// An empty string in the file is a half-written save, not a chosen password.
+    #[test]
+    fn an_empty_stored_passphrase_falls_back_to_the_default() {
+        let blank = StoredSettings {
+            bluetooth: None,
+            portal: Some(StoredPortal {
+                ap_passphrase: String::new(),
+            }),
+        };
+        assert_eq!(blank.ap_passphrase(), DEFAULT_AP_PASSPHRASE);
+        assert!(blank.ap_passphrase_is_default());
     }
 }
