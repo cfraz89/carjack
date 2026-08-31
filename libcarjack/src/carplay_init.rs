@@ -283,6 +283,12 @@ impl<S: Stream> CarplayInit<S> {
                     "Accessory accepts message ids: {:04x?}",
                     self.accepted_messages
                 );
+                tracing::debug!(
+                    "Accessory sends message ids: {:04x?}",
+                    msg.parameters
+                        .get_param::<Vec<u16>>(ParameterId::MESSAGES_SENT_BY_ACCESSORY)
+                        .unwrap_or_default()
+                );
                 self.send_ctrl(ControlMessage::identification_accepted())
                     .await?;
                 self.send_ctrl(ControlMessage::request_auth_certificate_serial())

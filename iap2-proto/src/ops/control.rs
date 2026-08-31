@@ -331,6 +331,8 @@ impl ParameterId {
     pub const AUTH_CHALLENGE: Self = Self(0x0001);
     pub const AUTH_DATA: Self = Self(0x0000);
     pub const ACCESSORY_NAME: Self = Self(0x0000);
+    /// `IdentificationInformation` parameter 6: the message IDs the accessory will send us.
+    pub const MESSAGES_SENT_BY_ACCESSORY: Self = Self(0x0006);
     /// `IdentificationInformation` parameter 7: the message IDs the accessory will accept from us,
     /// which is what settles the WiFi-config dialect.
     pub const MESSAGES_RECEIVED_FROM_DEVICE: Self = Self(0x0007);

@@ -1,8 +1,103 @@
 # Where things stand
 
-**Last updated: 2026-08-12.** This is the living document - if it disagrees with
+**Last updated: 2026-08-31.** This is the living document - if it disagrees with
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
+
+## The bike will not give us GPS, and Waydroid has none of its own (2026-08-31)
+
+The app needs location, and iAP2 has the feature to supply it: the accessory streams NMEA to the
+device (`StartLocationInformation` out, `LocationInformation` back with GPGGA/GPRMC/GPGSV plus
+vehicle speed and heading). Direction is right - we are the device side. Two things stop it.
+
+**The opcodes in the tree are invented.** `0xFFFA`/`0xFFFB`/`0xFFFC` in `ControlMessageId`, and
+`GPRMCDataStatusValuesNotification` at `0xFFF0`, all arrived in `3eb3be6 "Vibed up rest of impl
+with deepseek"` and appear in no capture. Sentinel values, not spec ones.
+
+**The bike declares it won't accept the message.** From `logs/cfmoto.log`, its
+`IdentificationInformation` gives `MESSAGES_RECEIVED_FROM_DEVICE` as `[4e09, 4300]` -
+`DeviceInformationUpdate` and `CarPlayAvailability`, and nothing else. No location, no vehicle
+status, no route guidance. That list is already treated as binding (`DeviceInformationUpdate` is
+gated on it precisely because an undeclared message drops the session), so `StartLocationInformation`
+is unsendable.
+
+Parameter 6, `MESSAGES_SENT_BY_ACCESSORY`, was the one datum still unread - 17 parameters arrive
+and we parsed two. It is now logged beside the other list, so **the next bike run at
+`RUST_LOG=debug` settles this outright**: `Accessory sends message ids: [...]`.
+
+### So location comes from the host instead - and Waydroid's own HAL is the way in
+
+**Waydroid ships no GNSS.** No `android.hardware.gnss` in `/vendor/etc/vintf/manifest.xml` of
+either the stock image or a `waydroid-build` one, so nothing inside Android can serve a location,
+mock or real. What was wrong in the first version of this note is the conclusion drawn from it -
+that a HAL had to go *into the image*. It doesn't.
+
+[waydroid#2208](https://github.com/waydroid/waydroid/pull/2208) (NotKit, open since 2026-01-27,
+unreviewed) implements the GNSS AIDL HAL **host-side in Python over gbinder**, registered from
+`waydroid session`'s own process. The service is a host process; only the interface declaration
+has to be in the image, and even that can go in `overlay_rw` instead. **Tested here on
+2026-08-31 and it works end to end:**
+
+```
+IGnss: setCallback -> Gnss: Callback set        <- framework bound a host-registered HAL
+IGnss: start       -> Gnss: start requested     <- DMD2 asking for a fix
+GpsdProvider: First fix: -33.86871, 151.20937
+Gnss: Sending location: lat=-33.86871, lon=151.2093747, flags=0x1f
+```
+
+387 locations delivered from the PR's dummy provider, then 21 from a gpsd one written against its
+`LocationProvider` base class (`providers/gpsd.py`, mapping gpsd's TPV/SKY JSON onto the HAL
+callbacks). Both drove DMD2. The whole scratch setup - patched 1.6.3 checkout, manifest fragment,
+provider, its test against a synthetic gpsd, and a fake-gpsd for demoing without hardware - is in
+this session's scratchpad.
+
+**Rate is not a constraint, and Python is not the reason it might be.** Measured with the fake gpsd
+at 10 Hz, delivering into DMD2:
+
+| | |
+| --- | --- |
+| delivered | 197 fixes in 20 s (**9.85 Hz**) - lossless; gpsd emitted ~200 in the window |
+| session manager CPU | 90 ms over 30 s while delivering 298 fixes - **0.3% of one core**, ~0.3 ms per fix |
+| RSS | 42,760 kB, unchanged from idle; one extra thread (7 vs 6) |
+
+Nothing downstream throttles: `IGnss` parses `min_interval` out of `setPositionMode` and drops it,
+because `gnss_manager`'s `Gnss` never defines `on_set_position_mode`. The gpsd provider dispatches
+every TPV. So the fix rate is whatever the receiver produces - most cheap dongles are 1 Hz only;
+u-blox M8/M9/M10 do 5-10 Hz once `UBX-CFG-RATE` is set.
+
+**The framework asked for `min_interval=200ms`** (5 Hz, `mode=0` standalone, `recurrence=0`
+periodic) with DMD2 in front. So DMD2 is a high-rate consumer, not a 1 Hz one, and 10 Hz from the
+receiver is already above what Android wants. Discarding `min_interval` also means ignoring a
+request to go *slower*, which is a real contract deviation - harmless on a bike, but the thing to
+fix before contributing any of this upstream.
+
+Notes that cost time, or will:
+
+- **The session manager runs as your user**, so a patched checkout can be run directly
+  (`python3 <checkout>/waydroid.py session start`) with `/usr/lib/waydroid` untouched. Only the
+  container service is root. 1.6.3 and upstream main are byte-identical in every file the PR
+  modifies, so there is no session/container drift.
+- **`set_stability` is a no-op on Fedora.** `libgbinder` exports
+  `gbinder_local_object_set_stability` but `python3-gbinder` 1.3.0 doesn't wrap it, so the service
+  registers without VINTF stability. Android bound it anyway - but a stricter image may not.
+- **polkit agents are per-session**, so nothing privileged can be run from the Claude Code shell:
+  `sudo` has no tty, and `pkexec` finds no agent because the KDE one belongs to the graphical
+  session. Root steps have to be run from a terminal in the desktop session.
+- The manifest fragment is `overlay_rw` for iteration only. On the board it belongs in the build -
+  `device/waydroid/waydroid/device.mk` already copies `manifest_waydroid.xml` into
+  `/vendor/etc/vintf/manifest/`, so a `gnss.xml` beside it is a `tree/` file plus a one-line
+  `patches/` change.
+- Image is Android 13 / SDK 33, and its framework matrix declares `android.hardware.gnss` AIDL
+  **version 2**, matching the fragment. A lineage-23.2 (Android 16) build will want a newer
+  version, and the PR's marshalling is hand-written against v2.
+
+**carjack carries no part of this.** A `src/gps.rs` was written first - NMEA in from gpsd, NMEA out
+on a socket bound to the Waydroid bridge - on the premise that the container couldn't reach gpsd on
+loopback. True, but irrelevant: the provider doesn't run in the container, it runs in the session
+manager, on the host, with ordinary loopback access. The relay crossed a boundary that isn't there,
+and has been removed along with its `[gps]` config section. Location would only come back into
+carjack if it had to originate inside carjack's own process - which is the iAP2 case, and the
+bike won't do it.
 
 ## Who starts the iAP channel, and why it looked random (2026-08-13, night)
 
