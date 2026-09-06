@@ -20,7 +20,7 @@ use topcoat::router::{Router, RouterBuilderDiscoverExt};
 use carjack::config::{Config, Wifi};
 use carjack::stored_settings::StoredSettings;
 
-use crate::wifi_connect::setup_ap::SetupAp;
+use crate::wifi_connect::setup_ap::{SetupAp, UplinkState};
 
 /// Shared with every page through Topcoat's app context.
 pub struct PortalState {
@@ -49,11 +49,19 @@ impl Portal {
             return None;
         }
         let wifi = config.wifi.clone();
-        let ap = if SetupAp::uplink_is_idle(&wifi).await {
-            raise_ap(&wifi).await
-        } else {
-            tracing::info!("Uplink adapter is already on a network; not raising the setup one");
-            None
+        let ap = match SetupAp::uplink_state(&wifi).await {
+            UplinkState::Idle => raise_ap(&wifi).await,
+            UplinkState::Busy => {
+                tracing::info!("Uplink adapter is already on a network; not raising the setup one");
+                None
+            }
+            UplinkState::Absent => {
+                tracing::info!(
+                    "No adapter holds the uplink role, so there is no radio free for the setup \
+                     network; serving the portal on whatever this board is already on"
+                );
+                None
+            }
         };
 
         let state = Arc::new(PortalState {

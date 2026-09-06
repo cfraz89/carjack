@@ -34,19 +34,33 @@ pub struct SetupAp {
     ssid: String,
 }
 
+/// What the uplink adapter is doing, and so whether the setup AP is worth raising on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UplinkState {
+    /// Free to host the setup AP.
+    Idle,
+    /// On a network already, which is carrying the internet uplink and is how carjack is
+    /// reachable - taking it down to host a setup AP would be a downgrade.
+    Busy,
+    /// No adapter holds the uplink role, so there is nothing to raise an AP on. A board with one
+    /// radio, which CarPlay has.
+    Absent,
+}
+
 impl SetupAp {
-    /// Whether the uplink adapter has nothing better to do. An adapter already on a network is
-    /// carrying the internet uplink, and carjack is reachable over it - taking it down to host a
-    /// setup AP would be a downgrade.
-    pub async fn uplink_is_idle(wifi: &Wifi) -> bool {
+    pub async fn uplink_state(wifi: &Wifi) -> UplinkState {
         let Ok(device) = role_device(WifiRole::Uplink, wifi.selector(WifiRole::Uplink)).await
         else {
-            return false;
+            return UplinkState::Absent;
         };
-        !matches!(
+        if matches!(
             device.state().await,
             Ok(nm_automata::DeviceState::Activated)
-        )
+        ) {
+            UplinkState::Busy
+        } else {
+            UplinkState::Idle
+        }
     }
 
     pub async fn raise(wifi: &Wifi, ssid: &str, passphrase: &str) -> Result<Self> {
