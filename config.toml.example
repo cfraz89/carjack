@@ -18,8 +18,9 @@ device = "auto"
 enabled = true
 
 # Which adapter does what, on a board with two. Either an interface name or a MAC.
-# Left unset, CarPlay takes the first non-USB adapter (the one on the board) and the uplink takes
-# what is left - so a plug-in dongle becomes the uplink without being named here.
+# Left unset, CarPlay takes the adapter the board came with - one that cannot be unplugged, and
+# off-bus ahead of USB - and the uplink takes what is left, so a plug-in dongle becomes the uplink
+# without being named here. Worth naming both on a board whose own radio is a USB part.
 # [wifi]
 # carplay = "wlp1s0"
 # uplink = "wlx00c0ca123456"

@@ -390,12 +390,37 @@ async fn wifi_devices() -> Result<Vec<DeviceProxy<'static>>> {
     Ok(wifi.into_iter().map(|(_, device)| device).collect())
 }
 
-/// Whether an interface hangs off USB, which is how the plug-in adapter is told from the one
-/// soldered to the board.
+/// Whether an interface hangs off USB. Resolved, not the raw link: `device` points at a relative
+/// path like `../../../3-1.2:1.0`, which names no bus at all.
 fn is_usb(iface: &str) -> bool {
-    std::fs::read_link(format!("/sys/class/net/{iface}/device"))
+    std::fs::canonicalize(format!("/sys/class/net/{iface}/device"))
         .map(|p| p.to_string_lossy().contains("usb"))
         .unwrap_or(false)
+}
+
+/// Whether the adapter is one that can be unplugged, which is the USB port's own answer rather
+/// than a guess from the bus. Walks up from the interface because drivers disagree about what
+/// `device` points at - rtw89 names its USB interface, aic8800 the device above it - and stops at
+/// the first level that answers, so a PCIe adapter (no `removable` anywhere up the chain) is
+/// fixed.
+fn is_removable(iface: &str) -> bool {
+    let Ok(mut path) = std::fs::canonicalize(format!("/sys/class/net/{iface}/device")) else {
+        return false;
+    };
+    while path.starts_with("/sys/devices") {
+        if let Ok(state) = std::fs::read_to_string(path.join("removable")) {
+            return state.trim() == "removable";
+        }
+        let Some(parent) = path.parent() else { break };
+        path = parent.to_path_buf();
+    }
+    false
+}
+
+/// How much the adapter looks like something plugged into the board rather than part of it.
+/// Lowest takes the CarPlay role.
+fn plugged_in(iface: &str) -> u8 {
+    2 * u8::from(is_removable(iface)) + u8::from(is_usb(iface))
 }
 
 /// Whether `selector` names this device, by interface name or by either of its MACs.
@@ -424,8 +449,10 @@ async fn device_is(device: &DeviceProxy<'_>, selector: &str) -> bool {
 
 /// The adapter playing `role`.
 ///
-/// Unconfigured, the CarPlay role goes to the first non-USB adapter (the one on the board) and the
-/// uplink to the first that is left. Picking "whichever is already up" instead would hand CarPlay
+/// Unconfigured, the CarPlay role goes to the adapter least like something plugged in - fixed
+/// before removable, and off-bus before USB - and the uplink to the first that is left. A board
+/// can carry its own radio on USB, as the Dragon Q6A does with its AIC8800, so the bus alone does
+/// not tell the two apart. Picking "whichever is already up" instead would hand CarPlay
 /// the uplink adapter the moment it associates with a home network - and, through
 /// [`get_wifi_mac`], change the address carjack announces over iAP2 with it.
 pub(crate) async fn role_device(
@@ -449,11 +476,13 @@ pub(crate) async fn role_device(
     }
 
     let mut carplay = None;
+    let mut best = u8::MAX;
     for device in &devices {
         let iface = device.interface().await.unwrap_or_default();
-        if !is_usb(&iface) {
+        let score = plugged_in(&iface);
+        if score < best {
+            best = score;
             carplay = Some(device.clone());
-            break;
         }
     }
     let carplay = carplay.unwrap_or_else(|| devices[0].clone());
