@@ -19,8 +19,8 @@ pub struct DisplayProps {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CacheFile {
-    /// MAC of the most recently connected accessory - used to pick a size at startup, before we know
-    /// which accessory this run will connect to.
+    /// MAC of the most recently connected accessory - names the entry in `displays` to size the
+    /// compositor from at startup, before we know which accessory this run will connect to.
     #[serde(default)]
     last: Option<String>,
     #[serde(default)]
@@ -53,12 +53,6 @@ impl DisplayCache {
     /// Best guess for startup, before we know which accessory will connect: the most recently used accessory.
     pub fn last_props(&self) -> Option<DisplayProps> {
         self.file.last.as_ref().and_then(|m| self.get(m))
-    }
-
-    /// MAC of the accessory that last ran a session through to AirPlay. `[bluetooth] device =
-    /// "auto"` prefers it, so the usual case is the car you were in yesterday rather than a scan.
-    pub fn last_mac(&self) -> Option<&str> {
-        self.file.last.as_deref()
     }
 
     /// Record an accessory's display and mark it the most recent, persisting if anything changed.

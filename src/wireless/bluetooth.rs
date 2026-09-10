@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Duration};
 use tap::TapFallible;
 
 use backon::{ConstantBuilder, Retryable};
-use bluer::AdapterEvent::{DeviceAdded, DeviceRemoved};
+use bluer::AdapterEvent::DeviceAdded;
 use bluer::agent::Agent;
 use bluer::rfcomm::{self, ProfileHandle, ReqError, Role};
 use bluer::{Adapter, Address, Device, DiscoveryFilter, Session};
@@ -28,10 +28,6 @@ const IAP_CHANNEL: u16 = 1;
 /// refusing adapter from spinning, and to leave the radio a window between inquiries in which the
 /// unit can page us.
 const DISCOVERY_RESTART_DELAY: Duration = Duration::from_secs(5);
-
-/// How long `auto` gathers inquiry results before ranking them, so the unit in this car wins on
-/// signal strength rather than on which one BlueZ happened to report first.
-const AUTO_SCAN_WINDOW: Duration = Duration::from_secs(6);
 
 /// A page timeout usually just means the controller missed; it often answers on a later try.
 const PAGE_ATTEMPTS: usize = 3;
@@ -251,14 +247,10 @@ pub(crate) async fn request_is_target(
     }
 }
 
-pub(crate) async fn find_target_device(
-    adapter: &Adapter,
-    target: &Target,
-    remembered: Option<Address>,
-) -> Result<Device> {
+pub(crate) async fn find_target_device(adapter: &Adapter, target: &Target) -> Result<Device> {
     match target {
         Target::Selector(selector) => find_selected_device(adapter, selector).await,
-        Target::Auto => find_any_head_unit(adapter, remembered).await,
+        Target::Auto => find_any_head_unit(adapter).await,
     }
 }
 
@@ -338,23 +330,21 @@ async fn offers_iap(device: &Device) -> bool {
         .is_some_and(|uuids| uuids.contains(&IAP_ACCESSORY_UUID))
 }
 
-/// This device's signal strength, if BlueZ currently sees it as a head unit in range.
+/// Whether BlueZ currently sees this device as a head unit in range.
 ///
 /// The liveness test is RSSI: bluer documents it as `None` for a device that is known but not
 /// currently present, and `discover_devices_with_changes` opens by replaying every device BlueZ
 /// has ever seen, so this is what separates the units in range from that backlog.
-async fn head_unit_in_range(adapter: &Adapter, addr: Address) -> Option<i16> {
-    let device = adapter.device(addr).ok()?;
-    let rssi = device.rssi().await.ok()??;
-    offers_iap(&device).await.then_some(rssi)
+async fn head_unit_in_range(adapter: &Adapter, addr: Address) -> bool {
+    let Ok(device) = adapter.device(addr) else {
+        return false;
+    };
+    matches!(device.rssi().await, Ok(Some(_))) && offers_iap(&device).await
 }
 
-/// One discovery session's worth of scanning: the head unit to use, or `None` if BlueZ ended the
-/// session before one turned up.
-async fn scan_for_head_unit(
-    adapter: &Adapter,
-    remembered: Option<Address>,
-) -> Result<Option<Address>> {
+/// One discovery session's worth of scanning: the first head unit to turn up, or `None` if BlueZ
+/// ended the session before one did.
+async fn scan_for_head_unit(adapter: &Adapter) -> Result<Option<Address>> {
     // Inside the attempt, not once before them all: bluer refuses to set the filter while a
     // session is active, and a resolver starting while the last one's session is still tearing
     // down would otherwise take that as fatal and stop scanning for good.
@@ -379,61 +369,33 @@ async fn scan_for_head_unit(
     // that only holds it wedges bluer's forwarding task after the first event or two.
     let mut events = adapter.discover_devices_with_changes().await?;
 
-    // Not a deadline on the scan, only on ranking: once there is at least one unit to choose from,
-    // give its neighbours this long to outbid it.
-    let rank_until = tokio::time::Instant::now() + AUTO_SCAN_WINDOW;
-    let mut best: Option<(Address, i16)> = None;
-
-    loop {
-        tokio::select! {
-            event = events.next() => {
-                match event {
-                    Some(DeviceAdded(addr)) => {
-                        let Some(rssi) = head_unit_in_range(adapter, addr).await else {
-                            continue;
-                        };
-                        // The unit from last time, back in range: no reason to spend the rest of
-                        // the window ranking it against neighbours.
-                        if remembered == Some(addr) {
-                            tracing::info!(address = ?addr, "Found the head unit from the last session");
-                            return Ok(Some(addr));
-                        }
-                        if best.is_none_or(|(_, best_rssi)| rssi > best_rssi) {
-                            tracing::debug!(address = ?addr, rssi, "New best CarPlay head unit");
-                            best = Some((addr, rssi));
-                        }
-                    }
-                    // Out of range again before we settled on it.
-                    Some(DeviceRemoved(addr)) => best = best.filter(|(best_addr, _)| *best_addr != addr),
-                    Some(_) => (),
-                    None => return Ok(None),
-                }
-            }
-            // Only once there is something to pick: an empty window is worth waiting out.
-            () = tokio::time::sleep_until(rank_until), if best.is_some() => {
-                let (addr, rssi) = best.expect("guarded on best.is_some()");
-                tracing::info!(address = ?addr, rssi, "Picked the strongest CarPlay head unit in range");
-                return Ok(Some(addr));
-            }
+    while let Some(event) = events.next().await {
+        let DeviceAdded(addr) = event else { continue };
+        if head_unit_in_range(adapter, addr).await {
+            tracing::info!(address = ?addr, "Found a CarPlay head unit in range");
+            return Ok(Some(addr));
         }
     }
+    Ok(None)
 }
 
-async fn find_any_head_unit(adapter: &Adapter, remembered: Option<Address>) -> Result<Device> {
+async fn find_any_head_unit(adapter: &Adapter) -> Result<Device> {
     tracing::info!("Looking for any CarPlay head unit in range");
 
-    let best = loop {
-        match scan_for_head_unit(adapter, remembered).await {
+    let found = loop {
+        match scan_for_head_unit(adapter).await {
             Ok(Some(addr)) => break addr,
             // BlueZ ended the session, or would not start one. Neither says the unit is not
             // coming - it may not be powered yet - so scan again rather than give up on it.
-            Ok(None) => tracing::debug!("Discovery ended with no head unit in range; scanning again"),
+            Ok(None) => {
+                tracing::debug!("Discovery ended with no head unit in range; scanning again")
+            }
             Err(e) => tracing::warn!(?e, "Bluetooth discovery failed; scanning again"),
         }
         tokio::time::sleep(DISCOVERY_RESTART_DELAY).await;
     };
 
-    prepare_device(adapter.device(best)?).await
+    prepare_device(adapter.device(found)?).await
 }
 
 async fn device_matches(device: &Device, target: &str, wanted: Option<Address>) -> bool {

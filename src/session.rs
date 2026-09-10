@@ -210,7 +210,6 @@ impl WifiJoin {
 async fn establish_carplay(
     host: Arc<IapHost>,
     bt_device: &Target,
-    remembered: Option<bluer::Address>,
     wifi: &Arc<dyn WifiBackend>,
 ) -> Result<Established> {
     let (touch_tx, touch_rx) = mpsc::channel::<TouchEvent>(64);
@@ -227,7 +226,6 @@ async fn establish_carplay(
     let mut carplay_handle = AbortOnDropHandle::new(tokio::spawn(wireless_carplay(
         host.clone(),
         bt_device.clone(),
-        remembered,
         WifiOffhand {
             creds_tx: wifi_tx,
             handover: handover.clone(),
@@ -532,13 +530,7 @@ pub async fn run_session(
         mut touch_rx,
         accessory_addr_rx,
         handover,
-    } = establish_carplay(
-        host.clone(),
-        target,
-        cache.last_mac().and_then(|m| m.parse().ok()),
-        wifi,
-    )
-    .await?;
+    } = establish_carplay(host.clone(), target, wifi).await?;
 
     // Reconfigure the already-running compositor to match the accessory's size and rate exactly.
     let view = conn.view.as_ref().map(|v| ViewRect {
@@ -587,13 +579,7 @@ pub async fn run_desktop_session(
         mut touch_rx,
         accessory_addr_rx: _,
         handover,
-    } = establish_carplay(
-        host.clone(),
-        bt_device,
-        DisplayCache::load().last_mac().and_then(|m| m.parse().ok()),
-        wifi,
-    )
-    .await?;
+    } = establish_carplay(host.clone(), bt_device, wifi).await?;
     let (width, height) = (conn.width, conn.height);
     let codec = encode::resolve_codec(codec, conn.hevc_expected);
     tracing::info!("Streaming desktop to accessory at {width}x{height}");

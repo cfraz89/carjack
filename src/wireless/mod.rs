@@ -125,7 +125,6 @@ async fn attempt_iap2_link(
 pub async fn wireless_carplay(
     host: Arc<IapHost>,
     target: Target,
-    remembered: Option<Address>,
     handoff: WifiOffhand,
     ready_tx: oneshot::Sender<()>,
     accessory_addr_tx: tokio::sync::watch::Sender<Option<String>>,
@@ -145,7 +144,7 @@ pub async fn wireless_carplay(
         let target = target.clone();
         let connect_attempt = connect_attempt.clone();
         async move {
-            match find_target_device(&adapter, &target, remembered).await {
+            match find_target_device(&adapter, &target).await {
                 Ok(device) => {
                     // Surface the MAC early so the caller can ready settings/cached display before
                     // WiFi or AirPlay report the real one.
