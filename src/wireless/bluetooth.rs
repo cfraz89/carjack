@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Duration};
 use tap::TapFallible;
 
 use backon::{ConstantBuilder, Retryable};
-use bluer::AdapterEvent::DeviceAdded;
+use bluer::AdapterEvent::{DeviceAdded, DeviceRemoved};
 use bluer::agent::Agent;
 use bluer::rfcomm::{self, ProfileHandle, ReqError, Role};
 use bluer::{Adapter, Address, Device, DiscoveryFilter, Session};
@@ -28,7 +28,6 @@ const DISCOVERY_WAIT: Duration = Duration::from_secs(60);
 /// How long `auto` gathers inquiry results before ranking them, so the unit in this car wins on
 /// signal strength rather than on which one BlueZ happened to report first.
 const AUTO_SCAN_WINDOW: Duration = Duration::from_secs(6);
-const AUTO_SCAN_TICK: Duration = Duration::from_millis(500);
 
 /// A page timeout usually just means the controller missed; it often answers on a later try.
 const PAGE_ATTEMPTS: usize = 3;
@@ -315,32 +314,25 @@ async fn offers_iap(device: &Device) -> bool {
         .is_some_and(|uuids| uuids.contains(&IAP_ACCESSORY_UUID))
 }
 
-/// Head units BlueZ is seeing *right now*, with their signal strength.
+/// This device's signal strength, if BlueZ currently sees it as a head unit in range.
 ///
 /// The liveness test is RSSI: bluer documents it as `None` for a device that is known but not
-/// currently present, so it separates the units in range from everything BlueZ has ever bonded.
-/// The UUID is re-checked per device because BlueZ ORs the discovery filters of all its clients
-/// together - ours alone does not guarantee what gets reported.
-async fn present_head_units(adapter: &Adapter) -> Vec<(Address, i16)> {
-    let mut found = Vec::new();
-    for addr in adapter.device_addresses().await.unwrap_or_default() {
-        let Ok(device) = adapter.device(addr) else {
-            continue;
-        };
-        let Ok(Some(rssi)) = device.rssi().await else {
-            continue;
-        };
-        if offers_iap(&device).await {
-            found.push((addr, rssi));
-        }
-    }
-    found
+/// currently present, and `discover_devices_with_changes` opens by replaying every device BlueZ
+/// has ever seen, so this is what separates the units in range from that backlog.
+async fn head_unit_in_range(adapter: &Adapter, addr: Address) -> Option<i16> {
+    let device = adapter.device(addr).ok()?;
+    let rssi = device.rssi().await.ok()??;
+    offers_iap(&device).await.then_some(rssi)
 }
 
 async fn find_any_head_unit(adapter: &Adapter, remembered: Option<Address>) -> Result<Device> {
+    // No UUID filter, deliberately. BlueZ only learns a BR/EDR device's UUIDs by browsing its SDP,
+    // which it does on connect - during inquiry it has whatever the unit put in its EIR, often
+    // nothing. Filtering on the iAP UUID therefore hides the devices whose UUIDs we are waiting to
+    // see arrive. `offers_iap` still decides; the filter would only have decided it sooner and on
+    // less information.
     adapter
         .set_discovery_filter(DiscoveryFilter {
-            uuids: std::collections::HashSet::from([IAP_ACCESSORY_UUID]),
             discoverable: true,
             transport: bluer::DiscoveryTransport::BrEdr,
             rssi: Some(-100),
@@ -349,39 +341,50 @@ async fn find_any_head_unit(adapter: &Adapter, remembered: Option<Address>) -> R
         .await?;
     tracing::info!("Looking for any CarPlay head unit in range");
 
-    // Held for the whole scan: dropping the stream stops discovery, and with it the RSSI updates
-    // that `present_head_units` reads.
-    let _discovery = adapter.discover_devices_with_changes().await?;
+    // Driven by the stream rather than polled beside it: bluer re-emits `DeviceAdded` for every
+    // property change, so a unit whose name, RSSI or UUIDs land mid-scan is re-judged on the new
+    // information. Reading it also matters in itself - the stream is a one-slot channel, so a scan
+    // that only holds it wedges bluer's forwarding task after the first event or two.
+    let mut events = adapter.discover_devices_with_changes().await?;
 
-    let deadline = tokio::time::Instant::now() + AUTO_SCAN_WINDOW;
-    let give_up = tokio::time::Instant::now() + DISCOVERY_WAIT;
-    let mut ticker = tokio::time::interval(AUTO_SCAN_TICK);
+    let rank_until = tokio::time::Instant::now() + AUTO_SCAN_WINDOW;
+    let give_up_at = tokio::time::Instant::now() + DISCOVERY_WAIT;
+    let mut best: Option<(Address, i16)> = None;
+
     let best = loop {
-        ticker.tick().await;
-        let present = present_head_units(adapter).await;
-
-        // The unit from last time, back in range: no reason to spend the rest of the window
-        // ranking it against neighbours.
-        if let Some(remembered) = remembered
-            && present.iter().any(|(addr, _)| *addr == remembered)
-        {
-            tracing::info!(address = ?remembered, "Found the head unit from the last session");
-            break remembered;
-        }
-
-        let now = tokio::time::Instant::now();
-        if now >= deadline
-            && let Some((addr, rssi)) = present.iter().max_by_key(|(_, rssi)| *rssi)
-        {
-            tracing::info!(
-                address = ?addr, rssi,
-                candidates = present.len(),
-                "Picked the strongest CarPlay head unit in range"
-            );
-            break *addr;
-        }
-        if now >= give_up {
-            return Err(eyre!("No CarPlay head unit came into range"));
+        tokio::select! {
+            event = events.next() => {
+                match event {
+                    Some(DeviceAdded(addr)) => {
+                        let Some(rssi) = head_unit_in_range(adapter, addr).await else {
+                            continue;
+                        };
+                        // The unit from last time, back in range: no reason to spend the rest of
+                        // the window ranking it against neighbours.
+                        if remembered == Some(addr) {
+                            tracing::info!(address = ?addr, "Found the head unit from the last session");
+                            break addr;
+                        }
+                        if best.is_none_or(|(_, best_rssi)| rssi > best_rssi) {
+                            tracing::debug!(address = ?addr, rssi, "New best CarPlay head unit");
+                            best = Some((addr, rssi));
+                        }
+                    }
+                    // Out of range again before we settled on it.
+                    Some(DeviceRemoved(addr)) => best = best.filter(|(best_addr, _)| *best_addr != addr),
+                    Some(_) => (),
+                    None => return Err(eyre!("Bluetooth discovery ended before a head unit answered")),
+                }
+            }
+            // Only once there is something to pick: an empty window is worth waiting out.
+            () = tokio::time::sleep_until(rank_until), if best.is_some() => {
+                let (addr, rssi) = best.expect("guarded on best.is_some()");
+                tracing::info!(address = ?addr, rssi, "Picked the strongest CarPlay head unit in range");
+                break addr;
+            }
+            () = tokio::time::sleep_until(give_up_at) => {
+                return Err(eyre!("No CarPlay head unit came into range"));
+            }
         }
     };
 
