@@ -224,21 +224,21 @@ async fn a_keyframe_sample_opens_on_its_slice() -> Result<()> {
         height: 1280,
         data: bytes::BytesMut::from(&keyframe.data[..]),
         config: None,
-        nal_offsets: None,
+        nal_offsets: Some(keyframe.nals.clone()),
         is_keyframe: Some(true),
-        length_prefixed: true,
         header_buf: bytes::BytesMut::new(),
         chacha_tag_buf: bytes::BytesMut::new(),
     };
     let sample = ScreenFrame::video_proxied(frame, 4, &clock).expect("frame converts");
 
     assert_eq!(
-        &sample.data[..],
-        &keyframe.data[..],
-        "an already length-prefixed sample goes out untouched"
+        sample.data.len(),
+        keyframe.data.len(),
+        "a start code and a length prefix are both four bytes, so the swap is in place"
     );
 
     let headers = nal_headers(&sample.data).expect("length prefixes describe the sample exactly");
+    assert_eq!(headers.len(), keyframe.nals.len());
     assert!(!headers.is_empty());
     assert!(
         HevcNalType::from_byte(headers[0]).is_irap(),

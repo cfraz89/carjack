@@ -18,7 +18,9 @@ use catplay_carplay::modes::{
 use catplay_carplay::msg::Command;
 use catplay_carplay::rtsp_frame::HttpStatus;
 use catplay_carplay::screen::tx::{ScreenTransmitError, ScreenTransmitSink};
-use catplay_carplay::video::{AvccConfig, AvccConfigExtended, EncodedVideoFrame, Pts, VideoView};
+use catplay_carplay::video::{
+    AvccConfig, AvccConfigExtended, EncodedVideoFrame, NalChunk, Pts, VideoView,
+};
 use catplay_hap::{HomekitStorageFile, HomekitStorageRef};
 use eyre::{eyre, Result};
 use tokio::sync::mpsc;
@@ -28,7 +30,14 @@ use uuid::Uuid;
 use crate::carplay_init::{TouchEvent, TouchEventType};
 
 pub struct EncodedFrame {
+    /// Annex-B, coded slices only.
     pub data: Vec<u8>,
+    /// Where each slice's start code sits in `data`, so catplay swaps those four bytes for the
+    /// wire's length prefix rather than rescanning the sample to find them.
+    pub nals: Vec<NalChunk>,
+    /// Every IDR, not just the ones that carry a `config`: catplay refuses to (re)open a stream on
+    /// anything else, and the encoder's own IDRs are usually nearer than a forced one.
+    pub keyframe: bool,
     pub config: Option<AvccConfig>,
 }
 
@@ -306,7 +315,7 @@ pub async fn run_video_stream(
             },
         };
         let data_len = encoded.data.len();
-        let is_keyframe = encoded.config.is_some();
+        let is_keyframe = encoded.keyframe;
 
         // Backpressure and catplay both re-arm this mid-stream; the stream has to (re)open on a
         // keyframe, so skip deltas until one arrives.
@@ -355,11 +364,8 @@ pub async fn run_video_stream(
                 respect_timestamps: true,
                 view,
             }),
-            nal_offsets: None,
+            nal_offsets: Some(encoded.nals),
             is_keyframe: Some(is_keyframe),
-            // The encoder emits the wire form already; converting it again would read the length
-            // prefixes as start codes.
-            length_prefixed: true,
             header_buf: BytesMut::new(),
             chacha_tag_buf: BytesMut::new(),
         };
@@ -624,6 +630,8 @@ mod tests {
     fn delta() -> EncodedFrame {
         EncodedFrame {
             data: vec![0u8; 4],
+            nals: Vec::new(),
+            keyframe: false,
             config: None,
         }
     }
@@ -631,6 +639,8 @@ mod tests {
     fn keyframe() -> EncodedFrame {
         EncodedFrame {
             data: vec![1u8; 8],
+            nals: Vec::new(),
+            keyframe: true,
             config: Some(AvccConfig {
                 nal_size_len: 4,
                 sps_pps: vec![0x67, 0x42, 0x68, 0xce],

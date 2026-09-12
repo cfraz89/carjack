@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use catplay_carplay::video::{AvccConfig, avcc_config_deserialize, hvcc_config_deserialize};
+use catplay_carplay::video::{AvccConfig, NalChunk};
 use eyre::{Result, eyre};
 use futures::StreamExt;
 use gstreamer as gst;
@@ -779,14 +779,15 @@ async fn drive_video_pipeline(
             .build()
             .map_err(|_| eyre!("failed to create {label} ({name})"))
     };
-    // `avc`/`hvc1` is the wire form: length-prefixed NALs, with the decoder configuration record
-    // in `codec_data`. One `au`-aligned buffer is one frame.
-    let (media_type, parser_name, stream_format) = match codec {
-        VideoCodec::H264 => ("video/x-h264", "h264parse", "avc"),
-        VideoCodec::Hevc => ("video/x-h265", "h265parse", "hvc1"),
+    // Annex-B is what catplay's transmit path takes, and with `config-interval=-1` the parameter
+    // sets ride inline in front of every IDR rather than out of band in `codec_data`. One
+    // `au`-aligned buffer is one frame.
+    let (media_type, parser_name) = match codec {
+        VideoCodec::H264 => ("video/x-h264", "h264parse"),
+        VideoCodec::Hevc => ("video/x-h265", "h265parse"),
     };
     let output_caps = gst::Caps::builder(media_type)
-        .field("stream-format", stream_format)
+        .field("stream-format", "byte-stream")
         .field("alignment", "au")
         .build();
 
@@ -859,14 +860,28 @@ async fn drive_video_pipeline(
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                // Only keyframes carry the configuration.
                 let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
-                let config = (keyframe && answer_with_config.swap(false, Ordering::Relaxed))
-                    .then(|| sample.caps().and_then(|caps| codec_config(caps, codec)))
-                    .flatten();
                 let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-                let data = coded_slices(map.as_slice(), codec);
-                match video_tx.blocking_send(EncodedFrame { data, config }) {
+                let AccessUnit {
+                    data,
+                    nals,
+                    parameter_sets,
+                } = split_access_unit(map.as_slice(), codec);
+                // Spend the request only once there are parameter sets to answer it with, so one
+                // the parser sent without them does not swallow it.
+                let config = (keyframe
+                    && !parameter_sets.is_empty()
+                    && answer_with_config.swap(false, Ordering::Relaxed))
+                .then(|| AvccConfig {
+                    nal_size_len: NAL_SIZE_LEN,
+                    sps_pps: parameter_sets,
+                });
+                match video_tx.blocking_send(EncodedFrame {
+                    data,
+                    nals,
+                    keyframe,
+                    config,
+                }) {
                     Ok(()) => Ok(gst::FlowSuccess::Ok),
                     Err(_) => Err(gst::FlowError::Eos),
                 }
@@ -1485,11 +1500,12 @@ fn parse_encoder_string(s: &str) -> Result<(String, Vec<(String, String)>)> {
     Ok((name, props))
 }
 
-/// The NAL length prefix `avc`/`hvc1` uses, and the only width gstreamer's parsers emit.
+/// The NAL length prefix the wire's sample entry declares, and the width of the start codes the
+/// parsers emit in its place - catplay swaps one for the other in place.
 const NAL_SIZE_LEN: usize = 4;
 
-/// Is this NAL a coded slice? Everything else - parameter sets, access unit delimiters, SEI - is
-/// carried by the decoder configuration record or not at all.
+/// Is this NAL a coded slice? A receiver reads the first NAL of a sample to decide whether the
+/// stream can open there, so nothing else belongs in one.
 fn is_vcl(nal_header: u8, codec: VideoCodec) -> bool {
     match codec {
         VideoCodec::Hevc => (nal_header >> 1) & 0x3f < 32,
@@ -1497,57 +1513,72 @@ fn is_vcl(nal_header: u8, codec: VideoCodec) -> bool {
     }
 }
 
-/// Keep only the coded slices of a length-prefixed access unit: a receiver reads the first NAL of
-/// a sample to decide whether the stream can open there.
-fn coded_slices(data: &[u8], codec: VideoCodec) -> Vec<u8> {
-    let mut sample = Vec::with_capacity(data.len());
-    let mut pos = 0;
-    while pos + NAL_SIZE_LEN < data.len() {
-        let len = u32::from_be_bytes(data[pos..pos + NAL_SIZE_LEN].try_into().unwrap()) as usize;
-        let start = pos + NAL_SIZE_LEN;
-        let Some(nal) = data.get(start..start + len) else {
-            tracing::warn!(
-                pos,
-                len,
-                "Truncated NAL from the parser; passing the sample through"
-            );
-            return data.to_vec();
-        };
-        if nal.first().is_some_and(|&header| is_vcl(header, codec)) {
-            sample.extend_from_slice(&data[pos..start + len]);
-        }
-        pos = start + len;
+/// VPS/SPS/PPS - what the config frame configures the accessory's decoder from.
+fn is_parameter_set(nal_header: u8, codec: VideoCodec) -> bool {
+    match codec {
+        VideoCodec::Hevc => matches!((nal_header >> 1) & 0x3f, 32..=34),
+        VideoCodec::H264 => matches!(nal_header & 0x1f, 7 | 8),
     }
-    sample
 }
 
-fn codec_config(caps: &gst::CapsRef, codec: VideoCodec) -> Option<AvccConfig> {
-    let record = caps.structure(0)?.get::<gst::Buffer>("codec_data").ok()?;
-    let record = record.map_readable().ok()?;
-    codec_config_from_record(record.as_slice(), codec)
+/// One access unit, split the way the screen stream wants it.
+struct AccessUnit {
+    /// The coded slices, Annex-B.
+    data: Vec<u8>,
+    /// Where each slice's start code sits in `data` - catplay's NAL cache, which saves it
+    /// rescanning the sample when it swaps those four bytes for the wire's length prefix.
+    nals: Vec<NalChunk>,
+    /// The parameter sets that preceded them, Annex-B in decode order. Empty on a delta frame.
+    parameter_sets: Vec<u8>,
 }
 
-/// The parameter sets inside an `avcC`/`hvcC`, Annex-B with start codes and in decode order -
-/// the form catplay's config frame writer parses.
-fn codec_config_from_record(record: &[u8], codec: VideoCodec) -> Option<AvccConfig> {
-    let config = match codec {
-        VideoCodec::Hevc => {
-            let hvcc = hvcc_config_deserialize(record)?;
-            AvccConfig {
-                nal_size_len: hvcc.nal_size_len,
-                sps_pps: hvcc.vps_sps_pps,
-            }
-        }
-        VideoCodec::H264 => avcc_config_deserialize(record)?,
+/// Split a parsed access unit into the sample the accessory decodes and the parameter sets its
+/// decoder is configured from, copying each NAL with the start code the parser gave it. Access
+/// unit delimiters and SEI are dropped.
+fn split_access_unit(data: &[u8], codec: VideoCodec) -> AccessUnit {
+    let mut au = AccessUnit {
+        data: Vec::with_capacity(data.len()),
+        nals: Vec::new(),
+        parameter_sets: Vec::new(),
     };
-    if config.nal_size_len != NAL_SIZE_LEN {
-        tracing::warn!(
-            len = config.nal_size_len,
-            "Parser chose a NAL length prefix the screen stream cannot carry"
-        );
-        return None;
+
+    let mut cursor = next_start_code(data, 0);
+    while let Some((start, prefix_len)) = cursor {
+        let payload = start + prefix_len;
+        cursor = next_start_code(data, payload);
+        let end = cursor.map_or(data.len(), |(at, _)| at);
+        match data.get(payload) {
+            Some(&header) if is_vcl(header, codec) => {
+                au.nals.push(NalChunk {
+                    prefix_start: au.data.len(),
+                    prefix_len,
+                    data_size: end - payload,
+                });
+                au.data.extend_from_slice(&data[start..end]);
+            }
+            Some(&header) if is_parameter_set(header, codec) => {
+                au.parameter_sets.extend_from_slice(&data[start..end]);
+            }
+            _ => {}
+        }
     }
-    Some(config)
+
+    if au.data.is_empty() {
+        tracing::warn!(
+            len = data.len(),
+            "No coded slice in the parser's access unit; the accessory has nothing to decode"
+        );
+    }
+    au
+}
+
+/// Where the next Annex-B start code begins, and how long it is.
+fn next_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
+    (from..data.len().saturating_sub(2)).find_map(|i| match data[i..] {
+        [0, 0, 1, ..] => Some((i, 3)),
+        [0, 0, 0, 1, ..] => Some((i, 4)),
+        _ => None,
+    })
 }
 
 #[cfg(test)]
@@ -1562,10 +1593,12 @@ mod tests {
         &[0x26, 0x01, 0xaf, 0xe0, 0xfa, 0x20, 0xab, 0x43], // 19, IDR slice
     ];
 
-    fn length_prefixed(nals: &[&[u8]]) -> Vec<u8> {
+    const START_CODE: [u8; 4] = [0, 0, 0, 1];
+
+    fn annexb(nals: &[&[u8]]) -> Vec<u8> {
         let mut out = Vec::new();
         for nal in nals {
-            out.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+            out.extend_from_slice(&START_CODE);
             out.extend_from_slice(nal);
         }
         out
@@ -1575,16 +1608,50 @@ mod tests {
     /// frame opens the stream, and the parser puts an AUD and the parameter sets before every one.
     #[test]
     fn the_sample_keeps_only_the_slices() {
-        let au = length_prefixed(HEVC_KEYFRAME_HEAD);
-        assert_eq!(
-            super::coded_slices(&au, VideoCodec::Hevc),
-            length_prefixed(&HEVC_KEYFRAME_HEAD[4..])
-        );
+        let au = super::split_access_unit(&annexb(HEVC_KEYFRAME_HEAD), VideoCodec::Hevc);
+        assert_eq!(au.data, annexb(&HEVC_KEYFRAME_HEAD[4..]));
+        assert_eq!(au.parameter_sets, annexb(&HEVC_KEYFRAME_HEAD[1..4]));
 
         let delta: &[&[u8]] = &[&[0x46, 0x01, 0x10], &[0x02, 0x01, 0xd0, 0x09]]; // AUD, then TrailR
+        let au = super::split_access_unit(&annexb(delta), VideoCodec::Hevc);
+        assert_eq!(au.data, annexb(&delta[1..]));
+        assert!(au.parameter_sets.is_empty(), "a delta configures nothing");
+    }
+
+    /// The offsets are catplay's NAL cache: it verifies each start code and swaps those four bytes
+    /// for a length prefix, so a wrong one either fails the sample or corrupts it.
+    #[test]
+    fn the_offsets_point_at_the_start_codes() {
+        let slices: &[&[u8]] = &[&[0x26, 0x01, 0xaf, 0xe0], &[0x02, 0x01, 0xd0]];
+        let au = super::split_access_unit(&annexb(slices), VideoCodec::Hevc);
+
+        assert_eq!(au.nals.len(), 2);
+        for (nal, slice) in au.nals.iter().zip(slices) {
+            assert_eq!(nal.prefix_len, super::NAL_SIZE_LEN);
+            assert_eq!(nal.data_size, slice.len());
+            let start = nal.prefix_start;
+            assert_eq!(&au.data[start..start + 4], &START_CODE);
+            assert_eq!(&au.data[start + 4..start + 4 + nal.data_size], *slice);
+        }
+    }
+
+    /// Three-byte start codes are legal Annex-B and the parsers do not emit them, so they are
+    /// copied through as they came. What must hold either way is that the offsets describe the
+    /// buffer we actually wrote - catplay reads the sample through them.
+    #[test]
+    fn the_offsets_describe_a_three_byte_start_code_too() {
+        let slice: &[u8] = &[0x26, 0x01, 0xaf, 0xe0];
+        let mut stream = vec![0, 0, 1];
+        stream.extend_from_slice(HEVC_KEYFRAME_HEAD[1]); // VPS
+        stream.extend_from_slice(&[0, 0, 1]);
+        stream.extend_from_slice(slice);
+
+        let au = super::split_access_unit(&stream, VideoCodec::Hevc);
+        let nal = au.nals[0];
+        assert_eq!(nal.prefix_len, 3);
         assert_eq!(
-            super::coded_slices(&length_prefixed(delta), VideoCodec::Hevc),
-            length_prefixed(&delta[1..])
+            &au.data[nal.prefix_start + nal.prefix_len..][..nal.data_size],
+            slice
         );
     }
 
@@ -1592,8 +1659,12 @@ mod tests {
     /// every slice - an empty sample, and a stream the accessory has nothing to decode.
     #[test]
     fn slices_are_recognised_per_codec() {
-        let hevc = length_prefixed(&HEVC_KEYFRAME_HEAD[4..]);
-        assert!(super::coded_slices(&hevc, VideoCodec::H264).is_empty());
+        let hevc = annexb(&HEVC_KEYFRAME_HEAD[4..]);
+        assert!(
+            super::split_access_unit(&hevc, VideoCodec::H264)
+                .data
+                .is_empty()
+        );
 
         let h264: &[&[u8]] = &[
             &[0x09, 0x10],
@@ -1601,17 +1672,14 @@ mod tests {
             &[0x68, 0xce],
             &[0x65, 0x88, 0x84],
         ];
-        assert_eq!(
-            super::coded_slices(&length_prefixed(h264), VideoCodec::H264),
-            length_prefixed(&h264[3..])
-        );
+        let au = super::split_access_unit(&annexb(h264), VideoCodec::H264);
+        assert_eq!(au.data, annexb(&h264[3..]));
+        assert_eq!(au.parameter_sets, annexb(&h264[1..3]), "SPS then PPS");
     }
 
-    /// A real `hvcC` from this pipeline's own parser (`vah265enc ! h265parse`), and the VPS/SPS/PPS
-    /// inside it. The config frame is written from these.
-    const HVCC_RECORD: &str = "01016000000090000000000078f000fcfdf8f800000f0320000100184001\
-        0c01ffff016000000300900000030000030078130240210001002e4201010160000003009000000300000300\
-        78a0064200501684e491b6affc0004000404000003000400000300782022000100074401c0764c0890";
+    /// The VPS/SPS/PPS this pipeline's own parser (`vah265enc ! h265parse`) used to hand over
+    /// inside an `hvcC`. Taking them from the byte-stream instead has to yield the same bytes -
+    /// the config frame is written from these, and it is matched to an iPhone's byte for byte.
     const HVCC_PARAMETER_SETS: &str = "0000000140010c01ffff0160000003009000000300000300781302\
         4000000001420101016000000300900000030000030078a0064200501684e491b6affc000400040400000300\
         04000003007820000000014401c0764c0890";
@@ -1624,27 +1692,17 @@ mod tests {
     }
 
     #[test]
-    fn the_record_carries_the_parameter_sets_the_config_frame_needs() {
-        let config = super::codec_config_from_record(&hex(HVCC_RECORD), VideoCodec::Hevc)
-            .expect("the parser's own record parses");
+    fn the_byte_stream_yields_the_parameter_sets_the_config_frame_needs() {
+        let reference = hex(HVCC_PARAMETER_SETS);
+        let mut stream = reference.clone();
+        stream.extend_from_slice(&annexb(&[HEVC_KEYFRAME_HEAD[4]]));
 
-        assert_eq!(config.nal_size_len, 4);
+        let au = super::split_access_unit(&stream, VideoCodec::Hevc);
         assert_eq!(
-            config.sps_pps,
-            hex(HVCC_PARAMETER_SETS),
+            au.parameter_sets, reference,
             "expected VPS, SPS then PPS, Annex-B, in decode order"
         );
-        // An HEVC record is not an H264 one, and must not be read as if it were.
-        assert!(super::codec_config_from_record(&hex(HVCC_RECORD), VideoCodec::H264).is_none());
-    }
-
-    /// A truncated buffer must not silently lose the frame; passing it through leaves the decision
-    /// to the accessory rather than sending it an empty sample.
-    #[test]
-    fn a_truncated_nal_passes_through() {
-        let mut au = length_prefixed(&HEVC_KEYFRAME_HEAD[4..]);
-        au.truncate(au.len() - 2);
-        assert_eq!(super::coded_slices(&au, VideoCodec::Hevc), au);
+        assert_eq!(au.data, annexb(&HEVC_KEYFRAME_HEAD[4..]));
     }
 
     use super::*;

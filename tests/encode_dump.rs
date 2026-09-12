@@ -26,22 +26,6 @@ use nix::sys::signal::killpg;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
-/// Rewrite 4-byte NAL length prefixes back into Annex-B start codes.
-fn to_annexb(sample: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(sample.len());
-    let mut pos = 0;
-    while pos + 4 < sample.len() {
-        let len = u32::from_be_bytes(sample[pos..pos + 4].try_into().unwrap()) as usize;
-        let Some(nal) = sample.get(pos + 4..pos + 4 + len) else {
-            return sample.to_vec();
-        };
-        out.extend_from_slice(&[0, 0, 0, 1]);
-        out.extend_from_slice(nal);
-        pos += 4 + len;
-    }
-    out
-}
-
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
         .ok()
@@ -110,17 +94,15 @@ async fn dump_encoded_stream() -> Result<()> {
         let Some(frame) = video_rx.recv().await else {
             break;
         };
-        // What goes to the accessory is length-prefixed and carries no parameter sets - those
-        // travel in the config frame. Rewind both for the file, or there is nothing to decode
-        // against: Annex-B start codes, and the parameter sets in front of each keyframe.
+        // The sample carries no parameter sets - those travel in the config frame. Put them back
+        // in front of the keyframe that has them, or there is nothing to decode against.
+        keyframes += u64::from(frame.keyframe);
         if let Some(config) = frame.config.as_ref() {
-            keyframes += 1;
             file.write_all(&config.sps_pps)?;
             bytes += config.sps_pps.len() as u64;
         }
-        let annexb = to_annexb(&frame.data);
-        bytes += annexb.len() as u64;
-        file.write_all(&annexb)?;
+        bytes += frame.data.len() as u64;
+        file.write_all(&frame.data)?;
         written += 1;
     }
     file.flush()?;
