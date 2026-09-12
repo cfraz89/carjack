@@ -93,9 +93,8 @@ async fn attempt_iap2_link(
                         continue;
                     };
                     tracing::info!(?wait, "No iAP channel offered; cycling the link");
+                    // Dials for itself once the link is back up.
                     relink(&device, &ctx.connect_attempt).await;
-                    // After the relink: its disconnect would drop a dial made before it.
-                    dial_accessory(&device);
                     wait = (wait * 2).min(OFFER_WAIT_MAX);
                 }
             }

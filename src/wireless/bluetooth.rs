@@ -208,6 +208,11 @@ pub(crate) async fn relink(device: &Device, gate: &Arc<Semaphore>) {
         } else {
             tracing::debug!(?res, "Connection result")
         }
+        // Here, not at the call site: the connect above is what makes the link, and dialling
+        // before it lands fails with br-connection-create-socket.
+        if res.is_ok() {
+            dial_accessory(&device);
+        }
     });
 }
 
