@@ -77,29 +77,26 @@ async fn attempt_iap2_link(
         // Re-check on every wait - a link can appear after this loop starts (e.g. BlueZ
         // auto-connecting a trusted device) and we'd never have cycled it.
         let mut wait = OFFER_WAIT;
-        let mut round = 0u32;
+        // Spawns, so it dials out while the select below still waits for an inbound channel.
+        let resolved = ctx.device.borrow().clone();
+        if let Some(device) = &resolved {
+            dial_accessory(device);
+        }
         let rq = loop {
             tokio::select! {
                 rq = profile.next() => break rq.ok_or(LinkAttemptError::ProfilesClosed)?,
                 rq = client.next() => break rq.ok_or(LinkAttemptError::ProfilesClosed)?,
                 _ = tokio::time::sleep(wait) => {
-                    round += 1;
-                    // Alternate between the one move that does not wait on the unit's schedule
-                    // (dialling its own iAP service) and cycling the link. Dialling is off by
-                    // default: the unit withdraws its iAP SDP record shortly after dialling once.
                     let device = ctx.device.borrow().clone();
                     let Some(device) = device else {
                         tracing::debug!("No iAP channel offered; head unit not resolved yet");
                         continue;
                     };
-                    if round % 2 == 1 && std::env::var("CARJACK_DIAL_IAP").as_deref() == Ok("1") {
-                        tracing::info!("No iAP channel offered; dialling the accessory");
-                        dial_accessory(&device);
-                    } else {
-                        tracing::info!(?wait, "No iAP channel offered; cycling the link");
-                        relink(&device, &ctx.connect_attempt).await;
-                        wait = (wait * 2).min(OFFER_WAIT_MAX);
-                    }
+                    tracing::info!(?wait, "No iAP channel offered; cycling the link");
+                    relink(&device, &ctx.connect_attempt).await;
+                    // After the relink: its disconnect would drop a dial made before it.
+                    dial_accessory(&device);
+                    wait = (wait * 2).min(OFFER_WAIT_MAX);
                 }
             }
         };

@@ -169,8 +169,9 @@ iAP2 while it is in plain-phone mode. Whether it completes once the unit is in C
 open question, and the one worth testing next. Later dials in the same run return
 `br-connection-not-supported`, which needs explaining before the path can be relied on.
 
-`dial_accessory` alternates with the relink on each timeout, but is **off unless
-`CARJACK_DIAL_IAP=1`** - see below.
+`dial_accessory` runs on every attempt now - once as soon as the unit resolves, and again after
+each relink. It spawns, so it dials **alongside** the wait for an inbound channel rather than in
+place of it, and whichever direction connects first wins.
 
 ### The unit withdraws its iAP record, and that is what "random" was
 
@@ -196,8 +197,8 @@ would republish it.
 Moving the bike to its home screen changed nothing, which rules the screen out as the mechanism on
 its own; the record being absent is upstream of it.
 
-**The dial is gated off by default** (`CARJACK_DIAL_IAP=1` to enable), but the suspicion that it
-*caused* the withdrawal is now **wrong** - see below.
+The suspicion that the dial *caused* the withdrawal is **wrong** - see below. That suspicion was
+why it was gated off; with it gone, the dial always runs.
 
 ## A restart buys exactly one session (2026-08-13, night)
 
