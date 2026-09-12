@@ -29,6 +29,10 @@ const IAP_CHANNEL: u16 = 1;
 /// unit can page us.
 const DISCOVERY_RESTART_DELAY: Duration = Duration::from_secs(5);
 
+/// bluetoothd is a system service and this is a user unit, so nothing orders us after it.
+const ADAPTER_WAIT: Duration = Duration::from_secs(30);
+const ADAPTER_POLL: Duration = Duration::from_secs(1);
+
 /// A page timeout usually just means the controller missed; it often answers on a later try.
 const PAGE_ATTEMPTS: usize = 3;
 const PAGE_RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -98,6 +102,21 @@ fn colon_address(addr: bluer::Address) -> String {
         .join(":")
 }
 
+/// The default adapter, waiting up to [`ADAPTER_WAIT`] for BlueZ to publish one.
+async fn default_adapter(session: &Session) -> Result<Adapter> {
+    let deadline = std::time::Instant::now() + ADAPTER_WAIT;
+    loop {
+        match session.default_adapter().await {
+            Ok(adapter) => return Ok(adapter),
+            Err(e) if std::time::Instant::now() < deadline => {
+                tracing::debug!(%e, "No Bluetooth adapter yet; asking again");
+                tokio::time::sleep(ADAPTER_POLL).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 impl IapHost {
     pub async fn bluetooth_address(&self) -> Result<String> {
         Ok(colon_address(self.adapter.address().await?))
@@ -106,7 +125,7 @@ impl IapHost {
     pub async fn start(hfp_identity: Hfp) -> Result<Self> {
         let session = Session::new().await?;
         let agent = session.register_agent(Agent::default()).await?;
-        let adapter = session.default_adapter().await?;
+        let adapter = default_adapter(&session).await?;
         adapter.set_alias(String::from("carjack")).await?;
         // The unit dials us on its own schedule, so stay discoverable; zero is "no timeout", not "off".
         adapter.set_pairable(true).await?;
