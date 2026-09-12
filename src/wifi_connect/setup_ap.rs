@@ -8,8 +8,9 @@
 //! the package (see `dnsmasq-shared-carjack.conf`).
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use backon::{ConstantBuilder, Retryable};
 use eyre::{Result, eyre};
 use nm_automata::{
     ActiveConnectionState, ActiveProxy, ConnectionProfile, ConnectionSetting, Ipv4Method,
@@ -31,8 +32,8 @@ const AP_PREFIX: u32 = 24;
 const AP_UUID: &str = "0a3d5e5c-6b4e-5c2f-9d31-7e2a4c9f1b80";
 
 /// A user unit cannot be ordered after NetworkManager, so an adapter may not be realised yet.
-const UPLINK_SETTLE: Duration = Duration::from_secs(20);
-const UPLINK_POLL: Duration = Duration::from_secs(1);
+const UPLINK_RETRY_DELAY: Duration = Duration::from_secs(1);
+const UPLINK_ATTEMPTS: usize = 20;
 
 pub struct SetupAp {
     conn: SettingsConnectionProxy<'static>,
@@ -54,14 +55,11 @@ pub enum UplinkState {
 
 impl SetupAp {
     /// A radio on its way up counts as taken: raising the setup AP over one mid-association is
-    /// how the board loses the network. [`UPLINK_SETTLE`] bounds the wait, not the verdict.
+    /// how the board loses the network. Busy is the only settled answer; the rest are retried.
     pub async fn uplink_state(wifi: &Wifi) -> UplinkState {
         use nm_automata::DeviceState as S;
-        let deadline = Instant::now() + UPLINK_SETTLE;
-        loop {
-            let waiting_on = match role_device(WifiRole::Uplink, wifi.selector(WifiRole::Uplink))
-                .await
-            {
+        let settled = (|| async {
+            match role_device(WifiRole::Uplink, wifi.selector(WifiRole::Uplink)).await {
                 Ok(device) => match device.state().await {
                     Ok(
                         S::Activated
@@ -71,27 +69,33 @@ impl SetupAp {
                         | S::IpConfig
                         | S::IpCheck
                         | S::Secondaries,
-                    ) => return UplinkState::Busy,
-                    Ok(state) => Ok(format!("{state:?}")),
-                    Err(e) => Ok(format!("state unreadable: {e}")),
-                },
-                Err(err) => Err(err),
-            };
-            if Instant::now() >= deadline {
-                return match waiting_on {
+                    ) => Ok(UplinkState::Busy),
                     Ok(state) => {
-                        tracing::info!(%state, "Uplink adapter idle after {UPLINK_SETTLE:?}");
-                        UplinkState::Idle
+                        tracing::debug!(?state, "Uplink not on a network yet");
+                        Err(UplinkState::Idle)
                     }
-                    Err(err) => {
-                        tracing::info!(%err, "No uplink adapter after {UPLINK_SETTLE:?}");
-                        UplinkState::Absent
+                    Err(e) => {
+                        tracing::debug!(%e, "Uplink state unreadable");
+                        Err(UplinkState::Idle)
                     }
-                };
+                },
+                Err(err) => {
+                    tracing::debug!(%err, "No uplink adapter yet");
+                    Err(UplinkState::Absent)
+                }
             }
-            tracing::debug!(?waiting_on, "Uplink not on a network yet; asking again");
-            tokio::time::sleep(UPLINK_POLL).await;
+        })
+        .retry(
+            ConstantBuilder::new()
+                .with_delay(UPLINK_RETRY_DELAY)
+                .with_max_times(UPLINK_ATTEMPTS),
+        )
+        .await
+        .unwrap_or_else(|last| last);
+        if settled != UplinkState::Busy {
+            tracing::info!(?settled, "Uplink adapter never reached a network");
         }
+        settled
     }
 
     pub async fn raise(wifi: &Wifi, ssid: &str, passphrase: &str) -> Result<Self> {
