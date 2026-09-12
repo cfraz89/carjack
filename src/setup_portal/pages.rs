@@ -6,8 +6,10 @@ use serde::Deserialize;
 use topcoat::{
     Result,
     context::{Cx, app_context},
-    router::{Body, Next, content::Form, error::redirect, layer, layout, page, response::Response},
-    view::view,
+    router::{
+        Body, Next, Slot, content::Form, error::redirect, layer, layout, page, response::Response,
+    },
+    view::{View, emit, live, view},
 };
 
 use carjack::config::Target;
@@ -29,6 +31,10 @@ input[type=text], input[type=password] { font: inherit; width: 100%; padding: .5
 button { font: inherit; padding: .7rem 1.2rem; margin-top: 1.2rem; width: 100%; }
 .muted { color: #8a8a8a; font-size: .85em; }
 .ok { padding: .8rem; border: 1px solid currentColor; margin: 1rem 0; }
+.scanning { display: flex; align-items: center; gap: .8rem; padding: 1rem 0; }
+.scanning::before { content: ''; flex: none; width: 1.2rem; height: 1.2rem; border-radius: 50%;
+  border: 3px solid #8884; border-top-color: currentColor; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(1turn); } }
 ";
 
 /// While the setup AP is still on the password it shipped with, every page is the password page.
@@ -43,8 +49,8 @@ async fn require_a_changed_password(cx: &Cx, body: Body, next: Next<'_>) -> Resu
 }
 
 #[layout("/")]
-async fn shell(slot: Result) -> Result {
-    view! {
+async fn shell(slot: Slot<'_>) -> Result<impl View> {
+    Ok(view! {
         <!DOCTYPE html>
         <html lang="en">
             <head>
@@ -60,20 +66,20 @@ async fn shell(slot: Result) -> Result {
                     <a href="/wifi">"WiFi"</a>
                     <a href="/password">"Password"</a>
                 </nav>
-                (slot?)
+                (slot)
             </body>
         </html>
-    }
+    })
 }
 
 #[page("/")]
-async fn index() -> Result {
+async fn index() -> Result<impl View> {
     let configured = StoredSettings::load()
         .bluetooth
         .map(|bluetooth| bluetooth.device)
         .unwrap_or_default();
 
-    view! {
+    Ok(view! {
         <h2>"Head unit"</h2>
         if configured.is_empty() {
             <p>"Not set. carjack has nothing to connect to."</p>
@@ -90,7 +96,7 @@ async fn index() -> Result {
              this page reachable from it, so you can come back without the setup network."
         </p>
         <p><a href="/wifi">"Choose a network"</a></p>
-    }
+    })
 }
 
 #[derive(Deserialize)]
@@ -98,49 +104,60 @@ struct UnitChoice {
     device: String,
 }
 
+/// The scan takes `scan::SCAN_WINDOW`, so it runs inside a live region: the heading and the
+/// "Scanning" line reach the browser straight away and the form replaces them when the radio is
+/// done. Streamed over the one response, so nothing here needs a client script.
 #[page("/unit")]
-async fn unit(cx: &Cx) -> Result {
+async fn unit(cx: &Cx) -> Result<impl View> {
     let state: &Arc<PortalState> = app_context(cx);
-    let units = scan::head_units(&state.adapter).await.unwrap_or_else(|e| {
-        tracing::warn!(?e, "Head unit scan failed");
-        Vec::new()
-    });
-    let current = StoredSettings::load()
-        .bluetooth
-        .map(|bluetooth| bluetooth.device)
-        .unwrap_or_default();
+    let adapter = state.adapter.clone();
 
-    view! {
+    Ok(view! {
         <h2>"Head unit"</h2>
-        <form method="post" action="/unit">
-            <label>
-                <input type="radio" name="device" value="auto" checked=(current == "auto" || current.is_empty())>
-                <strong>" Automatic"</strong>
-                <div class="muted">
-                    "Connect to whichever CarPlay unit is in range. Picks the strongest, so it \
-                     takes the one in this car."
-                </div>
-            </label>
-            for found in &units {
-                <label>
-                    <input type="radio" name="device" value=(&found.address) checked=(current == found.address)>
-                    " " (&found.name)
-                    <div class="muted">(&found.address) " - signal " (found.rssi) " dBm"</div>
-                </label>
+        (live! {
+            emit! { <p class="scanning">"Scanning for head units..."</p> }?;
+
+            let units = scan::head_units(&adapter).await.unwrap_or_else(|e| {
+                tracing::warn!(?e, "Head unit scan failed");
+                Vec::new()
+            });
+            let current = StoredSettings::load()
+                .bluetooth
+                .map(|bluetooth| bluetooth.device)
+                .unwrap_or_default();
+
+            emit! {
+                <form method="post" action="/unit">
+                    <label>
+                        <input type="radio" name="device" value="auto" checked=(current == "auto" || current.is_empty())>
+                        <strong>" Automatic"</strong>
+                        <div class="muted">
+                            "Connect to whichever CarPlay unit is in range. Picks the strongest, so it \
+                             takes the one in this car."
+                        </div>
+                    </label>
+                    for found in &units {
+                        <label>
+                            <input type="radio" name="device" value=(&found.address) checked=(current == found.address)>
+                            " " (&found.name)
+                            <div class="muted">(&found.address) " - signal " (found.rssi) " dBm"</div>
+                        </label>
+                    }
+                    if units.is_empty() {
+                        <p class="muted">
+                            "No CarPlay head units answered. Automatic will keep looking every time \
+                             carjack starts a session, so it is the safe choice here."
+                        </p>
+                    }
+                    <button type="submit">"Save"</button>
+                </form>
             }
-            if units.is_empty() {
-                <p class="muted">
-                    "No CarPlay head units answered. Automatic will keep looking every time \
-                     carjack starts a session, so it is the safe choice here."
-                </p>
-            }
-            <button type="submit">"Save"</button>
-        </form>
-    }
+        })
+    })
 }
 
 #[page(POST "/unit")]
-async fn save_unit(Form(choice): Form<UnitChoice>) -> Result {
+async fn save_unit(Form(choice): Form<UnitChoice>) -> Result<impl View> {
     // Anything that is not a MAC we recognise is stored verbatim; `Target` treats it as a name.
     let saved = Target::parse(&choice.device);
     let message = match &saved {
@@ -151,11 +168,11 @@ async fn save_unit(Form(choice): Form<UnitChoice>) -> Result {
         },
     };
 
-    view! {
+    Ok(view! {
         <div class="ok">(message)</div>
         <p>"carjack picks this up on its next connection attempt."</p>
         <p><a href="/">"Back to status"</a></p>
-    }
+    })
 }
 
 #[derive(Deserialize)]
@@ -165,10 +182,10 @@ struct NewPassword {
 }
 
 #[page("/password")]
-async fn password() -> Result {
+async fn password() -> Result<impl View> {
     let first_time = StoredSettings::load().ap_passphrase_is_default();
 
-    view! {
+    Ok(view! {
         <h2>"Setup network password"</h2>
         if first_time {
             <p>
@@ -190,11 +207,11 @@ async fn password() -> Result {
             </p>
             <button type="submit">"Change password"</button>
         </form>
-    }
+    })
 }
 
 #[page(POST "/password")]
-async fn save_password(cx: &Cx, Form(new): Form<NewPassword>) -> Result {
+async fn save_password(cx: &Cx, Form(new): Form<NewPassword>) -> Result<impl View> {
     let state: &Arc<PortalState> = app_context(cx);
     let outcome = if new.password != new.confirm {
         Err(String::from("Those did not match."))
@@ -211,7 +228,7 @@ async fn save_password(cx: &Cx, Form(new): Form<NewPassword>) -> Result {
         *state.ap.lock().await = super::raise_ap(&state.wifi).await;
     }
 
-    view! {
+    Ok(view! {
         match &outcome {
             Ok(()) => {
                 <div class="ok">"Password changed."</div>
@@ -226,7 +243,7 @@ async fn save_password(cx: &Cx, Form(new): Form<NewPassword>) -> Result {
                 <p><a href="/password">"Try again"</a></p>
             }
         }
-    }
+    })
 }
 
 #[derive(Deserialize)]
@@ -236,48 +253,58 @@ struct NetworkChoice {
     passphrase: String,
 }
 
+/// Streamed for the same reason as `/unit`: NetworkManager is given a scan window before its
+/// access point list is worth reading.
 #[page("/wifi")]
-async fn wifi(cx: &Cx) -> Result {
+async fn wifi(cx: &Cx) -> Result<impl View> {
     let state: &Arc<PortalState> = app_context(cx);
-    let found = scan::networks(&state.wifi).await;
+    let wifi = state.wifi.clone();
 
-    view! {
+    Ok(view! {
         <h2>"WiFi"</h2>
-        match &found {
-            Err(e) => {
-                <p class="muted">"Could not scan: " (e.to_string())</p>
-                <p class="muted">
-                    "This needs a second WiFi adapter - the first one is reserved for CarPlay."
-                </p>
-            }
-            Ok(networks) => {
-                <form method="post" action="/wifi">
-                    for network in networks {
-                        <label>
-                            <input type="radio" name="ssid" value=(&network.ssid)>
-                            " " (&network.ssid)
-                            <span class="muted">
-                                " - " (network.strength) "%"
-                                if !network.secured { " - open" }
-                            </span>
-                        </label>
+        (live! {
+            emit! { <p class="scanning">"Scanning for networks..."</p> }?;
+
+            let found = scan::networks(&wifi).await;
+
+            emit! {
+                match &found {
+                    Err(e) => {
+                        <p class="muted">"Could not scan: " (e.to_string())</p>
+                        <p class="muted">
+                            "This needs a second WiFi adapter - the first one is reserved for CarPlay."
+                        </p>
                     }
-                    if networks.is_empty() {
-                        <p class="muted">"No networks found."</p>
+                    Ok(networks) => {
+                        <form method="post" action="/wifi">
+                            for network in networks {
+                                <label>
+                                    <input type="radio" name="ssid" value=(&network.ssid)>
+                                    " " (&network.ssid)
+                                    <span class="muted">
+                                        " - " (network.strength) "%"
+                                        if !network.secured { " - open" }
+                                    </span>
+                                </label>
+                            }
+                            if networks.is_empty() {
+                                <p class="muted">"No networks found."</p>
+                            }
+                            <label>
+                                "Password"
+                                <input type="password" name="passphrase" autocomplete="off">
+                            </label>
+                            <button type="submit">"Join"</button>
+                        </form>
                     }
-                    <label>
-                        "Password"
-                        <input type="password" name="passphrase" autocomplete="off">
-                    </label>
-                    <button type="submit">"Join"</button>
-                </form>
+                }
             }
-        }
-    }
+        })
+    })
 }
 
 #[page(POST "/wifi")]
-async fn join_wifi(cx: &Cx, Form(choice): Form<NetworkChoice>) -> Result {
+async fn join_wifi(cx: &Cx, Form(choice): Form<NetworkChoice>) -> Result<impl View> {
     let state: &Arc<PortalState> = app_context(cx);
     // The setup AP and the network being joined are the same radio, so the AP has to go first -
     // NetworkManager would otherwise refuse to activate a second profile on the device.
@@ -286,7 +313,7 @@ async fn join_wifi(cx: &Cx, Form(choice): Form<NetworkChoice>) -> Result {
     }
     let joined = scan::join_network(&state.wifi, &choice.ssid, &choice.passphrase).await;
 
-    view! {
+    Ok(view! {
         match &joined {
             Ok(()) => {
                 <div class="ok">"Joining " (&choice.ssid) "."</div>
@@ -302,5 +329,5 @@ async fn join_wifi(cx: &Cx, Form(choice): Form<NetworkChoice>) -> Result {
             }
         }
         <p><a href="/">"Back to status"</a></p>
-    }
+    })
 }

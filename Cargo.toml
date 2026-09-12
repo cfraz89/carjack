@@ -80,7 +80,7 @@ zbus = { version = "5.18.0", features = ["tokio"] }
 thiserror = "2.0.19"
 chrono = "0.4"
 reis = { version = "0.7.0", features = ["tokio"] }
-topcoat = "0.6.2"
+topcoat = "0.8"
 
 [features]
 # NVIDIA zero-copy encode (`nvh264enc` via `cuda-dmabuf`). Off by default so the project builds on
