@@ -313,16 +313,29 @@ async fn scan_for_target(adapter: &Adapter, target: &Target) -> Result<Option<Ad
 }
 
 pub(crate) async fn find_target_device(adapter: &Adapter, target: &Target) -> Result<Device> {
-    // A named unit BlueZ already knows (bonded, or currently connected) needs no inquiry, and
-    // connecting without one running is both quicker and more reliable. `auto` has no such
-    // shortcut: its test is RSSI, which only a live discovery sets.
-    if let Target::Selector(selector) = target {
-        let wanted: Option<Address> = selector.parse().ok();
-        for addr in adapter.device_addresses().await? {
-            let device = adapter.device(addr)?;
-            if device_matches(&device, selector, wanted).await {
-                tracing::info!(%selector, ?addr, "Found configured head unit in BlueZ's device list");
-                return prepare_device(device).await;
+    // A unit BlueZ already knows needs no inquiry, and connecting without one running is both
+    // quicker and more reliable.
+    match target {
+        Target::Selector(selector) => {
+            let wanted: Option<Address> = selector.parse().ok();
+            for addr in adapter.device_addresses().await? {
+                let device = adapter.device(addr)?;
+                if device_matches(&device, selector, wanted).await {
+                    tracing::info!(%selector, ?addr, "Found configured head unit in BlueZ's device list");
+                    return prepare_device(device).await;
+                }
+            }
+        }
+        // `auto` screens BlueZ's backlog on RSSI, which only a live discovery sets - and a device
+        // BlueZ is already connected to has none, nor does it re-emit DeviceAdded for discovery to
+        // find. Being connected is the liveness the RSSI stood in for, so take that instead.
+        Target::Auto => {
+            for addr in adapter.device_addresses().await? {
+                let device = adapter.device(addr)?;
+                if device.is_connected().await.unwrap_or(false) && offers_iap(&device).await {
+                    tracing::info!(?addr, "Found a connected CarPlay unit in BlueZ's device list");
+                    return prepare_device(device).await;
+                }
             }
         }
     }
