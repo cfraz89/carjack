@@ -33,6 +33,10 @@ const DISCOVERY_RESTART_DELAY: Duration = Duration::from_secs(5);
 const ADAPTER_RETRY_DELAY: Duration = Duration::from_secs(1);
 const ADAPTER_ATTEMPTS: usize = 30;
 
+/// Long enough to outlast BlueZ finishing the profiles Connect() started.
+const DIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
+const DIAL_ATTEMPTS: usize = 5;
+
 /// A page timeout usually just means the controller missed; it often answers on a later try.
 const PAGE_ATTEMPTS: usize = 3;
 const PAGE_RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -234,10 +238,21 @@ pub(crate) async fn relink(device: &Device, gate: &Arc<Semaphore>) {
 
 /// Spawned: `ConnectProfile` blocks for the SDP lookup and connect; the stream wins on the client
 /// profile.
+///
+/// Retried on br-connection-busy alone: Connect() returns once the ACL link is up and leaves
+/// BlueZ connecting profiles behind it, so the first dial lands while it is still busy.
 pub(crate) fn dial_accessory(device: &Device) {
     let device = device.clone();
     tokio::spawn(async move {
-        let res = device.connect_profile(&IAP_ACCESSORY_UUID).await;
+        let res = (|| async { device.connect_profile(&IAP_ACCESSORY_UUID).await })
+            .retry(
+                ConstantBuilder::new()
+                    .with_delay(DIAL_RETRY_DELAY)
+                    .with_max_times(DIAL_ATTEMPTS),
+            )
+            .when(|e| e.kind == bluer::ErrorKind::InProgress)
+            .notify(|e, _| tracing::debug!(%e, "Dial collided with BlueZ; retrying"))
+            .await;
         tracing::debug!(?res, "Outbound iAP dial result");
     });
 }
