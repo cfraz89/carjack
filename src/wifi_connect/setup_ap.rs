@@ -19,7 +19,7 @@ use nm_automata::{
 
 use carjack::config::{Wifi, WifiRole};
 
-use super::networkmanager::{get_network_manager, role_device};
+use super::networkmanager::{connection_by_uuid, get_network_manager, role_device};
 
 /// Fixed rather than left to NetworkManager's `10.42.0.0/24` search: the DHCP option 114 URL in
 /// the packaged dnsmasq drop-in has to name an address that is known before the AP comes up.
@@ -89,9 +89,19 @@ impl SetupAp {
         let iface = device.interface().await?;
 
         let profile = ap_profile(ssid, passphrase, &iface);
-        let (conn, active) = nm
-            .add_and_activate_connection(&profile, &device, None)
-            .await?;
+        // NetworkManager's connections outlive a reboot on /data, and AP_UUID is fixed, so
+        // add_and_activate would fail with UuidExists on every boot after the first.
+        let (conn, active) = match connection_by_uuid(nm, AP_UUID).await {
+            Some(existing) => {
+                existing.update(&profile).await?;
+                let active = nm.activate_connection(&existing, &device, None).await?;
+                (existing, active)
+            }
+            None => {
+                nm.add_and_activate_connection(&profile, &device, None)
+                    .await?
+            }
+        };
         wait_for_ap(&active).await?;
 
         tracing::info!(%ssid, %iface, address = AP_ADDRESS, "Setup access point is up");

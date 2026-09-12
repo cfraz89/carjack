@@ -160,6 +160,23 @@ async fn connect_to_accessory_wifi(
     .await
 }
 
+/// The stored profile carrying `uuid`, if NetworkManager has one.
+pub(crate) async fn connection_by_uuid(
+    nm: &NetworkManagerProxy<'_>,
+    uuid: &str,
+) -> Option<SettingsConnectionProxy<'static>> {
+    let settings = SettingsProxy::new(nm.inner().connection()).await.ok()?;
+    for conn in settings.connections().await.ok()? {
+        let Ok(stored) = conn.get_settings().await else {
+            continue;
+        };
+        if profile_uuid(&stored) == Some(uuid) {
+            return Some(conn);
+        }
+    }
+    None
+}
+
 /// This accessory's stored profile, deleting every stale one it passes.
 ///
 /// Keyed by UUID, not SSID: a head unit is free to rename its network - some invent a fresh SSID
