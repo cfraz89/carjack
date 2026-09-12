@@ -53,29 +53,34 @@ pub enum UplinkState {
 }
 
 impl SetupAp {
-    /// Waits up to [`UPLINK_SETTLE`] before settling on [`UplinkState::Absent`], logging why -
-    /// the caller cannot tell one radio from a NetworkManager that never answered.
+    /// Anything short of Activated stays a maybe until [`UPLINK_SETTLE`] expires: raising the
+    /// setup AP over an associating radio is how the board loses the network.
     pub async fn uplink_state(wifi: &Wifi) -> UplinkState {
         let deadline = Instant::now() + UPLINK_SETTLE;
         loop {
-            let err = match role_device(WifiRole::Uplink, wifi.selector(WifiRole::Uplink)).await {
-                Ok(device) => {
-                    return if matches!(
-                        device.state().await,
-                        Ok(nm_automata::DeviceState::Activated)
-                    ) {
-                        UplinkState::Busy
-                    } else {
-                        UplinkState::Idle
-                    };
-                }
-                Err(err) => err,
+            let waiting_on = match role_device(WifiRole::Uplink, wifi.selector(WifiRole::Uplink))
+                .await
+            {
+                Ok(device) => match device.state().await {
+                    Ok(nm_automata::DeviceState::Activated) => return UplinkState::Busy,
+                    Ok(state) => Ok(format!("{state:?}")),
+                    Err(e) => Ok(format!("state unreadable: {e}")),
+                },
+                Err(err) => Err(err),
             };
             if Instant::now() >= deadline {
-                tracing::info!(%err, "No uplink adapter after {UPLINK_SETTLE:?}");
-                return UplinkState::Absent;
+                return match waiting_on {
+                    Ok(state) => {
+                        tracing::info!(%state, "Uplink adapter idle after {UPLINK_SETTLE:?}");
+                        UplinkState::Idle
+                    }
+                    Err(err) => {
+                        tracing::info!(%err, "No uplink adapter after {UPLINK_SETTLE:?}");
+                        UplinkState::Absent
+                    }
+                };
             }
-            tracing::debug!(%err, "No uplink adapter yet; asking again");
+            tracing::debug!(?waiting_on, "Uplink not on a network yet; asking again");
             tokio::time::sleep(UPLINK_POLL).await;
         }
     }

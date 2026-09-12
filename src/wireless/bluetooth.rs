@@ -326,9 +326,8 @@ pub(crate) async fn find_target_device(adapter: &Adapter, target: &Target) -> Re
                 }
             }
         }
-        // `auto` screens BlueZ's backlog on RSSI, which only a live discovery sets - and a device
-        // BlueZ is already connected to has none, nor does it re-emit DeviceAdded for discovery to
-        // find. Being connected is the liveness the RSSI stood in for, so take that instead.
+        // Connected stands in for auto's RSSI screen: a connected device has no RSSI and
+        // re-emits no DeviceAdded, so discovery never sees it.
         Target::Auto => {
             for addr in adapter.device_addresses().await? {
                 let device = adapter.device(addr)?;
