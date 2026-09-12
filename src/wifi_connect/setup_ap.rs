@@ -53,16 +53,25 @@ pub enum UplinkState {
 }
 
 impl SetupAp {
-    /// Anything short of Activated stays a maybe until [`UPLINK_SETTLE`] expires: raising the
-    /// setup AP over an associating radio is how the board loses the network.
+    /// A radio on its way up counts as taken: raising the setup AP over one mid-association is
+    /// how the board loses the network. [`UPLINK_SETTLE`] bounds the wait, not the verdict.
     pub async fn uplink_state(wifi: &Wifi) -> UplinkState {
+        use nm_automata::DeviceState as S;
         let deadline = Instant::now() + UPLINK_SETTLE;
         loop {
             let waiting_on = match role_device(WifiRole::Uplink, wifi.selector(WifiRole::Uplink))
                 .await
             {
                 Ok(device) => match device.state().await {
-                    Ok(nm_automata::DeviceState::Activated) => return UplinkState::Busy,
+                    Ok(
+                        S::Activated
+                        | S::Prepare
+                        | S::Config
+                        | S::NeedAuth
+                        | S::IpConfig
+                        | S::IpCheck
+                        | S::Secondaries,
+                    ) => return UplinkState::Busy,
                     Ok(state) => Ok(format!("{state:?}")),
                     Err(e) => Ok(format!("state unreadable: {e}")),
                 },
