@@ -8,6 +8,7 @@
 //! the package (see `dnsmasq-shared-carjack.conf`).
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use eyre::{Result, eyre};
 use nm_automata::{
@@ -29,6 +30,10 @@ const AP_PREFIX: u32 = 24;
 /// piling up beside the new one.
 const AP_UUID: &str = "0a3d5e5c-6b4e-5c2f-9d31-7e2a4c9f1b80";
 
+/// A user unit cannot be ordered after NetworkManager, so an adapter may not be realised yet.
+const UPLINK_SETTLE: Duration = Duration::from_secs(20);
+const UPLINK_POLL: Duration = Duration::from_secs(1);
+
 pub struct SetupAp {
     conn: SettingsConnectionProxy<'static>,
     ssid: String,
@@ -43,23 +48,35 @@ pub enum UplinkState {
     /// reachable - taking it down to host a setup AP would be a downgrade.
     Busy,
     /// No adapter holds the uplink role, so there is nothing to raise an AP on. A board with one
-    /// radio, which CarPlay has.
+    /// radio, which CarPlay has, or one whose second never turned up.
     Absent,
 }
 
 impl SetupAp {
+    /// Waits up to [`UPLINK_SETTLE`] before settling on [`UplinkState::Absent`], logging why -
+    /// the caller cannot tell one radio from a NetworkManager that never answered.
     pub async fn uplink_state(wifi: &Wifi) -> UplinkState {
-        let Ok(device) = role_device(WifiRole::Uplink, wifi.selector(WifiRole::Uplink)).await
-        else {
-            return UplinkState::Absent;
-        };
-        if matches!(
-            device.state().await,
-            Ok(nm_automata::DeviceState::Activated)
-        ) {
-            UplinkState::Busy
-        } else {
-            UplinkState::Idle
+        let deadline = Instant::now() + UPLINK_SETTLE;
+        loop {
+            let err = match role_device(WifiRole::Uplink, wifi.selector(WifiRole::Uplink)).await {
+                Ok(device) => {
+                    return if matches!(
+                        device.state().await,
+                        Ok(nm_automata::DeviceState::Activated)
+                    ) {
+                        UplinkState::Busy
+                    } else {
+                        UplinkState::Idle
+                    };
+                }
+                Err(err) => err,
+            };
+            if Instant::now() >= deadline {
+                tracing::info!(%err, "No uplink adapter after {UPLINK_SETTLE:?}");
+                return UplinkState::Absent;
+            }
+            tracing::debug!(%err, "No uplink adapter yet; asking again");
+            tokio::time::sleep(UPLINK_POLL).await;
         }
     }
 

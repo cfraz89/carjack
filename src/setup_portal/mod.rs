@@ -35,12 +35,16 @@ pub struct PortalState {
 pub struct Portal {
     shutdown: CancellationToken,
     _server: tokio_util::task::AbortOnDropHandle<()>,
+    _uplink: tokio_util::task::AbortOnDropHandle<()>,
 }
 
 impl Portal {
-    /// Serve the portal, raising the setup AP first if the uplink adapter has nothing better to
-    /// do. Never fatal: a board with one adapter still gets the portal on whatever network it is
-    /// already on, and a board with none still runs CarPlay.
+    /// Serve the portal, and raise the setup AP alongside it if the uplink adapter has nothing
+    /// better to do. Never fatal: a board with one adapter still gets the portal on whatever
+    /// network it is already on, and a board with none still runs CarPlay.
+    ///
+    /// The AP decision is spawned, not awaited: settling it waits on NetworkManager, and the
+    /// CarPlay session starts behind this call.
     ///
     /// `None` when `[portal] enabled` is false, and then nothing is raised or served.
     pub async fn start(config: &Config, adapter: Adapter) -> Option<Self> {
@@ -48,32 +52,34 @@ impl Portal {
             tracing::info!("Config portal disabled by [portal] enabled = false");
             return None;
         }
-        let wifi = config.wifi.clone();
-        let ap = match SetupAp::uplink_state(&wifi).await {
-            UplinkState::Idle => raise_ap(&wifi).await,
-            UplinkState::Busy => {
-                tracing::info!("Uplink adapter is already on a network; not raising the setup one");
-                None
-            }
-            UplinkState::Absent => {
-                tracing::info!(
-                    "No adapter holds the uplink role, so there is no radio free for the setup \
-                     network; serving the portal on whatever this board is already on"
-                );
-                None
-            }
-        };
-
         let state = Arc::new(PortalState {
-            wifi,
+            wifi: config.wifi.clone(),
             adapter,
-            ap: tokio::sync::Mutex::new(ap),
+            ap: tokio::sync::Mutex::new(None),
         });
+
+        let uplink = tokio::spawn({
+            let state = state.clone();
+            async move {
+                match SetupAp::uplink_state(&state.wifi).await {
+                    UplinkState::Idle => *state.ap.lock().await = raise_ap(&state.wifi).await,
+                    UplinkState::Busy => tracing::info!(
+                        "Uplink adapter is already on a network; not raising the setup one"
+                    ),
+                    UplinkState::Absent => tracing::info!(
+                        "No adapter holds the uplink role, so there is no radio free for the \
+                         setup network; serving the portal on whatever this board is already on"
+                    ),
+                }
+            }
+        });
+
         let shutdown = CancellationToken::new();
         let server = tokio::spawn(serve(state, shutdown.clone()));
         Some(Portal {
             shutdown,
             _server: tokio_util::task::AbortOnDropHandle::new(server),
+            _uplink: tokio_util::task::AbortOnDropHandle::new(uplink),
         })
     }
 
