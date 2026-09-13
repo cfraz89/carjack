@@ -140,51 +140,18 @@ and the adapter is left discoverable and pairable while waiting, which it was no
 Untested: a successful initiation under the new timing. Nine minutes of runs never got one,
 because of the screen the unit was on.
 
-### What HCI says the unit is actually doing (`logs/bike-hci.btsnoop`)
-
-`btmon -w` over three page cycles, read back with `btmon -r` (no privileges needed for the read).
-Two things settle:
-
-**The unit never asks us about iAP or CarPlay.** Every Service Search Request it sent us was for a
-classic profile - Handsfree AG, Audio Source, AVRCP Target, Phonebook Access, OBEX Push, Headset -
-and it is running HFP AT commands at us (`AT+CLIP=1`). Not one query for `...decacafe` or
-`2d8d2466-...`. Our records are fine: when it browses us we do answer with both, five times each.
-So this is not our SDP, and no amount of paging will provoke a unit that is not looking.
-
-**The unit hosts its iAP service on RFCOMM channel 2**, record handle `0x00010009`, and it will
-take a connection there. Registering the accessory UUID client-side and calling `ConnectProfile`
-(`dial_accessory`) got a channel **43 ms after the dial** on the first attempt - the fastest any
-channel has ever arrived. It then reset it 20 ms into the handshake, while iAP2 was waiting for the
-accessory's SYN:
-
-```
-12:09:41.020  dialling the accessory
-12:09:41.063  Got connect request from=B6:5D:B5:04:8E:FC
-12:09:41.063  Waiting for SYN from accessory
-12:09:41.083  Error performing syn: Connection reset by peer (104)
-```
-
-So the reverse direction is reachable and the unit answers on it instantly - it just will not carry
-iAP2 while it is in plain-phone mode. Whether it completes once the unit is in CarPlay mode is the
-open question, and the one worth testing next. Later dials in the same run return
-`br-connection-not-supported`, which needs explaining before the path can be relied on.
-
-`dial_accessory` runs on every attempt now - once as soon as the unit resolves, and again after
-each relink. It spawns, so it dials **alongside** the wait for an inbound channel rather than in
-place of it, and whichever direction connects first wins.
-
 ### The unit withdraws its iAP record, and that is what "random" was
 
-The same SDP query, seventeen minutes apart, from the same capture:
+The same SDP query, seventeen minutes apart, from `logs/bike-hci.btsnoop`:
 
 | | t=1040 (22:09:41) | t=2067 (22:26:48) |
 | --- | --- | --- |
 | query | `SSA Request` for `...decacaff` | identical |
 | response | `Attribute bytes: 68` - handle `0x00010009`, RFCOMM channel 2 | **`Attribute bytes: 2`**, empty |
-| outcome | dial connected in 43 ms | `record_cb() No SDP records found` -> `br-connection-not-supported` |
+| outcome | a channel opened, then reset 20 ms in | `record_cb() No SDP records found` -> `br-connection-not-supported` |
 
 The record was published at 21:53 and at 22:09:41, and **gone by 22:10:02** - within about twenty
-seconds of the one dial that connected and had its handshake reset. `bluetoothctl info` still lists
+seconds of the one channel that opened and had its handshake reset. `bluetoothctl info` still lists
 the UUID, but that is BlueZ's cached list from when the record was live; the unit itself now answers
 the query empty.
 
@@ -196,9 +163,6 @@ would republish it.
 
 Moving the bike to its home screen changed nothing, which rules the screen out as the mechanism on
 its own; the record being absent is upstream of it.
-
-The suspicion that the dial *caused* the withdrawal is **wrong** - see below. That suspicion was
-why it was gated off; with it gone, the dial always runs.
 
 ## A restart buys exactly one session (2026-08-13, night)
 

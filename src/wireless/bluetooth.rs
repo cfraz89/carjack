@@ -1,5 +1,5 @@
-//! BlueZ: the adapter, iAP profiles and pairing carjack registers, plus the paging/dialling/relink
-//! moves that get a unit to offer its iAP channel. Orchestrated by [`super`].
+//! BlueZ: the adapter, iAP profiles and pairing carjack registers, plus the paging/relink moves
+//! that get a unit to offer its iAP channel. Orchestrated by [`super`].
 
 use std::{sync::Arc, time::Duration};
 
@@ -33,10 +33,6 @@ const DISCOVERY_RESTART_DELAY: Duration = Duration::from_secs(5);
 const ADAPTER_RETRY_DELAY: Duration = Duration::from_secs(1);
 const ADAPTER_ATTEMPTS: usize = 30;
 
-/// Long enough to outlast BlueZ finishing the profiles Connect() started.
-const DIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
-const DIAL_ATTEMPTS: usize = 5;
-
 /// A page timeout usually just means the controller missed; it often answers on a later try.
 const PAGE_ATTEMPTS: usize = 3;
 const PAGE_RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -49,8 +45,8 @@ pub struct IapHost {
     _session: Session,
     /// The iAP profile the unit dials in on; a session takes exclusive use of its stream.
     pub(crate) iap_profile: Mutex<ProfileHandle>,
-    /// The unit's own iAP server, dialed outbound when it won't dial us.
-    pub(crate) iap_client: Mutex<ProfileHandle>,
+    /// Held only to keep the accessory UUID in our EIR; nothing dials it.
+    _iap_client: ProfileHandle,
     _agent: bluer::agent::AgentHandle,
 }
 
@@ -136,7 +132,7 @@ impl IapHost {
         };
 
         let iap_profile = Mutex::new(session.register_profile(device_profile()).await?);
-        let iap_client = Mutex::new(session.register_profile(accessory_profile()).await?);
+        let iap_client = session.register_profile(accessory_profile()).await?;
         // Rejecting connects so an unanswered request can't pin its fd. A collision means
         // bluetoothd or obexd already advertises the UUID, which is as good.
         for profile in [carplay_profile()] {
@@ -184,7 +180,7 @@ impl IapHost {
             identity,
             _session: session,
             iap_profile,
-            iap_client,
+            _iap_client: iap_client,
             _agent: agent,
         })
     }
@@ -226,32 +222,6 @@ pub(crate) async fn relink(device: &Device, gate: &Arc<Semaphore>) {
         } else {
             tracing::debug!(?res, "Connection result")
         }
-        // Here, not at the call site: the connect above is what makes the link, and dialling
-        // before it lands fails with br-connection-create-socket.
-        if res.is_ok() {
-            dial_accessory(&device);
-        }
-    });
-}
-
-/// Spawned: `ConnectProfile` blocks for the SDP lookup and connect; the stream wins on the client
-/// profile.
-///
-/// Retried on br-connection-busy alone: Connect() returns once the ACL link is up and leaves
-/// BlueZ connecting profiles behind it, so the first dial lands while it is still busy.
-pub(crate) fn dial_accessory(device: &Device) {
-    let device = device.clone();
-    tokio::spawn(async move {
-        let res = (|| async { device.connect_profile(&IAP_ACCESSORY_UUID).await })
-            .retry(
-                ConstantBuilder::new()
-                    .with_delay(DIAL_RETRY_DELAY)
-                    .with_max_times(DIAL_ATTEMPTS),
-            )
-            .when(|e| e.kind == bluer::ErrorKind::InProgress)
-            .notify(|e, _| tracing::debug!(%e, "Dial collided with BlueZ; retrying"))
-            .await;
-        tracing::debug!(?res, "Outbound iAP dial result");
     });
 }
 

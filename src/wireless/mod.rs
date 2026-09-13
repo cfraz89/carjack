@@ -22,7 +22,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 use carjack::config::Target;
 
-use crate::wireless::bluetooth::{dial_accessory, find_target_device, relink, request_is_target};
+use crate::wireless::bluetooth::{find_target_device, relink, request_is_target};
 
 /// Handed to the caller: the channel a CarPlay session streams the accessory's credentials over,
 /// and a token it cancels once on the accessory's access point - after which a Bluetooth drop is
@@ -70,22 +70,15 @@ async fn attempt_iap2_link(
     ctx: &mut LinkCtx,
 ) -> Result<Iap2<bluer::rfcomm::Stream>, LinkAttemptError> {
     let mut profile = ctx.host.iap_profile.lock().await;
-    let mut client = ctx.host.iap_client.lock().await;
 
     loop {
         tracing::debug!("Waiting for iAP2 connection requests");
         // Re-check on every wait - a link can appear after this loop starts (e.g. BlueZ
         // auto-connecting a trusted device) and we'd never have cycled it.
         let mut wait = OFFER_WAIT;
-        // Spawns, so it dials out while the select below still waits for an inbound channel.
-        let resolved = ctx.device.borrow().clone();
-        if let Some(device) = &resolved {
-            dial_accessory(device);
-        }
         let rq = loop {
             tokio::select! {
                 rq = profile.next() => break rq.ok_or(LinkAttemptError::ProfilesClosed)?,
-                rq = client.next() => break rq.ok_or(LinkAttemptError::ProfilesClosed)?,
                 _ = tokio::time::sleep(wait) => {
                     let device = ctx.device.borrow().clone();
                     let Some(device) = device else {
@@ -93,7 +86,6 @@ async fn attempt_iap2_link(
                         continue;
                     };
                     tracing::info!(?wait, "No iAP channel offered; cycling the link");
-                    // Dials for itself once the link is back up.
                     relink(&device, &ctx.connect_attempt).await;
                     wait = (wait * 2).min(OFFER_WAIT_MAX);
                 }
