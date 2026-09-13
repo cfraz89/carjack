@@ -26,7 +26,7 @@ rtnetlink = "0.21.0"
 netlink-packet-route = "0.30"
 backon = "1.6.0"
 # git, not 0.17.4: that release omits Channel entirely when it is None, where bluez wants 0.
-bluer = { git = "https://github.com/bluez/bluer.git", features = ["full", "rfcomm"] }
+bluer = { git = "https://github.com/bluez/bluer.git", rev = "57ec704503417a6476bca5d3bb01122686583709", features = ["full", "rfcomm"] }
 color-eyre = "0.6.5"
 deku = "0.20.3"
 uuid = { version = "1.23.3", features = ["v5"] }

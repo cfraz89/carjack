@@ -272,11 +272,15 @@ fn accessory_profile(
     accessory_mac: Option<&str>,
     iface: &str,
 ) -> ConnectionProfile {
-    let wireless = WirelessSetting::default()
+    let mut wireless = WirelessSetting::default()
         .ssid(ssid)
         .hidden(true)
-        .assigned_mac_address(announced_mac)
-        .disable_he(disable_he);
+        .assigned_mac_address(announced_mac);
+    // Only when asked: stock NetworkManager has no disable-he, and one property it does not
+    // know makes it drop the whole 802-11-wireless setting and report it missing.
+    if disable_he {
+        wireless = wireless.disable_he(true);
+    }
     // `.connection()` replaces the whole setting, dropping the id `ConnectionProfile::new` put there.
     // Pinned to the CarPlay adapter so it can never activate on the uplink one.
     let connection = ConnectionSetting::default()

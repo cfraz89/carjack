@@ -467,7 +467,7 @@ dependencies = [
 [[package]]
 name = "bluer"
 version = "0.17.4"
-source = "git+https://github.com/bluez/bluer.git#57ec704503417a6476bca5d3bb01122686583709"
+source = "git+https://github.com/bluez/bluer.git?rev=57ec704503417a6476bca5d3bb01122686583709#57ec704503417a6476bca5d3bb01122686583709"
 dependencies = [
  "custom_debug",
  "dbus",
