@@ -91,8 +91,6 @@ fn advertised_profile(uuid: uuid::Uuid, name: &str) -> rfcomm::Profile {
         uuid,
         name: Some(String::from(name)),
         role: Some(Role::Server),
-        //Need this until bluer fixes None sending no channel, when it should send 0 == auto to bluez
-        channel: Some(0),
         require_authentication: Some(true),
         require_authorization: Some(false),
         ..Default::default()
