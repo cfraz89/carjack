@@ -1,5 +1,5 @@
-//! BlueZ: the adapter, iAP profiles and pairing carjack registers, plus the paging/relink moves
-//! that get a unit to offer its iAP channel. Orchestrated by [`super`].
+//! BlueZ: the adapter, iAP profiles and pairing carjack registers, plus the paging/relink
+//! moves that get a unit to offer its iAP channel. Orchestrated by [`super`].
 
 use std::{sync::Arc, time::Duration};
 
@@ -45,12 +45,10 @@ pub struct IapHost {
     _session: Session,
     /// The iAP profile the unit dials in on; a session takes exclusive use of its stream.
     pub(crate) iap_profile: Mutex<ProfileHandle>,
-    /// Held only to keep the accessory UUID in our EIR; nothing dials it.
-    _iap_client: ProfileHandle,
     _agent: bluer::agent::AgentHandle,
 }
 
-/// Its presence in our SDP is what makes a unit speak iAP rather than Android Auto.
+/// The profile that the accessory connects to
 fn device_profile() -> rfcomm::Profile {
     rfcomm::Profile {
         uuid: IAP_DEVICE_UUID,
@@ -60,18 +58,6 @@ fn device_profile() -> rfcomm::Profile {
         require_authentication: Some(true),
         require_authorization: Some(false),
         service_record: Some(iap_service_record(IAP_CHANNEL as u8).to_xml()),
-        ..Default::default()
-    }
-}
-
-/// Lets us dial the unit's own iAP server rather than only wait to be dialled.
-fn accessory_profile() -> rfcomm::Profile {
-    rfcomm::Profile {
-        uuid: IAP_ACCESSORY_UUID,
-        name: Some(String::from("Wireless iAP client")),
-        role: Some(Role::Client),
-        require_authentication: Some(true),
-        require_authorization: Some(false),
         ..Default::default()
     }
 }
@@ -87,6 +73,8 @@ fn advertised_profile(uuid: uuid::Uuid, name: &str) -> rfcomm::Profile {
         uuid,
         name: Some(String::from(name)),
         role: Some(Role::Server),
+        //Need this until bluer fixes None sending no channel, when it should send 0 == auto to bluez
+        channel: Some(0),
         require_authentication: Some(true),
         require_authorization: Some(false),
         ..Default::default()
@@ -132,7 +120,6 @@ impl IapHost {
         };
 
         let iap_profile = Mutex::new(session.register_profile(device_profile()).await?);
-        let iap_client = session.register_profile(accessory_profile()).await?;
         // Rejecting connects so an unanswered request can't pin its fd. A collision means
         // bluetoothd or obexd already advertises the UUID, which is as good.
         for profile in [carplay_profile()] {
@@ -180,7 +167,6 @@ impl IapHost {
             identity,
             _session: session,
             iap_profile,
-            _iap_client: iap_client,
             _agent: agent,
         })
     }
@@ -336,7 +322,10 @@ pub(crate) async fn find_target_device(adapter: &Adapter, target: &Target) -> Re
             for addr in adapter.device_addresses().await? {
                 let device = adapter.device(addr)?;
                 if device.is_connected().await.unwrap_or(false) && offers_iap(&device).await {
-                    tracing::info!(?addr, "Found a connected CarPlay unit in BlueZ's device list");
+                    tracing::info!(
+                        ?addr,
+                        "Found a connected CarPlay unit in BlueZ's device list"
+                    );
                     return prepare_device(device).await;
                 }
             }
