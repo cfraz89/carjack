@@ -1,8 +1,33 @@
 # Where things stand
 
-**Last updated: 2026-08-31.** This is the living document - if it disagrees with
+**Last updated: 2026-09-15.** This is the living document - if it disagrees with
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
+
+## `auto` could never resolve a unit that dialled in first (2026-09-15)
+
+On the board, against the bench AUTO BOX. The unit connected, ran a complete HFP session, opened
+our iAP channel - and sent nothing on it. The 5 s SYN wait expired and did not retry, correctly:
+`heard_from_peer` was false, so not one byte arrived. The rest of the boot was then dead - `No iAP
+channel offered; head unit not resolved yet` every 20 s, and `Discovering: yes` the whole time.
+
+Two things in `find_target_device`, both only reachable with `device = "auto"`:
+
+- auto's presence test was RSSI alone, and **BlueZ drops RSSI the moment a device connects**, so a
+  unit that had dialled us could not match however long discovery ran;
+- the device-list check ran once, ahead of discovery, so a unit that connected afterwards was never
+  looked for again.
+
+The watch therefore stayed `None`, which is what made it terminal: the accept loop's timeout branch
+needs a resolved `Device` to `relink`, and paging is what makes the unit offer a live channel. One
+silent channel ended the run.
+
+`is_present` now takes connected *or* in-range, and `await_known_target` polls BlueZ's list beside
+the scan, returning as soon as the unit appears there; the scan future is dropped with it, so
+resolution also ends the permanent inquiry.
+
+**Still open: why that channel was silent.** `iap2_proto` was at info, so nothing recorded whether
+the accessory sent anything at all - the image ships `iap2_proto=debug` now.
 
 ## The bike will not give us GPS, and Waydroid has none of its own (2026-08-31)
 

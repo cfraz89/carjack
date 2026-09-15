@@ -29,6 +29,9 @@ const IAP_CHANNEL: u16 = 1;
 /// unit can page us.
 const DISCOVERY_RESTART_DELAY: Duration = Duration::from_secs(5);
 
+/// How often BlueZ's device list is re-read while scanning.
+const DEVICE_LIST_POLL: Duration = Duration::from_secs(2);
+
 /// bluetoothd is a system service and this is a user unit, so nothing orders us after it.
 const ADAPTER_RETRY_DELAY: Duration = Duration::from_secs(1);
 const ADAPTER_ATTEMPTS: usize = 30;
@@ -250,15 +253,19 @@ async fn offers_iap(device: &Device) -> bool {
 
 /// Whether this device is the one to connect to.
 ///
-/// `auto` additionally insists the unit is in range, using RSSI: bluer documents it as `None` for
-/// a device that is known but not currently present, and a discovery stream opens by replaying
-/// every device BlueZ has ever seen, so it is what separates the units here from that backlog. A
-/// named unit is taken wherever it is found - out of range it just means the page retries.
+/// `auto` additionally insists the unit is present, which separates it from the backlog a
+/// discovery stream replays. A named unit is taken wherever it is found - out of range it just
+/// means the page retries.
 async fn matches_target(device: &Device, target: &Target) -> bool {
     match target {
-        Target::Auto => matches!(device.rssi().await, Ok(Some(_))) && offers_iap(device).await,
+        Target::Auto => is_present(device).await && offers_iap(device).await,
         Target::Selector(selector) => device_matches(device, selector, selector.parse().ok()).await,
     }
+}
+
+/// RSSI while discovery can see it, a link once it connects - BlueZ publishes one or the other.
+async fn is_present(device: &Device) -> bool {
+    matches!(device.rssi().await, Ok(Some(_))) || device.is_connected().await.unwrap_or(false)
 }
 
 /// One discovery session's worth of scanning: the first device matching `target`, or `None` if
@@ -302,48 +309,62 @@ async fn scan_for_target(adapter: &Adapter, target: &Target) -> Result<Option<Ad
     Ok(None)
 }
 
+/// The first match in BlueZ's own device list - no inquiry involved.
+async fn known_target(adapter: &Adapter, target: &Target) -> Result<Option<Device>> {
+    for addr in adapter.device_addresses().await? {
+        let device = adapter.device(addr)?;
+        let matched = match target {
+            Target::Auto => {
+                device.is_connected().await.unwrap_or(false) && offers_iap(&device).await
+            }
+            Target::Selector(selector) => {
+                device_matches(&device, selector, selector.parse().ok()).await
+            }
+        };
+        if matched {
+            tracing::info!(?target, ?addr, "Found the head unit in BlueZ's device list");
+            return Ok(Some(device));
+        }
+    }
+    Ok(None)
+}
+
+/// That list, polled until the unit appears in it.
+async fn await_known_target(adapter: &Adapter, target: &Target) -> Device {
+    loop {
+        match known_target(adapter, target).await {
+            Ok(Some(device)) => return device,
+            Ok(None) => {}
+            Err(e) => tracing::debug!(?e, "Could not read BlueZ's device list; asking again"),
+        }
+        tokio::time::sleep(DEVICE_LIST_POLL).await;
+    }
+}
+
 pub(crate) async fn find_target_device(adapter: &Adapter, target: &Target) -> Result<Device> {
     // A unit BlueZ already knows needs no inquiry, and connecting without one running is both
     // quicker and more reliable.
-    match target {
-        Target::Selector(selector) => {
-            let wanted: Option<Address> = selector.parse().ok();
-            for addr in adapter.device_addresses().await? {
-                let device = adapter.device(addr)?;
-                if device_matches(&device, selector, wanted).await {
-                    tracing::info!(%selector, ?addr, "Found configured head unit in BlueZ's device list");
-                    return prepare_device(device).await;
-                }
-            }
-        }
-        // Connected stands in for auto's RSSI screen: a connected device has no RSSI and
-        // re-emits no DeviceAdded, so discovery never sees it.
-        Target::Auto => {
-            for addr in adapter.device_addresses().await? {
-                let device = adapter.device(addr)?;
-                if device.is_connected().await.unwrap_or(false) && offers_iap(&device).await {
-                    tracing::info!(
-                        ?addr,
-                        "Found a connected CarPlay unit in BlueZ's device list"
-                    );
-                    return prepare_device(device).await;
-                }
-            }
-        }
+    if let Some(device) = known_target(adapter, target).await? {
+        return prepare_device(device).await;
     }
 
     tracing::info!(?target, "Looking for the head unit");
 
     let found = loop {
-        match scan_for_target(adapter, target).await {
-            Ok(Some(addr)) => break addr,
-            // BlueZ ended the session, or would not start one. Neither says the unit is not
-            // coming - it may not be powered yet - so scan again rather than give up on it.
-            Ok(None) => tracing::debug!(
-                ?target,
-                "Discovery ended without the head unit; scanning again"
-            ),
-            Err(e) => tracing::warn!(?e, ?target, "Bluetooth discovery failed; scanning again"),
+        // Polled beside the scan: a unit that dials in mid-scan loses its RSSI and re-emits no
+        // DeviceAdded, so discovery alone never sees it.
+        tokio::select! {
+            device = await_known_target(adapter, target) => return prepare_device(device).await,
+            res = scan_for_target(adapter, target) => match res {
+                Ok(Some(addr)) => break addr,
+                // BlueZ ended the session, or would not start one. Neither says the unit is not
+                // coming - it may not be powered yet - so scan again rather than give up on it.
+                Ok(None) => tracing::debug!(
+                    ?target,
+                    "Discovery ended without the head unit; scanning again"
+                ),
+                Err(e) => tracing::warn!(?e, ?target, "Bluetooth discovery failed; scanning again"),
+            },
         }
         tokio::time::sleep(DISCOVERY_RESTART_DELAY).await;
     };
