@@ -525,25 +525,88 @@ fn prop(props: &PropMap, name: &str) -> Result<property::Handle> {
 }
 
 /// The mode fixes the output size, and the driver requires the writeback buffer to match it
-/// exactly. Only the size is load-bearing - a writeback connector drives no timings.
+/// exactly. Only the size is load-bearing - a writeback connector drives no timings, so when the
+/// connector offers nothing at this size one is synthesized.
+///
+/// That is the normal case here rather than the exception: the connector's list comes from
+/// `drm_add_modes_noedid`, which is the standard display resolutions, and the compositor renders
+/// at whatever the accessory reported - 1080x600 on the bench unit, which is in no such list.
 fn mode_for(
     card: &Card,
     wb: &connector::Info,
     width: u32,
     height: u32,
 ) -> Result<property::Value<'static>> {
-    let mode = wb
+    if let Some(mode) = wb
         .modes()
         .iter()
         .find(|m| m.size() == (width as u16, height as u16))
-        .ok_or_else(|| {
-            eyre!(
-                "the writeback connector offers no {width}x{height} mode; it has {:?}",
-                wb.modes().iter().map(|m| m.size()).collect::<Vec<_>>()
-            )
-        })?;
-    card.create_property_blob(mode)
-        .wrap_err("create the mode blob")
+    {
+        return card
+            .create_property_blob(mode)
+            .wrap_err("blob the connector's own mode");
+    }
+    card.create_property_blob(&ModeInfo::for_size(width, height)?)
+        .wrap_err("blob a synthesized mode")
+}
+
+/// `drm_mode_modeinfo`, mirrored so a mode can be built without depending on `drm-sys` directly.
+/// Stable kernel uAPI.
+#[repr(C)]
+struct ModeInfo {
+    clock: u32,
+    hdisplay: u16,
+    hsync_start: u16,
+    hsync_end: u16,
+    htotal: u16,
+    hskew: u16,
+    vdisplay: u16,
+    vsync_start: u16,
+    vsync_end: u16,
+    vtotal: u16,
+    vscan: u16,
+    vrefresh: u32,
+    flags: u32,
+    kind: u32,
+    name: [u8; 32],
+}
+
+impl ModeInfo {
+    /// Nothing scans this out, so the blanking intervals are arbitrary - they only have to be
+    /// self-consistent and leave the clock in a sane range. Only `hdisplay`/`vdisplay` are
+    /// checked, by `dpu_wb_conn_atomic_check` against the framebuffer.
+    fn for_size(width: u32, height: u32) -> Result<Self> {
+        let (w, h) = (
+            u16::try_from(width).map_err(|_| eyre!("{width} is too wide for a mode"))?,
+            u16::try_from(height).map_err(|_| eyre!("{height} is too tall for a mode"))?,
+        );
+        let htotal = w.checked_add(160).ok_or_else(|| eyre!("{width} overflows htotal"))?;
+        let vtotal = h.checked_add(40).ok_or_else(|| eyre!("{height} overflows vtotal"))?;
+        let mut name = [0u8; 32];
+        let label = format!("{width}x{height}");
+        let n = label.len().min(name.len() - 1);
+        name[..n].copy_from_slice(&label.as_bytes()[..n]);
+        Ok(Self {
+            // kHz, for 60Hz over the total including blanking.
+            clock: (u32::from(htotal) * u32::from(vtotal) * 60) / 1000,
+            hdisplay: w,
+            hsync_start: w + 48,
+            hsync_end: w + 96,
+            htotal,
+            hskew: 0,
+            vdisplay: h,
+            vsync_start: h + 8,
+            vsync_end: h + 16,
+            vtotal,
+            vscan: 0,
+            vrefresh: 60,
+            // DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC
+            flags: 0x1 | 0x4,
+            // DRM_MODE_TYPE_DRIVER
+            kind: 1 << 6,
+            name,
+        })
+    }
 }
 
 /// Import a dmabuf the compositor rendered into as a DRM framebuffer on the card node.
