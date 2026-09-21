@@ -63,9 +63,6 @@ async fn dump_encoded_stream() -> Result<()> {
         width,
         height,
         30,
-        // The GPU pass, so the dump is the same everywhere: writeback needs a DRM writeback
-        // connector and DRM master, neither of which a build host is guaranteed to offer.
-        carjack::config::ZeroCopyMode::Off,
     )?;
 
     let cmd =

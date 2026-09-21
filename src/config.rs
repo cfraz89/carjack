@@ -175,14 +175,6 @@ pub struct Graphics {
     /// Target bitrate in kbit/s. Variable, so this is a ceiling. Kept modest by default: the
     /// accessory's WiFi link is the bottleneck, and overshooting it shows up as stutter.
     pub bitrate: u32,
-    /// Convert ARGB to NV12 on the display controller's writeback block rather than the GPU -
-    /// [`crate::writeback`] in place of [`crate::nv12`]. `"auto"` tries it and falls back to the
-    /// GPU with a warning, `true` requires it, `false` keeps the GPU pass. Only consulted on the
-    /// NV12 encode path; the others have no conversion to move.
-    ///
-    /// Defaults off. The hardware path is newer than the shader one and taking DRM master to use
-    /// it is a side effect on the whole device, so it is opt-in until it has run for a while.
-    pub writeback: ZeroCopyMode,
 }
 
 /// Default video bitrate, in kbit/s (3 Mbit/s).
@@ -195,7 +187,6 @@ impl Default for Graphics {
             zerocopy: ZeroCopyMode::Auto,
             codec: CodecChoice::Auto,
             bitrate: DEFAULT_BITRATE_KBPS,
-            writeback: ZeroCopyMode::Off,
         }
     }
 }

@@ -14,10 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::config::ZeroCopyMode;
 use crate::encode::FrameFormat;
 use crate::nv12::Nv12Converter;
-use crate::writeback::WritebackConverter;
 use eyre::{Result, eyre};
 use libcarjack::carplay_init::{TouchEvent, TouchEventType};
 use smithay::backend::allocator::dmabuf::{AsDmabuf, Dmabuf};
@@ -150,7 +148,6 @@ impl Compositor {
         width: u32,
         height: u32,
         fps: u32,
-        writeback: ZeroCopyMode,
     ) -> Result<Compositor> {
         let (frame_tx, frame_rx) = tokio::sync::watch::channel(None);
         let (touch_tx, touch_rx) = calloop::channel::channel::<TouchEvent>();
@@ -171,7 +168,6 @@ impl Compositor {
                     width,
                     height,
                     fps,
-                    writeback,
                     frame_tx,
                     touch_rx,
                     control_rx,
@@ -314,11 +310,9 @@ struct State {
     render_pool: Vec<Dmabuf>,
     pool_idx: usize,
     frame_format: FrameFormat,
-    /// The GPU ARGB->NV12 pass and its own pool of NV12 targets. `Some` when `frame_format` is
-    /// [`FrameFormat::Nv12`] and `writeback` is not - the two are alternatives, never both.
+    /// The GPU ARGB->NV12 pass and its own pool of NV12 targets. `Some` exactly when
+    /// `frame_format` is [`FrameFormat::Nv12`].
     nv12: Option<Nv12Converter>,
-    /// The same conversion on the display controller instead. Preferred when it is available.
-    writeback: Option<WritebackConverter>,
     damage_tracker: OutputDamageTracker,
     /// Set by any client commit; cleared when the frame it produced has been published. The
     /// render timer publishes only when it is set - a still screen costs no frames.
@@ -334,17 +328,15 @@ struct State {
     /// Zero on the paths that have no such step.
     convert_time: Duration,
     /// Publish on every tick rather than only on damage (`CARJACK_FORCE_FRAMES`). For measuring
-    /// the conversion paths against each other at full rate on a still screen - a still screen
-    /// otherwise publishes about once a second, and both paths look the same at that rate.
+    /// the render path at full rate on a still screen, which otherwise publishes about once a
+    /// second and so says nothing about per-frame cost.
     force_frames: bool,
 }
 
 impl State {
     /// Which conversion the published frames go through, for the stats line.
     fn path_label(&self) -> &'static str {
-        if self.writeback.is_some() {
-            "writeback"
-        } else if self.nv12.is_some() {
+        if self.nv12.is_some() {
             "gpu-nv12"
         } else if self.frame_format == FrameFormat::Argb {
             "argb"
@@ -387,27 +379,7 @@ impl State {
         }
 
         self.convert_time = Duration::ZERO;
-        if let Some(wb) = self.writeback.as_mut() {
-            drop(fb);
-            let convert_start = std::time::Instant::now();
-            // Submit the composition before the commit. The plane waits on the buffer's implicit
-            // fence (drm_gem_plane_helper_prepare_fb), but GL work still batched in Mesa has no
-            // fence yet, so without a flush the display controller could read the previous frame.
-            // Cheaper than a finish: the kernel does the waiting, not this thread.
-            if let Err(e) = self.renderer.with_context(|gl| unsafe { gl.Flush() }) {
-                tracing::warn!("compositor: flush before writeback failed: {e}");
-            }
-            let converted = wb.convert();
-            self.convert_time = convert_start.elapsed();
-            match converted {
-                Ok(buf) => {
-                    let _ = self
-                        .frame_tx
-                        .send(Some(Arc::new(CapturedFrame::Dmabuf(buf))));
-                }
-                Err(e) => tracing::warn!("compositor: writeback conversion failed: {e:#}"),
-            }
-        } else if let Some(nv12) = self.nv12.as_mut() {
+        if let Some(nv12) = self.nv12.as_mut() {
             drop(fb);
             // No readback: the frame never leaves the GPU, it just changes format.
             let convert_start = std::time::Instant::now();
@@ -520,15 +492,8 @@ impl State {
         // The NV12 targets and source texture are sized to the old mode, so the conversion is
         // rebuilt around the new pool - before anything is swapped in, so a failure leaves the
         // compositor rendering at the old size rather than at one it cannot publish.
-        //
-        // Writeback resizes in place instead of being rebuilt: it holds DRM master, and a
-        // replacement could not take it until this one was dropped.
-        if let Some(wb) = self.writeback.as_mut() {
-            wb.resize(&mut self.allocator, &new_pool[0], width, height)
-                .map_err(|e| format!("rebuild writeback conversion: {e:#}"))?;
-        }
         let new_nv12 = match self.frame_format {
-            FrameFormat::Nv12 if self.writeback.is_none() => Some(
+            FrameFormat::Nv12 => Some(
                 Nv12Converter::new(
                     &mut self.renderer,
                     &mut self.allocator,
@@ -719,7 +684,6 @@ fn run(
     width: u32,
     height: u32,
     fps: u32,
-    writeback: ZeroCopyMode,
     frame_tx: tokio::sync::watch::Sender<Option<Arc<CapturedFrame>>>,
     touch_rx: calloop::channel::Channel<TouchEvent>,
     control_rx: calloop::channel::Channel<ReconfigureRequest>,
@@ -796,29 +760,8 @@ fn run(
                 .map_err(|e| eyre!("export dmabuf: {e}"))?,
         );
     }
-    // Two ways to make NV12 out of what was just rendered. The display controller's writeback
-    // block is preferred when it is asked for and works; the GPU shader pass is the fallback and
-    // the only option everywhere else. Both are set up before the loop starts, so a failure here
-    // is a startup warning rather than a dropped frame later.
-    let mut wb = None;
-    if frame_format == FrameFormat::Nv12 && writeback != ZeroCopyMode::Off {
-        match WritebackConverter::new(
-            &render_node,
-            &mut allocator,
-            &render_pool[0],
-            width,
-            height,
-            FORWARDED_POOL,
-        ) {
-            Ok(converter) => wb = Some(converter),
-            Err(e) if writeback == ZeroCopyMode::Force => {
-                return Err(e.wrap_err("graphics.writeback is `true` and the path is unavailable"));
-            }
-            Err(e) => tracing::warn!("compositor: no display-controller NV12 ({e:#}); using the GPU"),
-        }
-    }
     let nv12 = match frame_format {
-        FrameFormat::Nv12 if wb.is_none() => Some(Nv12Converter::new(
+        FrameFormat::Nv12 => Some(Nv12Converter::new(
             &mut renderer,
             &mut allocator,
             &render_pool[0],
@@ -832,7 +775,6 @@ fn run(
         "compositor: encode path = {}",
         match frame_format {
             FrameFormat::Argb => "zero-copy dmabuf",
-            FrameFormat::Nv12 if wb.is_some() => "zero-copy dmabuf (writeback NV12 conversion)",
             FrameFormat::Nv12 => "zero-copy dmabuf (GPU NV12 conversion)",
             FrameFormat::Shm => "CPU readback",
         }
@@ -949,10 +891,9 @@ fn run(
     let mut stat_published: u32 = 0;
     let mut stat_render_max = Duration::ZERO;
     let mut stat_since = std::time::Instant::now();
-    // Per published frame: the whole tick, and the ARGB->NV12 step within it. The step is timed
-    // from the end of composition's submission to the NV12 buffer being ready, so on both paths it
-    // includes waiting for composition's GPU work - the GPU pass ends in a finish, and the
-    // writeback commit waits on the render target's fence. That makes the two comparable.
+    // Per published frame: the whole tick, and the ARGB->NV12 step within it. The step runs from
+    // the end of composition's submission to the NV12 buffer being ready - the GPU pass ends in a
+    // finish - so it includes waiting for composition's own GPU work, not just the conversion.
     let mut stat_frame: Vec<Duration> = Vec::new();
     let mut stat_convert: Vec<Duration> = Vec::new();
     loop_handle
@@ -1038,7 +979,6 @@ fn run(
         pool_idx: 0,
         frame_format,
         nv12,
-        writeback: wb,
         damage_tracker,
         dirty: true,
         last_published: std::time::Instant::now(),

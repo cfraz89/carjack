@@ -197,7 +197,6 @@ async fn run_app(config: Config, wifi: Arc<dyn WifiBackend>) -> Result<()> {
         start_w,
         start_h,
         start_fps,
-        config.graphics.writeback,
     )?;
     // After `Compositor::start`: the service is pointed at its Wayland socket.
     let service =

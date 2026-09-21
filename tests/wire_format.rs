@@ -56,9 +56,6 @@ async fn encoder() -> Result<(
         800,
         1280,
         30,
-        // The GPU pass, so the test behaves the same everywhere: writeback needs a DRM writeback
-        // connector and DRM master, neither of which a build host is guaranteed to offer.
-        carjack::config::ZeroCopyMode::Off,
     )?;
 
     let (video_tx, video_rx) = mpsc::channel::<EncodedFrame>(64);
@@ -127,9 +124,6 @@ async fn first_keyframe() -> Result<EncodedFrame> {
         800,
         1280,
         30,
-        // The GPU pass, so the test behaves the same everywhere: writeback needs a DRM writeback
-        // connector and DRM master, neither of which a build host is guaranteed to offer.
-        carjack::config::ZeroCopyMode::Off,
     )?;
 
     let (video_tx, mut video_rx) = mpsc::channel::<EncodedFrame>(64);

@@ -56,13 +56,6 @@ bytes = "1.12.1"
 gstreamer = "0.24"
 gstreamer-app = "0.24"
 smithay = { version = "0.7.0", default-features = false, features = ["backend_egl", "backend_gbm", "renderer_gl", "wayland_frontend", "desktop"] }
-# src/writeback.rs drives KMS atomic commits directly - smithay's DRM backend does not model
-# writeback connectors, and the buffer types are shared anyway (smithay re-exports drm-fourcc).
-# Already in Cargo.lock as a smithay dependency, so naming it adds nothing to fetch.
-drm = "0.14"
-# poll(), to wait on the writeback out-fence (src/writeback.rs); mmap, to read the NV12 bytes back
-# in tests/nv12.rs.
-libc = "0.2"
 # Wayland *client* (separate from smithay's server side) - used only in desktop mode to read the
 # output scale from whatever compositor is running, for HiDPI touch mapping. `wayland-protocols`
 # (client side, staging) is there for `wp_fractional_scale_v1`, which reports the *exact* scale
@@ -138,9 +131,5 @@ assets = [
 ]
 
 [dev-dependencies]
-# examples/writeback-probe.rs drives KMS with no compositor around it, so it needs gbm directly
-# where src/writeback.rs goes through smithay's allocator. Defaults off: gbm's `import-wayland`
-# pulls wayland-server in as a *gbm* dependency, which adds dlib and scoped-tls to Cargo.lock and
-# so to carjack-crates.inc. Neither the probe nor the compositor imports anything through gbm.
-gbm = { version = "0.18", default-features = false, features = ["drm-support"] }
-drm-fourcc = "2.2"
+# mmap, to read back the bytes the NV12 conversion wrote (tests/nv12.rs).
+libc = "0.2"

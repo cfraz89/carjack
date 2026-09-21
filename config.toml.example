@@ -38,18 +38,6 @@ drm_device = "auto"
 #   false    - software encode only
 zerocopy = "auto"
 
-# Where ARGB becomes the NV12 a hardware encoder wants. Only consulted on the encode path that
-# needs that conversion done here - Qualcomm, which has no V4L2 converter element to do it -
-# since elsewhere there is nothing to move.
-#   "auto"   - convert on the display controller's writeback block, falling back to the GPU with
-#              a warning if it is unavailable
-#   true     - require the display controller; error out at startup if it can't be set up
-#   false    - convert on the GPU, through the shader pass in src/nv12.rs
-# The hardware path frees the GPU of the conversion entirely, but it holds DRM master for the
-# device while carjack runs, so nothing else can modeset. Off by default until it has more hours
-# on it.
-writeback = false
-
 # Which codec the screen stream carries:
 #   "auto"   - HEVC if the accessory declares it (`hevcInfo` or the multi-codec feature bit),
 #              otherwise H264

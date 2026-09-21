@@ -67,9 +67,6 @@ async fn compositor_frames_contain_client_content() -> Result<()> {
         1280,
         720,
         30,
-        // The GPU pass, so the test behaves the same everywhere: writeback needs a DRM writeback
-        // connector and DRM master, neither of which a build host is guaranteed to offer.
-        carjack::config::ZeroCopyMode::Off,
     )?;
     tracing::info!("compositor started, socket={:?}", comp.socket_name);
 
@@ -194,9 +191,6 @@ async fn reconfigure_switches_frame_size() -> Result<()> {
         1280,
         720,
         30,
-        // The GPU pass, so the test behaves the same everywhere: writeback needs a DRM writeback
-        // connector and DRM master, neither of which a build host is guaranteed to offer.
-        carjack::config::ZeroCopyMode::Off,
     )?;
     let mut rx = comp.subscribe_frames();
 
