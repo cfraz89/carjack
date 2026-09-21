@@ -330,9 +330,29 @@ struct State {
     modifiers: Vec<smithay::backend::allocator::Modifier>,
     /// Render-timer period, re-read each tick so `reconfigure` can change the framerate live.
     frame_interval: Duration,
+    /// How long the last published frame spent in its ARGB->NV12 step, for the cadence stats.
+    /// Zero on the paths that have no such step.
+    convert_time: Duration,
+    /// Publish on every tick rather than only on damage (`CARJACK_FORCE_FRAMES`). For measuring
+    /// the conversion paths against each other at full rate on a still screen - a still screen
+    /// otherwise publishes about once a second, and both paths look the same at that rate.
+    force_frames: bool,
 }
 
 impl State {
+    /// Which conversion the published frames go through, for the stats line.
+    fn path_label(&self) -> &'static str {
+        if self.writeback.is_some() {
+            "writeback"
+        } else if self.nv12.is_some() {
+            "gpu-nv12"
+        } else if self.frame_format == FrameFormat::Argb {
+            "argb"
+        } else {
+            "shm"
+        }
+    }
+
     /// Render the desktop into the current pool buffer and publish it - either as the dmabuf
     /// itself (zero-copy) or read back into system memory (CPU path).
     fn render_and_publish(&mut self) {
@@ -366,10 +386,20 @@ impl State {
             return;
         }
 
+        self.convert_time = Duration::ZERO;
         if let Some(wb) = self.writeback.as_mut() {
-            // The GPU is done with the buffer; the display controller reads it from here.
             drop(fb);
-            match wb.convert() {
+            let convert_start = std::time::Instant::now();
+            // Submit the composition before the commit. The plane waits on the buffer's implicit
+            // fence (drm_gem_plane_helper_prepare_fb), but GL work still batched in Mesa has no
+            // fence yet, so without a flush the display controller could read the previous frame.
+            // Cheaper than a finish: the kernel does the waiting, not this thread.
+            if let Err(e) = self.renderer.with_context(|gl| unsafe { gl.Flush() }) {
+                tracing::warn!("compositor: flush before writeback failed: {e}");
+            }
+            let converted = wb.convert();
+            self.convert_time = convert_start.elapsed();
+            match converted {
                 Ok(buf) => {
                     let _ = self
                         .frame_tx
@@ -380,7 +410,10 @@ impl State {
         } else if let Some(nv12) = self.nv12.as_mut() {
             drop(fb);
             // No readback: the frame never leaves the GPU, it just changes format.
-            match nv12.convert(&mut self.renderer) {
+            let convert_start = std::time::Instant::now();
+            let converted = nv12.convert(&mut self.renderer);
+            self.convert_time = convert_start.elapsed();
+            match converted {
                 Ok(buf) => {
                     let _ = self
                         .frame_tx
@@ -662,6 +695,22 @@ impl State {
     }
 }
 
+/// `p50/p95/max` in milliseconds, for the cadence stats. Sorts in place.
+fn percentiles(samples: &mut [Duration]) -> String {
+    if samples.is_empty() {
+        return "-".into();
+    }
+    samples.sort_unstable();
+    let at = |q: f64| samples[((samples.len() - 1) as f64 * q).round() as usize];
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    format!(
+        "{:.2}/{:.2}/{:.2}ms",
+        ms(at(0.5)),
+        ms(at(0.95)),
+        ms(samples[samples.len() - 1])
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(
     render_node: String,
@@ -900,6 +949,12 @@ fn run(
     let mut stat_published: u32 = 0;
     let mut stat_render_max = Duration::ZERO;
     let mut stat_since = std::time::Instant::now();
+    // Per published frame: the whole tick, and the ARGB->NV12 step within it. The step is timed
+    // from the end of composition's submission to the NV12 buffer being ready, so on both paths it
+    // includes waiting for composition's GPU work - the GPU pass ends in a finish, and the
+    // writeback commit waits on the render target's fence. That makes the two comparable.
+    let mut stat_frame: Vec<Duration> = Vec::new();
+    let mut stat_convert: Vec<Duration> = Vec::new();
     loop_handle
         .insert_source(
             Timer::from_duration(frame_interval),
@@ -907,10 +962,11 @@ fn run(
                 let render_start = std::time::Instant::now();
                 // A frame every IDLE_REFRESH even when nothing moves: the decoder gets a heartbeat,
                 // and a keyframe asked for on a still screen has a buffer to ride out on.
-                if state.dirty
+                let publish = state.dirty
+                    || state.force_frames
                     || frame_requested.swap(false, Ordering::Relaxed)
-                    || state.last_published.elapsed() >= IDLE_REFRESH
-                {
+                    || state.last_published.elapsed() >= IDLE_REFRESH;
+                if publish {
                     state.render_and_publish();
                     state.dirty = false;
                     state.last_published = std::time::Instant::now();
@@ -922,18 +978,28 @@ fn run(
 
                 stat_count += 1;
                 stat_render_max = stat_render_max.max(now - render_start);
+                if publish {
+                    stat_frame.push(now - render_start);
+                    stat_convert.push(state.convert_time);
+                }
                 let elapsed = now - stat_since;
                 if elapsed >= Duration::from_secs(5) {
                     tracing::info!(
-                        "compositor: {:.1} fps published of {:.1} polled (target {}), worst render {:.1}ms",
+                        "compositor: {}: {:.1} fps published of {:.1} polled (target {}), worst render {:.1}ms, \
+                         frame {}, convert {}",
+                        state.path_label(),
                         stat_published as f64 / elapsed.as_secs_f64(),
                         stat_count as f64 / elapsed.as_secs_f64(),
                         (1_000_000 / state.frame_interval.as_micros().max(1)),
                         stat_render_max.as_secs_f64() * 1000.0,
+                        percentiles(&mut stat_frame),
+                        percentiles(&mut stat_convert),
                     );
                     stat_count = 0;
                     stat_published = 0;
                     stat_render_max = Duration::ZERO;
+                    stat_frame.clear();
+                    stat_convert.clear();
                     stat_since = now;
                 }
 
@@ -980,7 +1046,12 @@ fn run(
         allocator,
         modifiers,
         frame_interval,
+        convert_time: Duration::ZERO,
+        force_frames: std::env::var_os("CARJACK_FORCE_FRAMES").is_some(),
     };
+    if state.force_frames {
+        tracing::warn!("compositor: CARJACK_FORCE_FRAMES set - publishing every tick, for measurement");
+    }
 
     tracing::info!(
         socket = ?socket_name,
