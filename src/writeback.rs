@@ -193,9 +193,26 @@ impl WritebackConverter {
     pub fn convert(&mut self) -> Result<Dmabuf> {
         let idx = self.next;
         self.next = (self.next + 1) % self.targets.len();
+        let fb = self.targets[idx].fb;
 
-        let modeset = !self.modeset_done;
-        let mut req = self.request(self.targets[idx].fb, modeset);
+        if !self.modeset_done {
+            // Light the crtc up and throw away what that commit captures. The first capture after
+            // a modeset is not trustworthy on this hardware - `examples/writeback-probe.rs` run
+            // back to back alternates correct and blank, delay or no delay - so the frame is taken
+            // from a second commit once the crtc is live. Costs one extra commit per startup and
+            // per resize, and nothing per frame.
+            self.capture(fb, true)
+                .wrap_err("writeback modeset commit")?;
+            self.modeset_done = true;
+        }
+        self.capture(fb, false).wrap_err("writeback commit")?;
+
+        Ok(self.targets[idx].dmabuf.clone())
+    }
+
+    /// One commit, waited to completion.
+    fn capture(&self, target_fb: control::framebuffer::Handle, modeset: bool) -> Result<()> {
+        let mut req = self.request(target_fb, modeset);
 
         // The kernel writes the out-fence fd into userspace memory, so the property value is the
         // address of this i32 rather than a handle.
@@ -211,18 +228,13 @@ impl WritebackConverter {
         } else {
             AtomicCommitFlags::empty()
         };
-        self.card
-            .atomic_commit(flags, req)
-            .wrap_err("writeback commit")?;
-        self.modeset_done = true;
+        self.card.atomic_commit(flags, req)?;
 
         if fence_fd < 0 {
-            bail!("writeback commit carried no out-fence");
+            bail!("the commit carried no out-fence");
         }
         let fence = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fence_fd) };
-        wait_signalled(fence.as_fd())?;
-
-        Ok(self.targets[idx].dmabuf.clone())
+        wait_signalled(fence.as_fd())
     }
 
     /// The properties every writeback commit sets. `modeset` adds the ones that only matter while
