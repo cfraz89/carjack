@@ -131,5 +131,15 @@ assets = [
 ]
 
 [dev-dependencies]
-# mmap, to read back the bytes the NV12 conversion wrote (tests/nv12.rs).
+# mmap, to read back the bytes the NV12 conversion wrote (tests/nv12.rs); poll, to wait on the
+# writeback out-fence (examples/writeback-probe.rs).
 libc = "0.2"
+# examples/writeback-probe.rs drives KMS directly rather than through smithay - it has no
+# compositor, and smithay's DRM backend does not model writeback connectors. All three are already
+# in Cargo.lock as smithay's own dependencies, so naming them adds nothing to fetch and leaves
+# carjack-crates.inc unchanged. They move to [dependencies] if writeback graduates out of the probe.
+drm = "0.14"
+drm-fourcc = "2.2"
+# Defaults off: gbm's `import-wayland` pulls wayland-server in as a *gbm* dependency, which adds
+# dlib and scoped-tls to Cargo.lock and so to carjack-crates.inc. The probe imports nothing.
+gbm = { version = "0.18", default-features = false, features = ["drm-support"] }
