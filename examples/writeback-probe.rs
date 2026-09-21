@@ -134,9 +134,12 @@ fn main() -> Result<()> {
     File::create(&out_path)
         .and_then(|mut f| f.write_all(&bytes))
         .wrap_err_with(|| format!("write {out_path}"))?;
+    // ffplay assumes stride == width, so say so when the allocation is padded wider.
     println!(
-        "\nwrote {} bytes of NV12 to {out_path}\n  view: ffplay -f rawvideo -pix_fmt nv12 -video_size {WIDTH}x{HEIGHT} {out_path}",
-        bytes.len()
+        "\nwrote {} bytes of NV12 to {out_path} (stride {})\n  view: ffplay -f rawvideo -pix_fmt nv12 -video_size {}x{HEIGHT} {out_path}",
+        bytes.len(),
+        target.stride,
+        target.stride,
     );
 
     verify(&target, &bytes)
@@ -174,8 +177,10 @@ impl ControlDevice for Card {}
 /// scheme needs anyway - the bytes have to be exactly where NV12 says they are.
 struct Nv12Target {
     handle: drm::buffer::Handle,
-    /// Kept so the allocation outlives the framebuffer, and for the readback.
-    bo: gbm::BufferObject<()>,
+    /// Kept so the allocation outlives the framebuffer.
+    _bo: gbm::BufferObject<()>,
+    /// The same allocation as a dmabuf, which is what the readback maps.
+    fd: OwnedFd,
     stride: u32,
     uv_offset: u32,
 }
@@ -183,13 +188,17 @@ struct Nv12Target {
 impl Nv12Target {
     fn allocate(card: &Card, gbm: &GbmDevice<OwnedFd>) -> Result<Self> {
         let rows = HEIGHT * NV12_ROWS_NUM / NV12_ROWS_DEN;
+        // RENDERING with an explicit Linear modifier, which is the combination `src/nv12.rs`
+        // allocates this same buffer with (smithay's GbmAllocator, `GbmBufferFlags::RENDERING`).
+        // Adreno rejects R8 outright for a LINEAR *usage* flag, and SCANOUT is not the ask either -
+        // nothing scans this out, the DPU's writeback block DMAs into it.
         let bo = gbm
             .create_buffer_object_with_modifiers2::<()>(
                 WIDTH,
                 rows,
                 gbm::Format::R8,
                 [gbm::Modifier::Linear].into_iter(),
-                BufferObjectFlags::LINEAR,
+                BufferObjectFlags::RENDERING,
             )
             .wrap_err_with(|| format!("allocate the {WIDTH}x{rows} R8 writeback target"))?;
         if bo.modifier() != gbm::Modifier::Linear {
@@ -211,17 +220,36 @@ impl Nv12Target {
             handle,
             uv_offset: stride * HEIGHT,
             stride,
-            bo,
+            fd,
+            _bo: bo,
         })
     }
 
-    /// The whole allocation, luma rows then chroma rows.
+    /// Luma rows then chroma rows. Through the dmabuf rather than `gbm_bo_map`, which is what
+    /// `tests/nv12.rs` reads this same buffer with.
     fn read_back(&self) -> Result<Vec<u8>> {
-        let rows = HEIGHT * NV12_ROWS_NUM / NV12_ROWS_DEN;
-        // `map` is read-only and takes the region in pixels, which for R8 is bytes.
-        self.bo
-            .map(0, 0, WIDTH, rows, |view| view.buffer().to_vec())
-            .map_err(|e| eyre!("map the writeback target for readback: {e}"))
+        use std::os::fd::AsRawFd;
+        let len = (self.uv_offset + self.stride * (HEIGHT / 2)) as usize;
+        let bytes = unsafe {
+            let p = libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                self.fd.as_raw_fd(),
+                0,
+            );
+            if p == libc::MAP_FAILED {
+                return Err(eyre!(
+                    "mmap the writeback target: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let bytes = std::slice::from_raw_parts(p as *const u8, len).to_vec();
+            libc::munmap(p, len);
+            bytes
+        };
+        Ok(bytes)
     }
 
     fn luma(&self, bytes: &[u8], x: u32, y: u32) -> u8 {
