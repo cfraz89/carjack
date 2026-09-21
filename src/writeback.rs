@@ -282,7 +282,33 @@ impl WritebackConverter {
 
 impl Drop for WritebackConverter {
     fn drop(&mut self) {
-        // Give the CRTC and master back, or nothing else can drive this device afterwards.
+        // Put the CRTC back as it was found, *before* dropping master. Releasing master does not
+        // undo a modeset: a CRTC left ACTIVE stays bound to its plane, and the next process to ask
+        // for that plane on another CRTC is refused with EINVAL. One leak per run is enough to
+        // make this path look intermittent.
+        let mut req = atomic::AtomicModeReq::new();
+        if let Ok(id) = prop(&self.plane_props, "FB_ID") {
+            req.add_property(self.plane, id, property::Value::Framebuffer(None));
+        }
+        if let Ok(id) = prop(&self.plane_props, "CRTC_ID") {
+            req.add_property(self.plane, id, property::Value::CRTC(None));
+        }
+        if let Ok(id) = prop(&self.conn_props, "CRTC_ID") {
+            req.add_property(self.connector, id, property::Value::CRTC(None));
+        }
+        if let Ok(id) = prop(&self.crtc_props, "MODE_ID") {
+            req.add_property(self.crtc, id, property::Value::Blob(0));
+        }
+        if let Ok(id) = prop(&self.crtc_props, "ACTIVE") {
+            req.add_property(self.crtc, id, property::Value::Boolean(false));
+        }
+        if let Err(e) = self
+            .card
+            .atomic_commit(AtomicCommitFlags::ALLOW_MODESET, req)
+        {
+            tracing::warn!("writeback: could not release the crtc ({e}); a restart may fall back");
+        }
+
         for target in &self.targets {
             let _ = self.card.destroy_framebuffer(target.fb);
         }
@@ -489,6 +515,13 @@ fn pick_plane(
     for &handle in card.plane_handles()?.iter() {
         let info = card.get_plane(handle)?;
         if !resources.filter_crtcs(info.possible_crtcs()).contains(&crtc) {
+            continue;
+        }
+        // Skip one already bound elsewhere. It would be refused anyway, and the usual reason for
+        // finding one is a previous run that died before it could release its CRTC - in which
+        // case the other primary plane is still free and this succeeds instead of inheriting the
+        // mess.
+        if info.crtc().is_some_and(|c| c != crtc) {
             continue;
         }
         let set = card.get_properties(handle)?;

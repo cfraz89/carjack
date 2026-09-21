@@ -124,7 +124,10 @@ fn main() -> Result<()> {
 
     let result = commit_and_wait(&card, &wb, crtc, plane, mode, source_fb, target_fb);
 
-    // Tear down whatever happened, so a failed probe still leaves the card usable.
+    // Tear down whatever happened, so a failed probe still leaves the card usable. Releasing
+    // master is not enough on its own: a CRTC left ACTIVE stays bound to its plane, and the next
+    // run - or carjack - is then refused that plane with EINVAL.
+    release_crtc(&card, &wb, crtc, plane);
     let _ = card.destroy_framebuffer(target_fb);
     let _ = card.destroy_framebuffer(source_fb);
     let _ = card.release_master_lock();
@@ -570,6 +573,60 @@ fn commit_and_wait(
     wait_readable(fence.as_fd())?;
     println!("writeback fence signalled");
     Ok(())
+}
+
+/// Detach the plane and connector and switch the crtc off, so the device is left as it was found.
+fn release_crtc(card: &Card, wb: &connector::Info, crtc: crtc::Handle, plane: plane::Handle) {
+    let (Ok(conn_props), Ok(crtc_props), Ok(plane_props)) = (
+        properties(card, wb.handle()),
+        properties(card, crtc),
+        properties(card, plane),
+    ) else {
+        return;
+    };
+    let mut req = atomic::AtomicModeReq::new();
+    for (handle, props, name, value) in [
+        (
+            plane.into(),
+            &plane_props,
+            "FB_ID",
+            property::Value::Framebuffer(None),
+        ),
+        (
+            plane.into(),
+            &plane_props,
+            "CRTC_ID",
+            property::Value::CRTC(None),
+        ),
+        (
+            wb.handle().into(),
+            &conn_props,
+            "CRTC_ID",
+            property::Value::CRTC(None),
+        ),
+        (
+            crtc.into(),
+            &crtc_props,
+            "MODE_ID",
+            property::Value::Blob(0),
+        ),
+        (
+            crtc.into(),
+            &crtc_props,
+            "ACTIVE",
+            property::Value::Boolean(false),
+        ),
+    ] {
+        if let Ok(id) = prop(props, name) {
+            req.add_raw_property(handle, id, value.into());
+        }
+    }
+    if card
+        .atomic_commit(AtomicCommitFlags::ALLOW_MODESET, req)
+        .is_err()
+    {
+        eprintln!("warning: could not release {crtc:?}; the next run may be refused its plane");
+    }
 }
 
 /// The out-fence becomes readable when the writeback has landed in memory.
