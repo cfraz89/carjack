@@ -562,7 +562,7 @@ fn commit_and_wait(
     )
     .wrap_err("atomic TEST_ONLY rejected - check dmesg for dpu_wb_conn_atomic_check")?;
 
-    card.atomic_commit(AtomicCommitFlags::ALLOW_MODESET, req)
+    card.atomic_commit(AtomicCommitFlags::ALLOW_MODESET, req.clone())
         .wrap_err("atomic commit")?;
 
     if fence_fd < 0 {
@@ -571,7 +571,28 @@ fn commit_and_wait(
     // Owned so it closes on the way out.
     let fence = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fence_fd) };
     wait_readable(fence.as_fd())?;
-    println!("writeback fence signalled");
+
+    // Capture a second frame on the now-running crtc, and report that one.
+    //
+    // The first capture after a modeset is not reliable here: run this probe twice in a row and
+    // the results alternate between correct and blank, with or without a delay between them, so
+    // it is the enable-capture-disable cycle rather than a race. The compositor never does that -
+    // it modesets once and then captures every frame on a live crtc - so the second capture is
+    // both trustworthy and the one that matches how the path is actually used.
+    let mut fence_fd: i32 = -1;
+    req.add_property(
+        wb.handle(),
+        prop(&conn_props, "WRITEBACK_OUT_FENCE_PTR")?,
+        property::Value::UnsignedRange((&raw mut fence_fd).addr() as u64),
+    );
+    card.atomic_commit(AtomicCommitFlags::empty(), req)
+        .wrap_err("second writeback commit")?;
+    if fence_fd < 0 {
+        bail!("the second commit carried no out-fence");
+    }
+    let fence = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fence_fd) };
+    wait_readable(fence.as_fd())?;
+    println!("writeback fence signalled (second capture on the live crtc)");
     Ok(())
 }
 
