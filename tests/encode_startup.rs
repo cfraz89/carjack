@@ -47,6 +47,9 @@ async fn time_to_first_keyframe(
         start_size.0,
         start_size.1,
         30,
+        // The GPU pass, so the test behaves the same everywhere: writeback needs a DRM writeback
+        // connector and DRM master, neither of which a build host is guaranteed to offer.
+        carjack::config::ZeroCopyMode::Off,
     )?;
 
     let resized = comp.reconfigure(accessory_size.0, accessory_size.1, accessory_fps, None)?;

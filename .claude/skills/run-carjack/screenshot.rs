@@ -111,6 +111,9 @@ async fn main() -> Result<()> {
         args.width,
         args.height,
         args.fps,
+        // Irrelevant on the Shm path - there is no NV12 conversion to move - but the argument is
+        // not optional.
+        carjack::config::ZeroCopyMode::Off,
     )?;
     println!("compositor up on {:?}", comp.socket_name);
 
