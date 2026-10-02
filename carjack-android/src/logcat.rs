@@ -1,0 +1,64 @@
+//! `tracing` output to logcat, one record per line under the `carjack` tag.
+
+use std::ffi::CString;
+use std::io::{self, Write};
+
+use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+
+const ANDROID_LOG_INFO: i32 = 4;
+
+#[cfg(target_os = "android")]
+#[link(name = "log")]
+unsafe extern "C" {
+    fn __android_log_write(prio: i32, tag: *const std::ffi::c_char, text: *const std::ffi::c_char)
+    -> i32;
+}
+
+#[cfg(not(target_os = "android"))]
+unsafe fn __android_log_write(
+    _prio: i32,
+    _tag: *const std::ffi::c_char,
+    text: *const std::ffi::c_char,
+) -> i32 {
+    // SAFETY: the caller passes a NUL-terminated string.
+    eprintln!("{}", unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy());
+    0
+}
+
+/// Buffers one formatted event and writes it to logcat on drop.
+pub struct LogcatWriter(Vec<u8>);
+
+impl Write for LogcatWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for LogcatWriter {
+    fn drop(&mut self) {
+        let text: Vec<u8> = self.0.iter().copied().filter(|&b| b != 0).collect();
+        let Ok(text) = CString::new(text.trim_ascii_end()) else {
+            return;
+        };
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        unsafe { __android_log_write(ANDROID_LOG_INFO, c"carjack".as_ptr(), text.as_ptr()) };
+    }
+}
+
+pub fn init() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::DEBUG.into())
+                .parse_lossy("debug,catplay=info"),
+        )
+        .with_ansi(false)
+        .without_time()
+        .with_writer(|| LogcatWriter(Vec::new()))
+        .try_init();
+}

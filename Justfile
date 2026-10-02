@@ -113,6 +113,20 @@ test-proto +flags="":
 test-lib +flags="":
     {{toolbox_build}}cargo test -p libcarjack --lib {{flags}} < /dev/null
 
+# The Android app's native core (libcarjack_android.so), with the toolchain of a built Android tree.
+[script('bash')]
+android tree=env('ANDROID_TREE', home_directory() + '/Projects/motopod/out/android'):
+    set -euo pipefail
+    cc={{justfile_directory()}}/carjack-android/toolchain/cc.sh
+    ar=$(ls -d {{tree}}/prebuilts/clang/host/linux-x86/clang-r* | sort | tail -1)/bin/llvm-ar
+    export ANDROID_TREE={{tree}} CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$cc \
+        CC_aarch64_linux_android=$cc CXX_aarch64_linux_android=$cc AR_aarch64_linux_android=$ar \
+        RANLIB_aarch64_linux_android=${ar%-ar}-ranlib \
+        CMAKE={{tree}}/prebuilts/cmake/linux-x86/bin/cmake \
+        CMAKE_TOOLCHAIN_FILE_aarch64_linux_android={{justfile_directory()}}/carjack-android/toolchain/android.cmake
+    cargo build --release --target aarch64-linux-android -p carjack-android
+    ls -l target/aarch64-linux-android/release/libcarjack_android.so
+
 install-cuda-dmabuf-deps:
     {{toolbox_build}}sudo dnf install -y libEGL-devel libgbm-devel gstreamer1-plugins-bad-free-devel
 

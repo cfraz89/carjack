@@ -4,6 +4,7 @@ members = [
     "iap2-proto",
     "libcarjack",
     "cuda-dmabuf",
+    "carjack-android",
 ]
 
 [workspace.package]

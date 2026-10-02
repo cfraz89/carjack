@@ -1,0 +1,28 @@
+[package]
+name = "carjack-android"
+version = "0.1.0"
+edition.workspace = true
+description = "carjack's CarPlay core for the Android app, over JNI"
+license = "Proprietary"
+
+[lib]
+name = "carjack_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+backon = "1.6.0"
+catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "master", default-features = false, features = ["tx"] }
+eyre = "0.6.12"
+iap2-proto = { path = "../iap2-proto" }
+jni = "0.21"
+libc = "0.2"
+libcarjack = { path = "../libcarjack" }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+uuid = "1.23.3"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# No system OpenSSL to link against on Android.
+openssl = { version = "0.10", features = ["vendored"] }

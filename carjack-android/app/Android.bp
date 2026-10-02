@@ -1,0 +1,32 @@
+// The platform build of the carjack app: platform-signed, so it gets its permissions and hidden
+// APIs without anyone at the screen. libcarjack_android.so comes from `just android` in the
+// carjack repo, staged beside this file.
+
+cc_prebuilt_library_shared {
+    name: "libcarjack_android",
+    compile_multilib: "64",
+    arch: {
+        arm64: {
+            srcs: ["lib/arm64/libcarjack_android.so"],
+        },
+    },
+    shared_libs: ["liblog"],
+    strip: {
+        none: true,
+    },
+    system_ext_specific: true,
+}
+
+android_app {
+    name: "Carjack",
+    srcs: ["src/**/*.java"],
+    platform_apis: true,
+    certificate: "platform",
+    system_ext_specific: true,
+    jni_libs: ["libcarjack_android"],
+    use_embedded_native_libs: true,
+    optimize: {
+        // JNI calls back into Native.Callbacks by name.
+        enabled: false,
+    },
+}
