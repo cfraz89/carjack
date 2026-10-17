@@ -44,6 +44,7 @@ public final class MainActivity extends Activity {
     private TextView status;
     private EditText address;
     private EditText app;
+    private EditText density;
     private RadioGroup units;
 
     @Override
@@ -85,10 +86,20 @@ public final class MainActivity extends Activity {
         app.setHint("com.google.android.apps.maps");
         app.setText(Variant.setting(this, "app", ""));
         layout.addView(app);
+        TextView densityLabel = new TextView(this);
+        densityLabel.setText("\nThe bike display's density in dpi; higher makes everything bigger "
+                + "(blank for automatic, 200 on a 1080x600 unit):");
+        layout.addView(densityLabel);
+        density = new EditText(this);
+        density.setInputType(InputType.TYPE_CLASS_NUMBER);
+        density.setHint("200");
+        density.setText(Variant.setting(this, "density", ""));
+        layout.addView(density);
         layout.addView(button("Save", v -> {
             Variant.prefs(this).edit()
                     .putString("bluetooth_address", address.getText().toString().trim())
                     .putString("app", app.getText().toString().trim())
+                    .putString("density", density.getText().toString().trim())
                     .apply();
             refresh();
         }));
