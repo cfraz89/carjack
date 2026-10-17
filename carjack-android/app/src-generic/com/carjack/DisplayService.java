@@ -28,7 +28,8 @@ public final class DisplayService extends IDisplayService.Stub {
             | 1 << 8 // DESTROY_CONTENT_ON_REMOVAL
             | 1 << 9 // SHOULD_SHOW_SYSTEM_DECORATIONS: a launcher and the system bars
             | 1 << 10 // TRUSTED
-            | 1 << 12 // ALWAYS_UNLOCKED
+            | 1 << 11 // OWN_DISPLAY_GROUP: awake and unlocked apart from the phone's screen
+            | 1 << 12 // ALWAYS_UNLOCKED, which applies only in a group of its own
             | 1 << 14; // OWN_FOCUS: its own input focus, apart from the phone's
 
     private final Context context;

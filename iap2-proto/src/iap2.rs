@@ -30,6 +30,10 @@ impl Decoder for Iap2Codec {
             }
             pos += 1;
         }
+        // No magic in sight: keep only a trailing 0xFF, which may start one.
+        if pos + 2 > src.len() && src.get(pos) != Some(&0xFF) {
+            pos = src.len();
+        }
         if pos > 0 {
             let skipped = src[..pos]
                 .iter()
@@ -38,6 +42,9 @@ impl Decoder for Iap2Codec {
                 .join(" ");
             tracing::warn!("Skipping {pos} byte(s) before valid magic: {skipped}");
             src.advance(pos);
+        }
+        if src.len() < 2 {
+            return Ok(None);
         }
         match Frame::read(&src[..]) {
             Ok((frame, consumed)) => {
@@ -431,6 +438,21 @@ mod tests {
     use super::*;
     use bytes::BufMut;
     use tokio::io::AsyncReadExt;
+
+    /// A head unit's non-iAP2 opener (seen on a Pixel) is skipped while waiting for the SYN,
+    /// not taken for a broken frame.
+    #[test]
+    fn junk_without_magic_waits_for_more() {
+        let mut src = BytesMut::from(
+            &[0x00, 0x08, 0x00, 0x04, 0x08, 0x01, 0x10, 0x00, 0x18, 0x02, 0x20, 0x24][..],
+        );
+        assert!(Iap2Codec.decode(&mut src).unwrap().is_none());
+        assert!(src.is_empty());
+
+        let mut src = BytesMut::from(&[0x20, 0x24, 0xFF][..]);
+        assert!(Iap2Codec.decode(&mut src).unwrap().is_none());
+        assert_eq!(&src[..], &[0xFF]);
+    }
 
     fn control_payload() -> Vec<u8> {
         vec![0x40, 0x40, 0x00, 0x06, 0xaa, 0x05]

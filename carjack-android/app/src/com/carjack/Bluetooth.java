@@ -273,7 +273,9 @@ final class Bluetooth {
     /** Drop any link and page again, so the unit offers a fresh iAP channel. */
     void relink(BluetoothDevice device) {
         Log.i(TAG, "Relinking " + device.getAddress());
-        if (Variant.isConnected(device)) {
+        if (!Variant.canPage()) {
+            Variant.cycleBluetooth();
+        } else if (Variant.isConnected(device)) {
             Variant.disconnect(device);
             handler.postDelayed(() -> Variant.connect(device), 1000);
         } else {
