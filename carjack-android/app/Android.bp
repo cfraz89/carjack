@@ -39,12 +39,48 @@ android_app {
     },
 }
 
+// Shizuku's client (Apache-2.0), 13.1.5 from Maven Central, for the generic build's display mode.
+android_library_import {
+    name: "carjack-shizuku-api",
+    aars: ["libs/shizuku/api.aar"],
+    sdk_version: "current",
+    static_libs: [
+        "carjack-shizuku-aidl",
+        "carjack-shizuku-shared",
+        "androidx.annotation_annotation",
+    ],
+}
+
+android_library_import {
+    name: "carjack-shizuku-aidl",
+    aars: ["libs/shizuku/aidl.aar"],
+    sdk_version: "current",
+}
+
+android_library_import {
+    name: "carjack-shizuku-shared",
+    aars: ["libs/shizuku/shared.aar"],
+    sdk_version: "current",
+}
+
+android_library_import {
+    name: "carjack-shizuku-provider",
+    aars: ["libs/shizuku/provider.aar"],
+    sdk_version: "current",
+    static_libs: ["carjack-shizuku-api"],
+}
+
 android_app {
     name: "CarjackGeneric",
     srcs: [
         "src/**/*.java",
         "src-generic/**/*.java",
+        "src-generic/**/*.aidl",
     ],
+    aidl: {
+        local_include_dirs: ["src-generic"],
+    },
+    static_libs: ["carjack-shizuku-provider"],
     manifest: "generic/AndroidManifest.xml",
     resource_dirs: ["generic/res"],
     sdk_version: "current",

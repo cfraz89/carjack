@@ -122,7 +122,7 @@ final class Variant {
      * The display the stream shows: the default one, resized to the part of the panel it gets and
      * mirrored 1:1 into {@code target}.
      */
-    static VirtualDisplay openDisplay(Context context, int width, int height, int density,
+    static Runnable openDisplay(Context context, int width, int height, int density,
             Surface target) {
         try {
             IWindowManager wm = WindowManagerGlobal.getWindowManagerService();
@@ -132,14 +132,11 @@ final class Variant {
         } catch (Exception e) {
             Log.w(TAG, "Could not resize the display", e);
         }
-        return context.getSystemService(DisplayManager.class).createVirtualDisplay(
-                "carjack", width, height, density, target,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR
-                        | DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE);
-    }
-
-    static void closeDisplay(VirtualDisplay display) {
-        display.release();
+        VirtualDisplay display = context.getSystemService(DisplayManager.class)
+                .createVirtualDisplay("carjack", width, height, density, target,
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR
+                                | DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE);
+        return display::release;
     }
 
     /** Touches in the view rectangle land 1:1 on the resized default display. */

@@ -1,7 +1,6 @@
 package com.carjack;
 
 import android.content.Context;
-import android.hardware.display.VirtualDisplay;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
@@ -30,7 +29,8 @@ final class ScreenStream {
     private final Runnable onError;
     private final HandlerThread thread = new HandlerThread("carjack-encoder");
     private volatile MediaCodec codec;
-    private VirtualDisplay display;
+    /** Closes the display the {@link Variant} opened. */
+    private Runnable closeDisplay;
     private Relay relay;
 
     ScreenStream(Context context, long session, Runnable onError) {
@@ -77,7 +77,7 @@ final class ScreenStream {
             relay = new Relay(input, width, height, viewX, viewY, viewWidth, viewHeight);
             target = relay.start();
         }
-        display = Variant.openDisplay(context, viewWidth, viewHeight, density, target);
+        closeDisplay = Variant.openDisplay(context, viewWidth, viewHeight, density, target);
     }
 
     /**
@@ -165,9 +165,9 @@ final class ScreenStream {
     }
 
     void stop() {
-        if (display != null) {
-            Variant.closeDisplay(display);
-            display = null;
+        if (closeDisplay != null) {
+            closeDisplay.run();
+            closeDisplay = null;
         }
         if (relay != null) {
             relay.stop();

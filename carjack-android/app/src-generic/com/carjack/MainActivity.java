@@ -20,11 +20,14 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import rikka.shizuku.Shizuku;
+
 /** The one-time setup a phone needs, then start and stop. */
 public final class MainActivity extends Activity {
     private static final int REQUEST_PERMISSIONS = 1;
     private static final int REQUEST_CAPTURE = 2;
     private static final int REQUEST_DISCOVERABLE = 3;
+    private static final int REQUEST_SHIZUKU = 4;
     private static final int DISCOVERABLE_SECONDS = 300;
 
     private static final String[] PERMISSIONS = {
@@ -37,6 +40,7 @@ public final class MainActivity extends Activity {
 
     private TextView status;
     private EditText address;
+    private EditText app;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -68,17 +72,46 @@ public final class MainActivity extends Activity {
         address.setHint("AA:BB:CC:DD:EE:FF");
         address.setText(Variant.setting(this, "bluetooth_address", ""));
         layout.addView(address);
+        TextView appLabel = new TextView(this);
+        appLabel.setText("\nWith Shizuku, the app the bike shows (a package name; blank for a "
+                + "launcher):");
+        layout.addView(appLabel);
+        app = new EditText(this);
+        app.setInputType(InputType.TYPE_CLASS_TEXT);
+        app.setHint("com.google.android.apps.maps");
+        app.setText(Variant.setting(this, "app", ""));
+        layout.addView(app);
         layout.addView(button("Save", v -> {
             Variant.prefs(this).edit()
                     .putString("bluetooth_address", address.getText().toString().trim())
+                    .putString("app", app.getText().toString().trim())
                     .apply();
             refresh();
         }));
+
+        layout.addView(button("Use Shizuku: a display at the bike's resolution", v -> {
+            if (!pingShizuku()) {
+                status.setText("Start Shizuku first (Shizuku app › Start via Wireless "
+                        + "debugging), then try again.");
+                return;
+            }
+            if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+                setDisplay("shizuku");
+            } else {
+                Shizuku.requestPermission(REQUEST_SHIZUKU);
+            }
+        }));
+        layout.addView(button("Mirror this phone's screen instead",
+                v -> setDisplay("mirror")));
 
         layout.addView(button("Start", v -> {
             // A connected-device foreground service can't start before Bluetooth is granted.
             if (!permissionsGranted()) {
                 requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS);
+                return;
+            }
+            if (Variant.usesShizuku(this)) {
+                startForegroundService(new Intent(this, CarjackService.class));
                 return;
             }
             // The whole screen: the bike mirrors whatever app is in front.
@@ -99,6 +132,32 @@ public final class MainActivity extends Activity {
             return WindowInsets.CONSUMED;
         });
         setContentView(scroll);
+        Shizuku.addRequestPermissionResultListener(shizukuResult);
+    }
+
+    private final Shizuku.OnRequestPermissionResultListener shizukuResult = (code, result) -> {
+        if (code == REQUEST_SHIZUKU && result == PackageManager.PERMISSION_GRANTED) {
+            setDisplay("shizuku");
+        }
+    };
+
+    @Override
+    protected void onDestroy() {
+        Shizuku.removeRequestPermissionResultListener(shizukuResult);
+        super.onDestroy();
+    }
+
+    private void setDisplay(String mode) {
+        Variant.prefs(this).edit().putString("display", mode).apply();
+        refresh();
+    }
+
+    private static boolean pingShizuku() {
+        try {
+            return Shizuku.pingBinder();
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     private Button button(String text, View.OnClickListener listener) {
@@ -123,12 +182,16 @@ public final class MainActivity extends Activity {
         text.append(CarjackAccessibility.instance != null ? "✓" : "✗")
                 .append(" Touch control\n");
         text.append(Variant.setting(this, "bluetooth_address", "").isEmpty() ? "✗" : "✓")
-                .append(" Bluetooth address\n\n")
-                .append("Pair with the bike once, from its menu or this phone's Bluetooth "
-                        + "settings. Then Start, before the bike connects: carjack waits for "
-                        + "it and mirrors this screen to it; hold the phone sideways for the "
-                        + "best fit. If the bike was already connected, turn Bluetooth off and "
-                        + "on again.");
+                .append(" Bluetooth address\n");
+        boolean shizuku = "shizuku".equals(Variant.setting(this, "display", "mirror"));
+        text.append("Display: ").append(!shizuku ? "mirror of this screen"
+                : Variant.usesShizuku(this) ? "Shizuku, at the bike's resolution"
+                : "Shizuku, which isn't running (mirroring until it is)").append("\n\n");
+        text.append("Pair with the bike once, from its menu or this phone's Bluetooth "
+                + "settings. Then Start, before the bike connects: carjack waits for it and "
+                + (shizuku ? "gives it a display of its own size."
+                        : "mirrors this screen to it; hold the phone sideways for the best fit.")
+                + " If the bike was already connected, turn Bluetooth off and on again.");
         status.setText(text);
     }
 

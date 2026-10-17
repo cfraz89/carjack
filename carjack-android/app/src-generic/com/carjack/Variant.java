@@ -45,6 +45,7 @@ final class Variant {
 
     static void onServiceDestroyed(Service service) {
         Projection.stop();
+        ShizukuDisplay.unbind();
     }
 
     static String setting(Context context, String key, String fallback) {
@@ -93,17 +94,44 @@ final class Variant {
         return address.isEmpty() ? adapter.getAddress() : address;
     }
 
-    static VirtualDisplay openDisplay(Context context, int width, int height, int density,
+    /**
+     * A display of the unit's own size through Shizuku when it's set up, else a mirror of the
+     * phone's screen.
+     */
+    static Runnable openDisplay(Context context, int width, int height, int density,
             Surface target) {
-        return Projection.display(width, height, density, target);
+        if (usesShizuku(context)) {
+            Runnable close = ShizukuDisplay.open(target, width, height, density,
+                    setting(context, "app", ""));
+            if (close != null) {
+                return close;
+            }
+            Log.w(TAG, "No Shizuku display; mirroring the phone's screen");
+        }
+        VirtualDisplay display = Projection.display(width, height, density, target);
+        return () -> Projection.detach(display);
     }
 
-    static void closeDisplay(VirtualDisplay display) {
-        Projection.detach(display);
+    static boolean usesShizuku(Context context) {
+        return "shizuku".equals(setting(context, "display", "mirror"))
+                && ShizukuDisplay.available();
     }
 
+    /** Onto the Shizuku display 1:1 while there is one, else onto the mirrored screen. */
     static Touch touch(Context context, int viewX, int viewY, int viewWidth, int viewHeight) {
-        return new GestureTouch(context, viewX, viewY, viewWidth, viewHeight);
+        GestureTouch mirrored = new GestureTouch(context, viewX, viewY, viewWidth, viewHeight);
+        return (action, panelX, panelY) -> {
+            IDisplayService display = ShizukuDisplay.active;
+            if (display == null) {
+                mirrored.touch(action, panelX, panelY);
+                return;
+            }
+            try {
+                display.touch(action, panelX - viewX, panelY - viewY);
+            } catch (android.os.RemoteException e) {
+                Log.w(TAG, "Touch lost", e);
+            }
+        };
     }
 
     private Variant() {}
