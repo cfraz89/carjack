@@ -134,10 +134,14 @@ public final class CarjackService extends Service {
             return;
         }
         offerWait = OFFER_WAIT_MS;
+        BluetoothDevice unit = socket.getRemoteDevice();
         session = new Session(this, handler, socket, wifi, ended -> {
             if (session == ended) {
                 session = null;
                 waitingSince = now();
+                // The unit only dials iAP on a fresh link, and stays connected after a session
+                // ends; cycle it so the next one can start.
+                bluetooth.relink(unit);
             }
         });
         try {
