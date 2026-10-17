@@ -105,7 +105,7 @@ final class AccessoryWifi {
         connectivity.bindProcessToNetwork(network);
         multicast = wifi.createMulticastLock("carjack");
         multicast.acquire();
-        answer(iface, mac(iface, info));
+        answer(iface, mac(iface));
     }
 
     /** IPv4, or an IPv6 link-local one: the accessory's AirPlay can live on either. */
@@ -118,17 +118,26 @@ final class AccessoryWifi {
         return false;
     }
 
-    private static String mac(String iface, WifiInfo info) {
-        try {
-            NetworkInterface nif = NetworkInterface.getByName(iface);
-            byte[] hw = nif == null ? null : nif.getHardwareAddress();
-            if (hw != null && hw.length == 6) {
-                return String.format("%02X:%02X:%02X:%02X:%02X:%02X",
-                        hw[0], hw[1], hw[2], hw[3], hw[4], hw[5]);
+    /** The address the interface joined with, which is randomised per network. */
+    private String mac(String iface) {
+        // The network callback's WifiInfo has it redacted; this one honours LOCAL_MAC_ADDRESS.
+        String mac = wifi.getConnectionInfo().getMacAddress();
+        if (mac == null || mac.equals(WifiInfo.DEFAULT_MAC_ADDRESS)) {
+            try {
+                NetworkInterface nif = NetworkInterface.getByName(iface);
+                byte[] hw = nif == null ? null : nif.getHardwareAddress();
+                if (hw != null && hw.length == 6) {
+                    mac = String.format("%02X:%02X:%02X:%02X:%02X:%02X",
+                            hw[0], hw[1], hw[2], hw[3], hw[4], hw[5]);
+                }
+            } catch (SocketException ignored) {
             }
-        } catch (SocketException ignored) {
         }
-        return info.getMacAddress().toUpperCase();
+        if (mac == null) {
+            Log.w(TAG, "No MAC address for " + iface);
+            return WifiInfo.DEFAULT_MAC_ADDRESS;
+        }
+        return mac.toUpperCase();
     }
 
     private void answer(String iface, String detail) {

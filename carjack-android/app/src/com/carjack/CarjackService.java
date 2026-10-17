@@ -29,7 +29,7 @@ public final class CarjackService extends Service {
     private static final String TAG = "carjack";
     private static final String CHANNEL = "carjack";
 
-    /** How long to wait for the unit to dial in before cycling the link, doubling to a ceiling. */
+    /** How often to page an absent unit, and how long to wait before cycling a link that is up. */
     private static final long OFFER_WAIT_MS = 20_000;
     private static final long OFFER_WAIT_MAX_MS = 60_000;
 
@@ -111,13 +111,17 @@ public final class CarjackService extends Service {
                 }
                 return;
             }
+            // Android's stack brings its own profiles up on a page, which is the unit's cue to dial
+            // iAP; the link is only cycled if that turns out not to be enough.
+            if (now() - waitingSince < offerWait) {
+                return;
+            }
+            waitingSince = now();
             if (!unit.isConnected()) {
                 bluetooth.page(unit);
-            }
-            if (now() - waitingSince >= offerWait) {
+            } else if (SystemProperties.getBoolean("persist.carjack.relink", false)) {
                 Log.i(TAG, "No iAP channel offered in " + offerWait + "ms; cycling the link");
                 bluetooth.relink(unit);
-                waitingSince = now();
                 offerWait = Math.min(offerWait * 2, OFFER_WAIT_MAX_MS);
             }
         }

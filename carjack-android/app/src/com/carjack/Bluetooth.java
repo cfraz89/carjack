@@ -12,13 +12,14 @@ import android.content.IntentFilter;
 import android.os.Handler;
 import android.os.ParcelUuid;
 import android.os.Parcelable;
+import android.os.SystemClock;
 import android.os.SystemProperties;
 import android.util.Log;
 
 import java.io.IOException;
 import java.time.Duration;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
 
@@ -41,8 +42,13 @@ final class Bluetooth {
     private final Handler handler;
     private final BluetoothAdapter adapter;
     private final Consumer<BluetoothSocket> onIap;
-    /** Devices already asked for their services during this run's discovery. */
-    private final Set<String> probed = new HashSet<>();
+    private static final long PROBE_WAIT_MS = 15000;
+    private static final long PROBE_RETRY_MS = 60000;
+
+    /** When each device was last asked for its services. */
+    private final Map<String, Long> probed = new HashMap<>();
+    /** Discovery holds off until then, while a probe is out. */
+    private long probeUntil;
     private volatile boolean running;
 
     Bluetooth(Context context, Handler handler, Consumer<BluetoothSocket> onIap) {
@@ -128,6 +134,12 @@ final class Bluetooth {
         return target.equalsIgnoreCase("auto") ? "" : target;
     }
 
+    private static boolean isNamedTarget(BluetoothDevice device) {
+        String target = target();
+        return !target.isEmpty() && (target.equalsIgnoreCase(device.getAddress())
+                || target.equals(device.getName()));
+    }
+
     private boolean isTarget(BluetoothDevice device) {
         String target = target();
         if (!target.isEmpty()) {
@@ -151,26 +163,63 @@ final class Bluetooth {
 
     /** Look for an unbonded unit to pair with. */
     void discover() {
-        if (adapter.isEnabled() && !adapter.isDiscovering()) {
+        if (adapter.isEnabled() && !adapter.isDiscovering()
+                && SystemClock.elapsedRealtime() >= probeUntil) {
             adapter.startDiscovery();
         }
+    }
+
+    /**
+     * Ask one device for its services. The stack defers SDP behind a running inquiry and drops it
+     * when the next one starts, so discovery stops for the duration.
+     */
+    private void probe(BluetoothDevice device) {
+        long now = SystemClock.elapsedRealtime();
+        Long last = probed.get(device.getAddress());
+        if (now < probeUntil || (last != null && now - last < PROBE_RETRY_MS)) {
+            return;
+        }
+        probed.put(device.getAddress(), now);
+        probeUntil = now + PROBE_WAIT_MS;
+        Log.i(TAG, "Asking " + device.getAddress() + " (" + device.getName() + ") for its services");
+        adapter.cancelDiscovery();
+        device.fetchUuidsWithSdp();
+    }
+
+    private void pair(BluetoothDevice device) {
+        Log.i(TAG, "Found head unit " + device.getAddress() + " (" + device.getName()
+                + "); pairing");
+        adapter.cancelDiscovery();
+        device.createBond();
     }
 
     /** Drop any link and page again, so the unit offers a fresh iAP channel. */
     void relink(BluetoothDevice device) {
         Log.i(TAG, "Relinking " + device.getAddress());
         if (device.isConnected()) {
-            device.disconnect();
-            handler.postDelayed(device::connect, 1000);
+            try {
+                device.disconnect();
+            } catch (RuntimeException e) {
+                Log.w(TAG, "Could not disconnect " + device.getAddress(), e);
+            }
+            handler.postDelayed(() -> connect(device), 1000);
         } else {
-            device.connect();
+            connect(device);
         }
     }
 
     void page(BluetoothDevice device) {
         if (!device.isConnected()) {
             Log.i(TAG, "Paging " + device.getAddress());
+            connect(device);
+        }
+    }
+
+    private static void connect(BluetoothDevice device) {
+        try {
             device.connect();
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Could not page " + device.getAddress(), e);
         }
     }
 
@@ -193,18 +242,23 @@ final class Bluetooth {
                     }
                     break;
                 case BluetoothDevice.ACTION_FOUND:
-                    if (device.getBondState() == BluetoothDevice.BOND_NONE
-                            && probed.add(device.getAddress())) {
-                        device.fetchUuidsWithSdp();
+                    if (device.getBondState() != BluetoothDevice.BOND_NONE
+                            || device.getType() == BluetoothDevice.DEVICE_TYPE_LE) {
+                        break;
+                    }
+                    if (isNamedTarget(device)) {
+                        pair(device);
+                    } else if (target().isEmpty()) {
+                        probe(device);
                     }
                     break;
                 case BluetoothDevice.ACTION_UUID:
-                    if (device.getBondState() == BluetoothDevice.BOND_NONE
-                            && (hostsIap(intent.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID))
-                                    || target().equalsIgnoreCase(device.getAddress()))) {
-                        Log.i(TAG, "Found head unit " + device.getAddress() + "; pairing");
-                        adapter.cancelDiscovery();
-                        device.createBond();
+                    Parcelable[] uuids = intent.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID);
+                    Log.i(TAG, "Services of " + device.getAddress() + ": "
+                            + (uuids == null ? "none" : java.util.Arrays.toString(uuids)));
+                    probeUntil = 0;
+                    if (device.getBondState() == BluetoothDevice.BOND_NONE && hostsIap(uuids)) {
+                        pair(device);
                     }
                     break;
             }
