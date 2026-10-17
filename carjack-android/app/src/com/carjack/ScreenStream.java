@@ -56,16 +56,13 @@ final class ScreenStream {
         // A still screen still has to answer keyframe requests.
         format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, REPEAT_FRAME_US);
         format.setInteger(MediaFormat.KEY_PRIORITY, 0);
-        if (hevc) {
-            format.setInteger(MediaFormat.KEY_PROFILE,
-                    MediaCodecInfo.CodecProfileLevel.HEVCProfileMain);
-        }
 
         thread.start();
         String encoder = pickEncoder(mime, width, height);
         codec = encoder != null
                 ? MediaCodec.createByCodecName(encoder)
                 : MediaCodec.createEncoderByType(mime);
+        applyProfile(format, codec.getCodecInfo().getCapabilitiesForType(mime), hevc);
         Log.i(TAG, "Encoding " + width + "x" + height + "@" + fps + " with " + codec.getName()
                 + "; display " + viewWidth + "x" + viewHeight + " at (" + viewX + "," + viewY
                 + "), " + density + "dpi");
@@ -81,6 +78,35 @@ final class ScreenStream {
             target = relay.start();
         }
         display = Variant.openDisplay(context, viewWidth, viewHeight, density, target);
+    }
+
+    /**
+     * Ask for what head units decode: HEVC Main, and H.264 Constrained Baseline (else Baseline)
+     * rather than the High profile phone encoders default to, at a constant bitrate. A unit
+     * handed a profile it can't decode stops reading the stream. Each only where the encoder
+     * offers it.
+     */
+    private static void applyProfile(MediaFormat format,
+            MediaCodecInfo.CodecCapabilities caps, boolean hevc) {
+        int[] wanted = hevc
+                ? new int[] {MediaCodecInfo.CodecProfileLevel.HEVCProfileMain}
+                : new int[] {MediaCodecInfo.CodecProfileLevel.AVCProfileConstrainedBaseline,
+                        MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline};
+        pick:
+        for (int profile : wanted) {
+            for (MediaCodecInfo.CodecProfileLevel offered : caps.profileLevels) {
+                if (offered.profile == profile) {
+                    format.setInteger(MediaFormat.KEY_PROFILE, profile);
+                    break pick;
+                }
+            }
+        }
+        MediaCodecInfo.EncoderCapabilities encoder = caps.getEncoderCapabilities();
+        if (encoder != null && encoder.isBitrateModeSupported(
+                MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)) {
+            format.setInteger(MediaFormat.KEY_BITRATE_MODE,
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+        }
     }
 
     /**
