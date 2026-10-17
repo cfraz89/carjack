@@ -3,6 +3,7 @@ package com.carjack;
 import android.Manifest;
 import android.app.Activity;
 import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -18,6 +19,8 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.TextView;
 
 import rikka.shizuku.Shizuku;
@@ -41,6 +44,7 @@ public final class MainActivity extends Activity {
     private TextView status;
     private EditText address;
     private EditText app;
+    private RadioGroup units;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -88,6 +92,12 @@ public final class MainActivity extends Activity {
                     .apply();
             refresh();
         }));
+
+        TextView unitLabel = new TextView(this);
+        unitLabel.setText("\nWhich bike (paired CarPlay units):");
+        layout.addView(unitLabel);
+        units = new RadioGroup(this);
+        layout.addView(units);
 
         layout.addView(button("Use Shizuku: a display at the bike's resolution", v -> {
             if (!pingShizuku()) {
@@ -174,7 +184,47 @@ public final class MainActivity extends Activity {
         refresh();
     }
 
+    /** Automatic, then each paired unit; the saved choice checked. */
+    private void listUnits() {
+        units.setOnCheckedChangeListener(null);
+        units.removeAllViews();
+        String target = Variant.setting(this, "target", "");
+        units.addView(unit("Automatic: whichever is connected", ""));
+        BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
+        if (adapter != null && adapter.isEnabled()
+                && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                        == PackageManager.PERMISSION_GRANTED) {
+            for (BluetoothDevice device : adapter.getBondedDevices()) {
+                if (Bluetooth.hostsIap(device.getUuids())) {
+                    units.addView(unit(device.getName() + "  " + device.getAddress(),
+                            device.getAddress()));
+                }
+            }
+        }
+        for (int i = 0; i < units.getChildCount(); i++) {
+            RadioButton button = (RadioButton) units.getChildAt(i);
+            if (target.equalsIgnoreCase((String) button.getTag())) {
+                units.check(button.getId());
+            }
+        }
+        units.setOnCheckedChangeListener((group, id) -> {
+            RadioButton chosen = group.findViewById(id);
+            if (chosen != null) {
+                Variant.prefs(this).edit().putString("target", (String) chosen.getTag()).apply();
+            }
+        });
+    }
+
+    private RadioButton unit(String label, String address) {
+        RadioButton button = new RadioButton(this);
+        button.setId(View.generateViewId());
+        button.setText(label);
+        button.setTag(address);
+        return button;
+    }
+
     private void refresh() {
+        listUnits();
         StringBuilder text = new StringBuilder("carjack: CarPlay from this phone\n\n");
         text.append(permissionsGranted() ? "✓" : "✗").append(" Permissions\n");
         BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();

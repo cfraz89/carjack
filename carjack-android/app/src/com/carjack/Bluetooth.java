@@ -3,6 +3,7 @@ package com.carjack;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothProfile;
 import android.bluetooth.BluetoothServerSocket;
 import android.bluetooth.BluetoothSocket;
 import android.content.BroadcastReceiver;
@@ -41,6 +42,7 @@ final class Bluetooth {
     private final Handler handler;
     private final BluetoothAdapter adapter;
     private final Consumer<BluetoothSocket> onIap;
+    private volatile BluetoothDevice lastLinked;
     /** The unit's link has just come up: when it dials iAP, if it is going to. */
     private Consumer<BluetoothDevice> onUnitLinked = device -> {};
     private static final long PROBE_WAIT_MS = 15000;
@@ -72,11 +74,14 @@ final class Bluetooth {
         filter.addAction(BluetoothDevice.ACTION_UUID);
         filter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
         filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
+        filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
         filter.setPriority(IntentFilter.SYSTEM_HIGH_PRIORITY);
         context.registerReceiver(receiver, filter, null, handler, Context.RECEIVER_EXPORTED);
         // The listeners retry until the adapter is on, which a user may still have to do.
         listen(IAP_DEVICE, "Wireless iAP", onIap);
         listen(CARPLAY_DEVICE, "CarPlay", Bluetooth::closeQuietly);
+        findConnectedUnit(BluetoothProfile.HEADSET);
+        findConnectedUnit(BluetoothProfile.A2DP);
         if (adapter.isEnabled()) {
             Variant.makeDiscoverable(adapter);
         } else {
@@ -87,6 +92,45 @@ final class Bluetooth {
     /** Whether we opened this channel rather than the unit. */
     boolean wasDialled(BluetoothSocket socket) {
         return dialled.remove(socket);
+    }
+
+    /**
+     * A unit already connected when carjack starts, through the phone's own profiles: there is no
+     * link-up to learn it from, and it's the one in range.
+     */
+    private void findConnectedUnit(int profile) {
+        adapter.getProfileProxy(context, new BluetoothProfile.ServiceListener() {
+            @Override
+            public void onServiceConnected(int which, BluetoothProfile proxy) {
+                try {
+                    for (BluetoothDevice device : proxy.getConnectedDevices()) {
+                        if (lastLinked == null && isTarget(device)) {
+                            Log.i(TAG, "Head unit " + device.getAddress() + " is connected");
+                            lastLinked = device;
+                        }
+                    }
+                } catch (SecurityException e) {
+                    Log.w(TAG, "Can't list connected devices: " + e.getMessage());
+                }
+                adapter.closeProfileProxy(which, proxy);
+            }
+
+            @Override
+            public void onServiceDisconnected(int which) {}
+        }, profile);
+    }
+
+    /** Paired units hosting iAP: what a user can pick from. */
+    java.util.List<BluetoothDevice> pairedUnits() {
+        java.util.List<BluetoothDevice> units = new java.util.ArrayList<>();
+        if (adapter.isEnabled()) {
+            for (BluetoothDevice device : adapter.getBondedDevices()) {
+                if (hostsIap(device.getUuids())) {
+                    units.add(device);
+                }
+            }
+        }
+        return units;
     }
 
     void setOnUnitLinked(Consumer<BluetoothDevice> listener) {
@@ -149,6 +193,11 @@ final class Bluetooth {
         if (!adapter.isEnabled()) {
             return null;
         }
+        // Of several paired units, the one whose link came up last is the one that's here.
+        BluetoothDevice linked = lastLinked;
+        if (linked != null) {
+            return linked;
+        }
         for (BluetoothDevice device : adapter.getBondedDevices()) {
             if (isTarget(device)) {
                 return device;
@@ -177,7 +226,7 @@ final class Bluetooth {
         return hostsIap(device.getUuids());
     }
 
-    private static boolean hostsIap(Parcelable[] uuids) {
+    static boolean hostsIap(Parcelable[] uuids) {
         if (uuids == null) {
             return false;
         }
@@ -269,7 +318,13 @@ final class Bluetooth {
             switch (intent.getAction()) {
                 case BluetoothDevice.ACTION_ACL_CONNECTED:
                     if (isTarget(device)) {
+                        lastLinked = device;
                         onUnitLinked.accept(device);
+                    }
+                    break;
+                case BluetoothDevice.ACTION_ACL_DISCONNECTED:
+                    if (device.equals(lastLinked)) {
+                        lastLinked = null;
                     }
                     break;
                 case BluetoothAdapter.ACTION_STATE_CHANGED:
