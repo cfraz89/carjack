@@ -87,6 +87,14 @@ final class Variant {
         return true;
     }
 
+    static boolean canPage() {
+        return true;
+    }
+
+    static boolean isConnected(BluetoothDevice device) {
+        return device.isConnected();
+    }
+
     /** Page the unit; false where this build can't. */
     static boolean connect(BluetoothDevice device) {
         try {

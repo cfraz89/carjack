@@ -31,6 +31,8 @@ import java.nio.file.Paths;
 final class AccessoryWifi {
     private static final String TAG = "carjack";
     private static final int JOIN_TIMEOUT_MS = 30000;
+    /** What Android hands apps in place of a MAC address they may not see. */
+    private static final String HIDDEN_MAC = "02:00:00:00:00:00";
 
     interface Result {
         void joined(String iface, String mac);
@@ -133,7 +135,7 @@ final class AccessoryWifi {
         } catch (IOException | SecurityException ignored) {
         }
         if (info != null && info.getMacAddress() != null
-                && !WifiInfo.DEFAULT_MAC_ADDRESS.equals(info.getMacAddress())) {
+                && !HIDDEN_MAC.equals(info.getMacAddress())) {
             return info.getMacAddress().toUpperCase();
         }
         try {
@@ -146,7 +148,7 @@ final class AccessoryWifi {
         } catch (SocketException ignored) {
         }
         Log.w(TAG, "No MAC address for " + iface);
-        return WifiInfo.DEFAULT_MAC_ADDRESS;
+        return HIDDEN_MAC;
     }
 
     private void answer(String iface, String detail) {

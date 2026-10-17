@@ -1,6 +1,8 @@
-// The platform build of the carjack app: platform-signed, so it gets its permissions and hidden
-// APIs without anyone at the screen. libcarjack_android.so comes from `just android` in the
-// carjack repo, staged beside this file.
+// carjack's Android app, in two builds from one source tree:
+//  - Carjack: platform-signed and preinstalled (motopod), so it gets its permissions and hidden
+//    APIs without anyone at the screen. src-platform/.
+//  - CarjackGeneric: an ordinary app for any phone, on the public SDK. src-generic/.
+// libcarjack_android.so comes from `just android` in the carjack repo, staged beside this file.
 
 cc_prebuilt_library_shared {
     name: "libcarjack_android",
@@ -14,6 +16,9 @@ cc_prebuilt_library_shared {
     strip: {
         none: true,
     },
+    // An NDK variant too, for the generic app.
+    sdk_version: "30",
+    stl: "none",
     system_ext_specific: true,
 }
 
@@ -30,6 +35,23 @@ android_app {
     use_embedded_native_libs: true,
     optimize: {
         // JNI calls back into Native.Callbacks by name.
+        enabled: false,
+    },
+}
+
+android_app {
+    name: "CarjackGeneric",
+    srcs: [
+        "src/**/*.java",
+        "src-generic/**/*.java",
+    ],
+    manifest: "generic/AndroidManifest.xml",
+    resource_dirs: ["generic/res"],
+    sdk_version: "current",
+    min_sdk_version: "31",
+    jni_libs: ["libcarjack_android"],
+    use_embedded_native_libs: true,
+    optimize: {
         enabled: false,
     },
 }

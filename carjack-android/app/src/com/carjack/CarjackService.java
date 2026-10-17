@@ -26,12 +26,19 @@ public final class CarjackService extends Service {
     /** How often to page an absent unit, and how long to wait before cycling a link that is up. */
     private static final long OFFER_WAIT_MS = 20_000;
     private static final long OFFER_WAIT_MAX_MS = 60_000;
+    /** Once the unit's link is up, how long it gets to dial iAP before we dial it. */
+    private static final long UNIT_DIAL_GRACE_MS = 8_000;
+    /** How long a session on a channel we dialled is still setting up iAP2, and can give way. */
+    private static final long DIALLED_SETUP_MS = 6_000;
 
     private final HandlerThread thread = new HandlerThread("carjack");
+    private Notification notification;
     private Handler handler;
     private Bluetooth bluetooth;
     private AccessoryWifi wifi;
     private Session session;
+    private boolean sessionDialled;
+    private long sessionStarted;
     private long offerWait = OFFER_WAIT_MS;
     private long waitingSince;
 
@@ -42,7 +49,7 @@ public final class CarjackService extends Service {
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.createNotificationChannel(
                 new NotificationChannel(CHANNEL, "CarPlay", NotificationManager.IMPORTANCE_LOW));
-        Notification notification = new Notification.Builder(this, CHANNEL)
+        notification = new Notification.Builder(this, CHANNEL)
                 .setContentTitle("carjack")
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
                 .build();
@@ -53,6 +60,15 @@ public final class CarjackService extends Service {
         handler = new Handler(thread.getLooper());
         wifi = new AccessoryWifi(this, handler);
         bluetooth = new Bluetooth(this, handler, socket -> handler.post(() -> accept(socket)));
+        if (!Variant.canPage()) {
+            // A unit dials iAP only on a fresh link, and may carry it on a channel we dial then
+            // too: give it a moment to dial first.
+            bluetooth.setOnUnitLinked(unit -> handler.postDelayed(() -> {
+                if (session == null) {
+                    bluetooth.dial(unit);
+                }
+            }, UNIT_DIAL_GRACE_MS));
+        }
         handler.post(() -> {
             bluetooth.start();
             waitingSince = now();
@@ -86,7 +102,10 @@ public final class CarjackService extends Service {
                 return;
             }
             waitingSince = now();
-            if (!unit.isConnected()) {
+            if (!Variant.canPage()) {
+                bluetooth.dial(unit);
+                offerWait = Math.min(offerWait * 2, OFFER_WAIT_MAX_MS);
+            } else if (!Variant.isConnected(unit)) {
                 bluetooth.page(unit);
             } else if (Boolean.parseBoolean(Variant.setting(CarjackService.this, "relink", "false"))) {
                 Log.i(TAG, "No iAP channel offered in " + offerWait + "ms; cycling the link");
@@ -97,11 +116,22 @@ public final class CarjackService extends Service {
     };
 
     private void accept(BluetoothSocket socket) {
+        boolean dialled = bluetooth.wasDialled(socket);
         if (session != null) {
-            Log.w(TAG, "Already in a session; refusing " + socket.getRemoteDevice());
-            Bluetooth.closeQuietly(socket);
-            return;
+            // A unit carries iAP2 on the channel it opened over one we dialled, if it opens one.
+            if (sessionDialled && !dialled && now() - sessionStarted < DIALLED_SETUP_MS) {
+                Log.i(TAG, "The unit dialled in; dropping the channel we dialled");
+                Session dropped = session;
+                session = null;
+                dropped.stop();
+            } else {
+                Log.w(TAG, "Already in a session; refusing " + socket.getRemoteDevice());
+                Bluetooth.closeQuietly(socket);
+                return;
+            }
         }
+        sessionDialled = dialled;
+        sessionStarted = now();
         offerWait = OFFER_WAIT_MS;
         BluetoothDevice unit = socket.getRemoteDevice();
         session = new Session(this, handler, socket, wifi, ended -> {
@@ -138,8 +168,22 @@ public final class CarjackService extends Service {
         return Variant.onStartCommand(this, intent);
     }
 
+    /** Re-declare the foreground service with more types, once their consent is in hand. */
+    void promote(int foregroundServiceTypes) {
+        startForeground(1, notification, foregroundServiceTypes);
+    }
+
     @Override
     public void onDestroy() {
+        handler.removeCallbacks(watch);
+        handler.post(() -> {
+            if (session != null) {
+                session.stop();
+            }
+            bluetooth.stop();
+            wifi.leave();
+            thread.quitSafely();
+        });
         Variant.onServiceDestroyed(this);
         super.onDestroy();
     }

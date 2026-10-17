@@ -41,6 +41,8 @@ final class Bluetooth {
     private final Handler handler;
     private final BluetoothAdapter adapter;
     private final Consumer<BluetoothSocket> onIap;
+    /** The unit's link has just come up: when it dials iAP, if it is going to. */
+    private Consumer<BluetoothDevice> onUnitLinked = device -> {};
     private static final long PROBE_WAIT_MS = 15000;
     private static final long PROBE_RETRY_MS = 60000;
 
@@ -49,6 +51,11 @@ final class Bluetooth {
     /** Discovery holds off until then, while a probe is out. */
     private long probeUntil;
     private volatile boolean running;
+    private final java.util.Set<BluetoothSocket> dialled =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** Open listening sockets, closed to stop their threads. */
+    private final java.util.Set<BluetoothServerSocket> servers =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     Bluetooth(Context context, Handler handler, Consumer<BluetoothSocket> onIap) {
         this.context = context;
@@ -64,6 +71,7 @@ final class Bluetooth {
         filter.addAction(BluetoothDevice.ACTION_FOUND);
         filter.addAction(BluetoothDevice.ACTION_UUID);
         filter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
+        filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
         filter.setPriority(IntentFilter.SYSTEM_HIGH_PRIORITY);
         context.registerReceiver(receiver, filter, null, handler, Context.RECEIVER_EXPORTED);
         // The listeners retry until the adapter is on, which a user may still have to do.
@@ -74,6 +82,31 @@ final class Bluetooth {
         } else {
             adapter.enable();
         }
+    }
+
+    /** Whether we opened this channel rather than the unit. */
+    boolean wasDialled(BluetoothSocket socket) {
+        return dialled.remove(socket);
+    }
+
+    void setOnUnitLinked(Consumer<BluetoothDevice> listener) {
+        onUnitLinked = listener;
+    }
+
+    /** Withdraw the services and stop listening, so a later start can register them again. */
+    void stop() {
+        running = false;
+        try {
+            context.unregisterReceiver(receiver);
+        } catch (IllegalArgumentException ignored) {
+        }
+        for (BluetoothServerSocket server : servers) {
+            try {
+                server.close();
+            } catch (IOException ignored) {
+            }
+        }
+        servers.clear();
     }
 
     String name() {
@@ -90,13 +123,14 @@ final class Bluetooth {
             while (running) {
                 try (BluetoothServerSocket server =
                         adapter.listenUsingRfcommWithServiceRecord(name, uuid)) {
+                    servers.add(server);
                     Log.i(TAG, "Listening for " + name);
                     while (running) {
                         BluetoothSocket socket = server.accept();
                         Log.i(TAG, name + " connection from " + socket.getRemoteDevice());
                         onAccept.accept(socket);
                     }
-                } catch (IOException e) {
+                } catch (IOException | SecurityException e) {
                     Log.w(TAG, name + " listener ended: " + e.getMessage());
                 }
                 try {
@@ -190,7 +224,7 @@ final class Bluetooth {
     /** Drop any link and page again, so the unit offers a fresh iAP channel. */
     void relink(BluetoothDevice device) {
         Log.i(TAG, "Relinking " + device.getAddress());
-        if (device.isConnected()) {
+        if (Variant.isConnected(device)) {
             Variant.disconnect(device);
             handler.postDelayed(() -> Variant.connect(device), 1000);
         } else {
@@ -198,8 +232,30 @@ final class Bluetooth {
         }
     }
 
+    /**
+     * Open the unit's own iAP service, for where it won't dial us and we can't page it. The
+     * channel is handed on as if the unit had dialled.
+     */
+    void dial(BluetoothDevice device) {
+        Thread thread = new Thread(() -> {
+            Log.i(TAG, "Dialling " + device.getAddress() + "'s iAP service");
+            try {
+                adapter.cancelDiscovery();
+                BluetoothSocket socket = device.createRfcommSocketToServiceRecord(IAP_ACCESSORY);
+                socket.connect();
+                Log.i(TAG, "iAP channel dialled to " + device.getAddress());
+                dialled.add(socket);
+                onIap.accept(socket);
+            } catch (IOException | SecurityException e) {
+                Log.w(TAG, "Dialling " + device.getAddress() + " failed: " + e.getMessage());
+            }
+        }, "carjack-dial");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
     void page(BluetoothDevice device) {
-        if (!device.isConnected()) {
+        if (!Variant.isConnected(device)) {
             Log.i(TAG, "Paging " + device.getAddress());
             Variant.connect(device);
         }
@@ -211,6 +267,11 @@ final class Bluetooth {
             BluetoothDevice device =
                     intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
             switch (intent.getAction()) {
+                case BluetoothDevice.ACTION_ACL_CONNECTED:
+                    if (isTarget(device)) {
+                        onUnitLinked.accept(device);
+                    }
+                    break;
                 case BluetoothAdapter.ACTION_STATE_CHANGED:
                     if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)
                             == BluetoothAdapter.STATE_ON) {

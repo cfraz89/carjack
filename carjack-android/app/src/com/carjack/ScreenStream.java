@@ -4,6 +4,7 @@ import android.content.Context;
 import android.hardware.display.VirtualDisplay;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.os.Bundle;
 import android.os.Handler;
@@ -61,7 +62,10 @@ final class ScreenStream {
         }
 
         thread.start();
-        codec = MediaCodec.createEncoderByType(mime);
+        String encoder = pickEncoder(mime, width, height);
+        codec = encoder != null
+                ? MediaCodec.createByCodecName(encoder)
+                : MediaCodec.createEncoderByType(mime);
         Log.i(TAG, "Encoding " + width + "x" + height + "@" + fps + " with " + codec.getName()
                 + "; display " + viewWidth + "x" + viewHeight + " at (" + viewX + "," + viewY
                 + "), " + density + "dpi");
@@ -77,6 +81,40 @@ final class ScreenStream {
             target = relay.start();
         }
         display = Variant.openDisplay(context, viewWidth, viewHeight, density, target);
+    }
+
+    /**
+     * A hardware encoder that takes this exact size, else any encoder that does; null leaves the
+     * choice to the platform. A panel like 1080x600 isn't 16-line aligned, which some reject.
+     */
+    private static String pickEncoder(String mime, int width, int height) {
+        String fallback = null;
+        for (MediaCodecInfo info : new MediaCodecList(MediaCodecList.REGULAR_CODECS)
+                .getCodecInfos()) {
+            if (!info.isEncoder()) {
+                continue;
+            }
+            for (String type : info.getSupportedTypes()) {
+                if (!type.equalsIgnoreCase(mime)) {
+                    continue;
+                }
+                MediaCodecInfo.VideoCapabilities video =
+                        info.getCapabilitiesForType(type).getVideoCapabilities();
+                if (video == null || !video.isSizeSupported(width, height)) {
+                    continue;
+                }
+                if (info.isHardwareAccelerated()) {
+                    return info.getName();
+                }
+                if (fallback == null) {
+                    fallback = info.getName();
+                }
+            }
+        }
+        if (fallback == null) {
+            Log.w(TAG, "No " + mime + " encoder claims " + width + "x" + height);
+        }
+        return fallback;
     }
 
     private int intSetting(String key, int fallback) {
