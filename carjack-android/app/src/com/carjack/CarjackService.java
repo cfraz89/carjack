@@ -3,6 +3,7 @@ package com.carjack;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothSocket;
@@ -22,6 +23,8 @@ import java.io.IOException;
 public final class CarjackService extends Service {
     private static final String TAG = "carjack";
     private static final String CHANNEL = "carjack";
+    /** The notification's Stop. */
+    static final String ACTION_STOP = "com.carjack.STOP";
 
     /** How often to page an absent unit, and how long to wait before cycling a link that is up. */
     private static final long OFFER_WAIT_MS = 20_000;
@@ -49,9 +52,13 @@ public final class CarjackService extends Service {
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.createNotificationChannel(
                 new NotificationChannel(CHANNEL, "CarPlay", NotificationManager.IMPORTANCE_LOW));
+        PendingIntent stop = PendingIntent.getService(this, 0,
+                new Intent(this, CarjackService.class).setAction(ACTION_STOP),
+                PendingIntent.FLAG_IMMUTABLE);
         notification = new Notification.Builder(this, CHANNEL)
                 .setContentTitle("carjack")
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+                .addAction(new Notification.Action.Builder(null, "Stop", stop).build())
                 .build();
         startForeground(1, notification, Variant.foregroundServiceTypes());
 
@@ -165,6 +172,10 @@ public final class CarjackService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         return Variant.onStartCommand(this, intent);
     }
 

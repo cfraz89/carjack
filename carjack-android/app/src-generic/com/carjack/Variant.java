@@ -9,6 +9,9 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.hardware.display.VirtualDisplay;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Process;
 import android.util.Log;
 import android.view.Surface;
 
@@ -43,9 +46,18 @@ final class Variant {
         return Service.START_NOT_STICKY;
     }
 
+    /** How long the service's own teardown gets before the process goes. */
+    private static final long STOP_GRACE_MS = 1500;
+
+    /**
+     * Stop means stopped: once the teardown has had its moment the process ends, taking the
+     * native session, the listeners and any network request with it.
+     */
     static void onServiceDestroyed(Service service) {
         Projection.stop();
         ShizukuDisplay.unbind();
+        new Handler(Looper.getMainLooper()).postDelayed(
+                () -> Process.killProcess(Process.myPid()), STOP_GRACE_MS);
     }
 
     static String setting(Context context, String key, String fallback) {
