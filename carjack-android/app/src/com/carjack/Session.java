@@ -27,7 +27,7 @@ final class Session implements Native.Callbacks {
     private final Listener listener;
     private volatile long handle;
     private ScreenStream stream;
-    private volatile TouchInjector touch;
+    private volatile Touch touch;
 
     Session(Context context, Handler handler, BluetoothSocket socket, AccessoryWifi wifi,
             Listener listener) {
@@ -73,7 +73,7 @@ final class Session implements Native.Callbacks {
 
     @Override
     public void joinWifi(String ssid, String passphrase, String bssid) {
-        handler.post(() -> wifi.join(ssid, passphrase, new AccessoryWifi.Result() {
+        handler.post(() -> wifi.join(ssid, passphrase, bssid, new AccessoryWifi.Result() {
             @Override
             public void joined(String iface, String mac) {
                 Native.wifiJoined(handle, iface, mac);
@@ -90,7 +90,7 @@ final class Session implements Native.Callbacks {
     public void startVideo(int width, int height, int fps, int viewX, int viewY, int viewWidth,
             int viewHeight, boolean hevc) {
         handler.post(() -> {
-            touch = new TouchInjector(viewX, viewY, viewWidth, viewHeight);
+            touch = Variant.touch(context, viewX, viewY, viewWidth, viewHeight);
             stream = new ScreenStream(context, handle, this::stop);
             try {
                 stream.start(width, height, fps, viewX, viewY, viewWidth, viewHeight, hevc);
@@ -111,7 +111,7 @@ final class Session implements Native.Callbacks {
 
     @Override
     public void touch(int action, float x, float y) {
-        TouchInjector t = touch;
+        Touch t = touch;
         if (t != null) {
             t.touch(action, x, y);
         }

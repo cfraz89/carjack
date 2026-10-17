@@ -26,6 +26,8 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
     <uses-permission android:name="android.permission.NETWORK_SETTINGS" />
+    <!-- Joins the accessory's AP without the peer-to-peer approval dialog. -->
+    <uses-permission android:name="android.permission.COMPANION_APPROVE_WIFI_CONNECTIONS" />
     <uses-permission android:name="android.permission.CONNECTIVITY_INTERNAL" />
 
     <uses-permission android:name="android.permission.CAPTURE_VIDEO_OUTPUT" />

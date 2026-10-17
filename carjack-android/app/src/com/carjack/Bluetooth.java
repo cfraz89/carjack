@@ -13,19 +13,18 @@ import android.os.Handler;
 import android.os.ParcelUuid;
 import android.os.Parcelable;
 import android.os.SystemClock;
-import android.os.SystemProperties;
 import android.util.Log;
 
 import java.io.IOException;
-import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
 
 /**
- * The Bluetooth side a phone shows a CarPlay unit: always discoverable, pairing without asking,
- * the iAP service the unit dials in on, and paging the unit to get it to dial.
+ * The Bluetooth side a phone shows a CarPlay unit: discoverable, the iAP service the unit dials in
+ * on, and paging the unit to get it to dial. How much of that happens without asking is up to the
+ * {@link Variant}.
  */
 final class Bluetooth {
     private static final String TAG = "carjack";
@@ -67,19 +66,14 @@ final class Bluetooth {
         filter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
         filter.setPriority(IntentFilter.SYSTEM_HIGH_PRIORITY);
         context.registerReceiver(receiver, filter, null, handler, Context.RECEIVER_EXPORTED);
-        if (!adapter.isEnabled()) {
-            adapter.enable();
-        } else {
-            onEnabled();
-        }
-    }
-
-    private void onEnabled() {
-        // Zero is "never times out".
-        adapter.setDiscoverableTimeout(Duration.ZERO);
-        adapter.setScanMode(BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE);
+        // The listeners retry until the adapter is on, which a user may still have to do.
         listen(IAP_DEVICE, "Wireless iAP", onIap);
         listen(CARPLAY_DEVICE, "CarPlay", Bluetooth::closeQuietly);
+        if (adapter.isEnabled()) {
+            Variant.makeDiscoverable(adapter);
+        } else {
+            adapter.enable();
+        }
     }
 
     String name() {
@@ -87,7 +81,7 @@ final class Bluetooth {
     }
 
     String address() {
-        return adapter.getAddress();
+        return Variant.bluetoothAddress(context, adapter);
     }
 
     /** Accepts on {@code uuid} until the adapter goes away, then again once it is back. */
@@ -129,12 +123,12 @@ final class Bluetooth {
         return null;
     }
 
-    private static String target() {
-        String target = SystemProperties.get("persist.carjack.target", "").trim();
+    private String target() {
+        String target = Variant.setting(context, "target", "").trim();
         return target.equalsIgnoreCase("auto") ? "" : target;
     }
 
-    private static boolean isNamedTarget(BluetoothDevice device) {
+    private boolean isNamedTarget(BluetoothDevice device) {
         String target = target();
         return !target.isEmpty() && (target.equalsIgnoreCase(device.getAddress())
                 || target.equals(device.getName()));
@@ -197,29 +191,17 @@ final class Bluetooth {
     void relink(BluetoothDevice device) {
         Log.i(TAG, "Relinking " + device.getAddress());
         if (device.isConnected()) {
-            try {
-                device.disconnect();
-            } catch (RuntimeException e) {
-                Log.w(TAG, "Could not disconnect " + device.getAddress(), e);
-            }
-            handler.postDelayed(() -> connect(device), 1000);
+            Variant.disconnect(device);
+            handler.postDelayed(() -> Variant.connect(device), 1000);
         } else {
-            connect(device);
+            Variant.connect(device);
         }
     }
 
     void page(BluetoothDevice device) {
         if (!device.isConnected()) {
             Log.i(TAG, "Paging " + device.getAddress());
-            connect(device);
-        }
-    }
-
-    private static void connect(BluetoothDevice device) {
-        try {
-            device.connect();
-        } catch (RuntimeException e) {
-            Log.w(TAG, "Could not page " + device.getAddress(), e);
+            Variant.connect(device);
         }
     }
 
@@ -232,12 +214,11 @@ final class Bluetooth {
                 case BluetoothAdapter.ACTION_STATE_CHANGED:
                     if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)
                             == BluetoothAdapter.STATE_ON) {
-                        onEnabled();
+                        Variant.makeDiscoverable(adapter);
                     }
                     break;
                 case BluetoothDevice.ACTION_PAIRING_REQUEST:
-                    confirmPairing(device, intent);
-                    if (isOrderedBroadcast()) {
+                    if (Variant.confirmPairing(device, intent) && isOrderedBroadcast()) {
                         abortBroadcast();
                     }
                     break;
@@ -264,19 +245,6 @@ final class Bluetooth {
             }
         }
     };
-
-    private static void confirmPairing(BluetoothDevice device, Intent intent) {
-        int variant = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, -1);
-        Log.i(TAG, "Pairing request from " + device.getAddress() + ", variant " + variant);
-        switch (variant) {
-            case BluetoothDevice.PAIRING_VARIANT_PIN:
-                device.setPin("0000");
-                break;
-            default:
-                device.setPairingConfirmation(true);
-                break;
-        }
-    }
 
     static void closeQuietly(BluetoothSocket socket) {
         try {

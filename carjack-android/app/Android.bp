@@ -19,7 +19,10 @@ cc_prebuilt_library_shared {
 
 android_app {
     name: "Carjack",
-    srcs: ["src/**/*.java"],
+    srcs: [
+        "src/**/*.java",
+        "src-platform/**/*.java",
+    ],
     platform_apis: true,
     certificate: "platform",
     system_ext_specific: true,

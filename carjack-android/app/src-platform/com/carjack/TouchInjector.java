@@ -8,11 +8,7 @@ import android.view.InputDevice;
 import android.view.MotionEvent;
 
 /** The accessory's touches, from its panel's pixels onto the default display. */
-final class TouchInjector {
-    static final int DOWN = 0;
-    static final int UP = 1;
-    static final int MOVE = 2;
-
+final class TouchInjector implements Touch {
     private final int viewX;
     private final int viewY;
     private final int viewWidth;
@@ -26,7 +22,8 @@ final class TouchInjector {
         this.viewHeight = viewHeight;
     }
 
-    void touch(int action, float panelX, float panelY) {
+    @Override
+    public void touch(int action, float panelX, float panelY) {
         float x = panelX - viewX;
         float y = panelY - viewY;
         long now = SystemClock.uptimeMillis();

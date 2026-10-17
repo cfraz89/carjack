@@ -4,26 +4,33 @@ import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.LinkAddress;
 import android.net.LinkProperties;
+import android.net.MacAddress;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
-import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
+import android.net.wifi.WifiNetworkSpecifier;
 import android.os.Handler;
 import android.util.Log;
 
+import java.io.IOException;
 import java.net.Inet4Address;
 import java.net.NetworkInterface;
 import java.net.SocketException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 
 /**
- * Joins the accessory's access point and routes this process over it. The accessory's network has
- * no internet, so nothing else on the device moves to it.
+ * Joins the accessory's access point as a peer-to-peer network and routes this process over it.
+ * Where the device runs two STAs (STA+STA local-only concurrency) that is the second one and the
+ * primary connection stays up; elsewhere the framework moves its one radio over. Either way only
+ * this process uses the accessory's network, which has no internet.
  */
 final class AccessoryWifi {
     private static final String TAG = "carjack";
-    private static final long JOIN_TIMEOUT_MS = 30000;
+    private static final int JOIN_TIMEOUT_MS = 30000;
 
     interface Result {
         void joined(String iface, String mac);
@@ -36,7 +43,6 @@ final class AccessoryWifi {
     private final ConnectivityManager connectivity;
     private WifiManager.MulticastLock multicast;
     private ConnectivityManager.NetworkCallback callback;
-    private int networkId = -1;
     private Result pending;
 
     AccessoryWifi(Context context, Handler handler) {
@@ -46,56 +52,52 @@ final class AccessoryWifi {
     }
 
     /** Runs on the handler; {@code result} is answered there once. */
-    void join(String ssid, String passphrase, Result result) {
+    void join(String ssid, String passphrase, String bssid, Result result) {
         leave();
         pending = result;
         if (!wifi.isWifiEnabled()) {
             wifi.setWifiEnabled(true);
         }
 
-        WifiConfiguration config = new WifiConfiguration();
-        config.SSID = "\"" + ssid + "\"";
-        if (passphrase == null || passphrase.isEmpty()) {
-            config.setSecurityParams(WifiConfiguration.SECURITY_TYPE_OPEN);
-        } else {
-            config.setSecurityParams(WifiConfiguration.SECURITY_TYPE_PSK);
-            config.preSharedKey = "\"" + passphrase + "\"";
+        WifiNetworkSpecifier.Builder spec = new WifiNetworkSpecifier.Builder().setSsid(ssid);
+        if (passphrase != null && !passphrase.isEmpty()) {
+            spec.setWpa2Passphrase(passphrase);
         }
-        config.allowAutojoin = false;
-        networkId = wifi.addNetwork(config);
-        Log.i(TAG, "Joining " + ssid + " (network " + networkId + ")");
-
+        if (bssid != null) {
+            try {
+                spec.setBssid(MacAddress.fromString(bssid));
+            } catch (IllegalArgumentException e) {
+                Log.w(TAG, "Ignoring the accessory's BSSID " + bssid);
+            }
+        }
         NetworkRequest request = new NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .removeCapability(NetworkCapabilities.NET_CAPABILITY_TRUSTED)
-                .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+                .setNetworkSpecifier(spec.build())
                 .build();
+        Log.i(TAG, "Joining " + ssid);
         callback = new ConnectivityManager.NetworkCallback(
                 ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO) {
             @Override
             public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
-                check(network, caps, connectivity.getLinkProperties(network), ssid);
+                check(network, caps, connectivity.getLinkProperties(network));
             }
 
             @Override
             public void onLinkPropertiesChanged(Network network, LinkProperties link) {
-                check(network, connectivity.getNetworkCapabilities(network), link, ssid);
+                check(network, connectivity.getNetworkCapabilities(network), link);
+            }
+
+            @Override
+            public void onUnavailable() {
+                answer(null, "the accessory's WiFi did not come up");
             }
         };
-        connectivity.requestNetwork(request, callback, handler);
-        wifi.connect(networkId, null);
-        handler.postDelayed(timeout, JOIN_TIMEOUT_MS);
+        connectivity.requestNetwork(request, callback, handler, JOIN_TIMEOUT_MS);
     }
 
-    private final Runnable timeout = () -> answer(null, "timed out joining the accessory's WiFi");
-
-    private void check(Network network, NetworkCapabilities caps, LinkProperties link, String ssid) {
+    private void check(Network network, NetworkCapabilities caps, LinkProperties link) {
         if (pending == null || caps == null || link == null) {
-            return;
-        }
-        if (!(caps.getTransportInfo() instanceof WifiInfo info)
-                || !("\"" + ssid + "\"").equals(info.getSSID())) {
             return;
         }
         String iface = link.getInterfaceName();
@@ -105,13 +107,15 @@ final class AccessoryWifi {
         connectivity.bindProcessToNetwork(network);
         multicast = wifi.createMulticastLock("carjack");
         multicast.acquire();
-        answer(iface, mac(iface));
+        WifiInfo info = caps.getTransportInfo() instanceof WifiInfo w ? w : null;
+        answer(iface, mac(iface, info));
     }
 
     /** IPv4, or an IPv6 link-local one: the accessory's AirPlay can live on either. */
     private static boolean hasUsableAddress(LinkProperties link) {
         for (LinkAddress address : link.getLinkAddresses()) {
-            if (address.getAddress() instanceof Inet4Address || address.getAddress().isLinkLocalAddress()) {
+            if (address.getAddress() instanceof Inet4Address
+                    || address.getAddress().isLinkLocalAddress()) {
                 return true;
             }
         }
@@ -119,29 +123,33 @@ final class AccessoryWifi {
     }
 
     /** The address the interface joined with, which is randomised per network. */
-    private String mac(String iface) {
-        // The network callback's WifiInfo has it redacted; this one honours LOCAL_MAC_ADDRESS.
-        String mac = wifi.getConnectionInfo().getMacAddress();
-        if (mac == null || mac.equals(WifiInfo.DEFAULT_MAC_ADDRESS)) {
-            try {
-                NetworkInterface nif = NetworkInterface.getByName(iface);
-                byte[] hw = nif == null ? null : nif.getHardwareAddress();
-                if (hw != null && hw.length == 6) {
-                    mac = String.format("%02X:%02X:%02X:%02X:%02X:%02X",
-                            hw[0], hw[1], hw[2], hw[3], hw[4], hw[5]);
-                }
-            } catch (SocketException ignored) {
+    private static String mac(String iface, WifiInfo info) {
+        try {
+            String mac = new String(Files.readAllBytes(Paths.get("/sys/class/net", iface, "address")),
+                    StandardCharsets.US_ASCII).trim();
+            if (!mac.isEmpty()) {
+                return mac.toUpperCase();
             }
+        } catch (IOException | SecurityException ignored) {
         }
-        if (mac == null) {
-            Log.w(TAG, "No MAC address for " + iface);
-            return WifiInfo.DEFAULT_MAC_ADDRESS;
+        if (info != null && info.getMacAddress() != null
+                && !WifiInfo.DEFAULT_MAC_ADDRESS.equals(info.getMacAddress())) {
+            return info.getMacAddress().toUpperCase();
         }
-        return mac.toUpperCase();
+        try {
+            NetworkInterface nif = NetworkInterface.getByName(iface);
+            byte[] hw = nif == null ? null : nif.getHardwareAddress();
+            if (hw != null && hw.length == 6) {
+                return String.format("%02X:%02X:%02X:%02X:%02X:%02X",
+                        hw[0], hw[1], hw[2], hw[3], hw[4], hw[5]);
+            }
+        } catch (SocketException ignored) {
+        }
+        Log.w(TAG, "No MAC address for " + iface);
+        return WifiInfo.DEFAULT_MAC_ADDRESS;
     }
 
     private void answer(String iface, String detail) {
-        handler.removeCallbacks(timeout);
         Result result = pending;
         pending = null;
         if (result == null) {
@@ -156,9 +164,8 @@ final class AccessoryWifi {
         }
     }
 
-    /** Back off the accessory's network and forget it. */
+    /** Release the accessory's network; the framework drops the connection with the request. */
     void leave() {
-        handler.removeCallbacks(timeout);
         pending = null;
         connectivity.bindProcessToNetwork(null);
         if (multicast != null) {
@@ -168,10 +175,6 @@ final class AccessoryWifi {
         if (callback != null) {
             connectivity.unregisterNetworkCallback(callback);
             callback = null;
-        }
-        if (networkId != -1) {
-            wifi.removeNetwork(networkId);
-            networkId = -1;
         }
     }
 }

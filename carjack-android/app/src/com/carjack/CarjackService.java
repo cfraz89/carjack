@@ -1,6 +1,5 @@
 package com.carjack;
 
-import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -8,22 +7,17 @@ import android.app.Service;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothSocket;
 import android.content.Intent;
-import android.content.pm.PackageManager;
-import android.content.pm.ServiceInfo;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
-import android.os.Process;
-import android.os.SystemProperties;
-import android.os.UserHandle;
 import android.util.Log;
 
 import java.io.File;
 import java.io.IOException;
 
 /**
- * Runs from boot with nobody at the screen: waits for a CarPlay unit, pages it until it dials the
- * iAP service, and runs one session at a time.
+ * Waits for a CarPlay unit, pages it until it dials the iAP service, and runs one session at a
+ * time. The platform build runs it from boot; the generic one from its activity.
  */
 public final class CarjackService extends Service {
     private static final String TAG = "carjack";
@@ -32,17 +26,6 @@ public final class CarjackService extends Service {
     /** How often to page an absent unit, and how long to wait before cycling a link that is up. */
     private static final long OFFER_WAIT_MS = 20_000;
     private static final long OFFER_WAIT_MAX_MS = 60_000;
-
-    /** Runtime permissions granted to ourselves, since nobody is there to answer a prompt. */
-    private static final String[] RUNTIME_PERMISSIONS = {
-        Manifest.permission.BLUETOOTH_CONNECT,
-        Manifest.permission.BLUETOOTH_SCAN,
-        Manifest.permission.BLUETOOTH_ADVERTISE,
-        Manifest.permission.ACCESS_FINE_LOCATION,
-        Manifest.permission.ACCESS_COARSE_LOCATION,
-        Manifest.permission.NEARBY_WIFI_DEVICES,
-        Manifest.permission.POST_NOTIFICATIONS,
-    };
 
     private final HandlerThread thread = new HandlerThread("carjack");
     private Handler handler;
@@ -55,7 +38,7 @@ public final class CarjackService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        grantRuntimePermissions();
+        Variant.prepare(this);
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.createNotificationChannel(
                 new NotificationChannel(CHANNEL, "CarPlay", NotificationManager.IMPORTANCE_LOW));
@@ -63,7 +46,7 @@ public final class CarjackService extends Service {
                 .setContentTitle("carjack")
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
                 .build();
-        startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+        startForeground(1, notification, Variant.foregroundServiceTypes());
 
         Native.init(new File(getFilesDir(), "homekit.bin").getPath());
         thread.start();
@@ -75,20 +58,6 @@ public final class CarjackService extends Service {
             waitingSince = now();
             handler.post(watch);
         });
-    }
-
-    private void grantRuntimePermissions() {
-        PackageManager pm = getPackageManager();
-        for (String permission : RUNTIME_PERMISSIONS) {
-            if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
-                try {
-                    pm.grantRuntimePermission(getPackageName(), permission,
-                            UserHandle.getUserHandleForUid(Process.myUid()));
-                } catch (RuntimeException e) {
-                    Log.w(TAG, "Could not grant " + permission, e);
-                }
-            }
-        }
     }
 
     private static long now() {
@@ -119,7 +88,7 @@ public final class CarjackService extends Service {
             waitingSince = now();
             if (!unit.isConnected()) {
                 bluetooth.page(unit);
-            } else if (SystemProperties.getBoolean("persist.carjack.relink", false)) {
+            } else if (Boolean.parseBoolean(Variant.setting(CarjackService.this, "relink", "false"))) {
                 Log.i(TAG, "No iAP channel offered in " + offerWait + "ms; cycling the link");
                 bluetooth.relink(unit);
                 offerWait = Math.min(offerWait * 2, OFFER_WAIT_MAX_MS);
@@ -153,8 +122,8 @@ public final class CarjackService extends Service {
         }
     }
 
-    private static int codec() {
-        switch (SystemProperties.get("persist.carjack.codec", "auto")) {
+    private int codec() {
+        switch (Variant.setting(this, "codec", "auto")) {
             case "h264":
                 return Native.CODEC_H264;
             case "hevc":
@@ -166,7 +135,13 @@ public final class CarjackService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        return START_STICKY;
+        return Variant.onStartCommand(this, intent);
+    }
+
+    @Override
+    public void onDestroy() {
+        Variant.onServiceDestroyed(this);
+        super.onDestroy();
     }
 
     @Override
