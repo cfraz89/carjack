@@ -114,6 +114,11 @@ final class Variant {
         }
     }
 
+    /** Never needed: this build pages the unit. */
+    static boolean cycleBluetooth() {
+        return false;
+    }
+
     static String bluetoothAddress(Context context, BluetoothAdapter adapter) {
         return adapter.getAddress();
     }

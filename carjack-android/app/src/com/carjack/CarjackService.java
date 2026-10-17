@@ -42,7 +42,8 @@ public final class CarjackService extends Service {
     private Session session;
     private boolean sessionDialled;
     private long sessionStarted;
-    private long offerWait = OFFER_WAIT_MS;
+    /** Where we can't page, a unit already linked at start gets only the dial grace. */
+    private long offerWait = Variant.canPage() ? OFFER_WAIT_MS : UNIT_DIAL_GRACE_MS;
     private long waitingSince;
 
     @Override
@@ -110,7 +111,10 @@ public final class CarjackService extends Service {
             }
             waitingSince = now();
             if (!Variant.canPage()) {
-                bluetooth.dial(unit);
+                // A link that's been up a while won't bring an iAP channel; renew it if we can.
+                if (!bluetooth.isLinked(unit) || !Variant.cycleBluetooth()) {
+                    bluetooth.dial(unit);
+                }
                 offerWait = Math.min(offerWait * 2, OFFER_WAIT_MAX_MS);
             } else if (!Variant.isConnected(unit)) {
                 bluetooth.page(unit);

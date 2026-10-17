@@ -97,6 +97,11 @@ final class Variant {
 
     static void disconnect(BluetoothDevice device) {}
 
+    /** Bluetooth off and on through Shizuku, for a fresh link; false without it. */
+    static boolean cycleBluetooth() {
+        return ShizukuDisplay.cycleBluetooth();
+    }
+
     /**
      * Apps only see a placeholder for their own address, which the unit is told; the user can
      * copy the real one from the phone's settings.

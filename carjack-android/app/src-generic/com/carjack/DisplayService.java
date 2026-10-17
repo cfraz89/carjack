@@ -151,6 +151,14 @@ public final class DisplayService extends IDisplayService.Stub {
         run("am", "start", "--display", id, "-n", component);
     }
 
+    @Override
+    public void cycleBluetooth() {
+        run("cmd", "bluetooth_manager", "disable");
+        run("cmd", "bluetooth_manager", "wait-for-state:STATE_OFF");
+        run("cmd", "bluetooth_manager", "enable");
+        run("cmd", "bluetooth_manager", "wait-for-state:STATE_ON");
+    }
+
     private static String run(String... command) {
         try {
             Process process = new ProcessBuilder(command).redirectErrorStream(true).start();

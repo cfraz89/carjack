@@ -303,6 +303,11 @@ final class Bluetooth {
         thread.start();
     }
 
+    /** The unit's link is up, as far as an app can tell. */
+    boolean isLinked(BluetoothDevice device) {
+        return device.equals(lastLinked);
+    }
+
     void page(BluetoothDevice device) {
         if (!Variant.isConnected(device)) {
             Log.i(TAG, "Paging " + device.getAddress());

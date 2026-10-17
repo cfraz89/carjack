@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(1);
+            .version(2);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
@@ -83,6 +83,21 @@ final class ShizukuDisplay {
         } catch (RemoteException e) {
             Log.w(TAG, "Shizuku display service failed", e);
             return null;
+        }
+    }
+
+    /** Bluetooth off and on through Shizuku; false where Shizuku can't. */
+    static boolean cycleBluetooth() {
+        IDisplayService s = available() ? bind() : null;
+        if (s == null) {
+            return false;
+        }
+        try {
+            s.cycleBluetooth();
+            return true;
+        } catch (RemoteException e) {
+            Log.w(TAG, "Shizuku couldn't cycle Bluetooth", e);
+            return false;
         }
     }
 

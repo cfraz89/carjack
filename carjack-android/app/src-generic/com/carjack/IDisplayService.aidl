@@ -15,6 +15,9 @@ interface IDisplayService {
 
     void release() = 4;
 
+    /** Bluetooth off and back on, returning once it's on. */
+    void cycleBluetooth() = 5;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }
