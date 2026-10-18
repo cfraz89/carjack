@@ -35,6 +35,8 @@ public final class DisplayService extends IDisplayService.Stub {
 
     private final Context context;
     private VirtualDisplay display;
+    /** The phone kept awake, panel dark, while the display is up. */
+    private StayAwake awake;
     private long downTime = -1;
 
     public DisplayService() {
@@ -69,6 +71,8 @@ public final class DisplayService extends IDisplayService.Stub {
             display = dm.createVirtualDisplay("carjack", width, height, density, surface, FLAGS);
             int id = display.getDisplay().getDisplayId();
             Log.i(TAG, "Display " + id + " at " + width + "x" + height + ", " + density + "dpi");
+            awake = new StayAwake(shellContext());
+            awake.start();
             return id;
         } catch (ReflectiveOperationException | RuntimeException e) {
             Log.e(TAG, "Could not create a display", e);
@@ -190,6 +194,10 @@ public final class DisplayService extends IDisplayService.Stub {
 
     @Override
     public synchronized void release() {
+        if (awake != null) {
+            awake.stop();
+            awake = null;
+        }
         if (display != null) {
             display.release();
             display = null;

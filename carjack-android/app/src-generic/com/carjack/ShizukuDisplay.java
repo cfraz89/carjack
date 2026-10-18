@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(7);
+            .version(8);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
