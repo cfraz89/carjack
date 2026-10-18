@@ -35,7 +35,7 @@ public final class CarjackService extends Service {
     private static final long DIALLED_SETUP_MS = 6_000;
 
     private final HandlerThread thread = new HandlerThread("carjack");
-    private Notification notification;
+    private Notification.Builder notification;
     private Handler handler;
     private Bluetooth bluetooth;
     private AccessoryWifi wifi;
@@ -61,10 +61,11 @@ public final class CarjackService extends Service {
                 PendingIntent.FLAG_IMMUTABLE);
         notification = new Notification.Builder(this, CHANNEL)
                 .setContentTitle("carjack")
+                .setContentText("Waiting for the bike")
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-                .addAction(new Notification.Action.Builder(null, "Stop", stop).build())
-                .build();
-        startForeground(1, notification, Variant.foregroundServiceTypes());
+                .setOnlyAlertOnce(true)
+                .addAction(new Notification.Action.Builder(null, "Stop", stop).build());
+        startForeground(1, notification.build(), Variant.foregroundServiceTypes());
 
         Native.init(new File(getFilesDir(), "homekit.bin").getPath());
         thread.start();
@@ -78,8 +79,12 @@ public final class CarjackService extends Service {
                 // A fresh link: give it the full wait before renewing it.
                 waitingSince = now();
                 offerWait = OFFER_WAIT_MS;
+                if (session == null) {
+                    status(name(unit) + " connected; waiting for it to offer CarPlay");
+                }
                 handler.postDelayed(() -> {
                     if (session == null) {
+                        status("Calling " + name(unit) + "'s CarPlay service");
                         bluetooth.dial(unit);
                     }
                 }, UNIT_DIAL_GRACE_MS);
@@ -90,6 +95,24 @@ public final class CarjackService extends Service {
             waitingSince = now();
             handler.post(watch);
         });
+    }
+
+    /** Where things are up to, in the notification. */
+    void status(String text) {
+        Log.i(TAG, "Status: " + text);
+        synchronized (notification) {
+            getSystemService(NotificationManager.class)
+                    .notify(1, notification.setContentText(text).build());
+        }
+    }
+
+    private static String name(BluetoothDevice device) {
+        try {
+            String name = device.getName();
+            return name != null ? name : device.getAddress();
+        } catch (SecurityException e) {
+            return device.getAddress();
+        }
     }
 
     private static long now() {
@@ -145,9 +168,13 @@ public final class CarjackService extends Service {
             return;
         }
         waitingSince = now();
+        if (cyclesLeft > 0) {
+            status("No CarPlay from " + name(unit) + " yet; renewing the Bluetooth link");
+        }
         if (cyclesLeft > 0 && Variant.cycleBluetooth()) {
             cyclesLeft--;
         } else {
+            status("Calling " + name(unit) + "'s CarPlay service");
             bluetooth.dial(unit);
         }
         offerWait = Math.min(offerWait * 2, OFFER_WAIT_MAX_MS);
@@ -173,7 +200,8 @@ public final class CarjackService extends Service {
         offerWait = OFFER_WAIT_MS;
         cyclesLeft = MAX_CYCLES;
         BluetoothDevice unit = socket.getRemoteDevice();
-        session = new Session(this, handler, socket, wifi, ended -> {
+        status("Setting up CarPlay with " + name(unit) + " over Bluetooth (iAP2)");
+        session = new Session(this, handler, socket, wifi, this::status, ended -> {
             if (session == ended) {
                 session = null;
                 waitingSince = now();
@@ -214,7 +242,7 @@ public final class CarjackService extends Service {
 
     /** Re-declare the foreground service with more types, once their consent is in hand. */
     void promote(int foregroundServiceTypes) {
-        startForeground(1, notification, foregroundServiceTypes);
+        startForeground(1, notification.build(), foregroundServiceTypes);
     }
 
     @Override

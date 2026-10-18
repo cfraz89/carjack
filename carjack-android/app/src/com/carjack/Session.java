@@ -25,16 +25,19 @@ final class Session implements Native.Callbacks {
     private final BluetoothSocket socket;
     private final AccessoryWifi wifi;
     private final Listener listener;
+    /** Where the session is up to, for the notification. */
+    private final java.util.function.Consumer<String> status;
     private volatile long handle;
     private ScreenStream stream;
     private volatile Touch touch;
 
     Session(Context context, Handler handler, BluetoothSocket socket, AccessoryWifi wifi,
-            Listener listener) {
+            java.util.function.Consumer<String> status, Listener listener) {
         this.context = context;
         this.handler = handler;
         this.socket = socket;
         this.wifi = wifi;
+        this.status = status;
         this.listener = listener;
     }
 
@@ -73,14 +76,17 @@ final class Session implements Native.Callbacks {
 
     @Override
     public void joinWifi(String ssid, String passphrase, String bssid) {
+        status.accept("Joining " + ssid);
         handler.post(() -> wifi.join(ssid, passphrase, bssid, new AccessoryWifi.Result() {
             @Override
             public void joined(String iface, String mac) {
+                status.accept("On " + ssid + "; starting CarPlay");
                 Native.wifiJoined(handle, iface, mac);
             }
 
             @Override
             public void failed(String reason) {
+                status.accept("Couldn't join " + ssid + ": " + reason);
                 Native.wifiJoined(handle, null, reason);
             }
         }));
@@ -89,6 +95,7 @@ final class Session implements Native.Callbacks {
     @Override
     public void startVideo(int width, int height, int fps, int viewX, int viewY, int viewWidth,
             int viewHeight, boolean hevc) {
+        status.accept("Streaming at " + width + "x" + height);
         handler.post(() -> {
             touch = Variant.touch(context, viewX, viewY, viewWidth, viewHeight);
             stream = new ScreenStream(context, handle, this::stop);
@@ -120,6 +127,8 @@ final class Session implements Native.Callbacks {
     @Override
     public void ended(String error) {
         Log.i(TAG, "Session ended" + (error == null ? "" : ": " + error));
+        status.accept("CarPlay ended" + (error == null ? "" : " (" + error + ")")
+                + "; waiting for the bike");
         handler.post(() -> {
             if (stream != null) {
                 stream.stop();
