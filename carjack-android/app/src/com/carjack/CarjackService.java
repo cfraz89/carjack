@@ -86,6 +86,7 @@ public final class CarjackService extends Service {
             // too: give it a moment to dial first.
             bluetooth.setOnUnitLinked(unit -> {
                 // A fresh link: give it the full wait before renewing it.
+                gaveUpOn = null;
                 waitingSince = now();
                 offerWait = OFFER_WAIT_MS;
                 if (session == null) {
@@ -171,8 +172,9 @@ public final class CarjackService extends Service {
             }
             BluetoothDevice unit = bluetooth.headUnit();
             if (!Variant.canPage()) {
-                // Nothing to do until the unit links: its link coming up is the cue.
-                if (unit != null && bluetooth.isLinked(unit)) {
+                // Nothing to do until the unit links: its link coming up is the cue. A unit given
+                // up on is left alone until it relinks or the user retries.
+                if (unit != null && bluetooth.isLinked(unit) && gaveUpOn == null) {
                     renewLink(unit);
                 }
                 return;
