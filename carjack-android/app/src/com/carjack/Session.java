@@ -30,6 +30,10 @@ final class Session implements Native.Callbacks {
     private volatile long handle;
     private ScreenStream stream;
     private volatile Touch touch;
+    /** Why it ended, once it has; null for a clean end. */
+    volatile String error;
+    /** Video got as far as starting. */
+    volatile boolean streamed;
 
     Session(Context context, Handler handler, BluetoothSocket socket, AccessoryWifi wifi,
             java.util.function.Consumer<String> status, Listener listener) {
@@ -95,6 +99,7 @@ final class Session implements Native.Callbacks {
     @Override
     public void startVideo(int width, int height, int fps, int viewX, int viewY, int viewWidth,
             int viewHeight, boolean hevc) {
+        streamed = true;
         status.accept("Streaming at " + width + "x" + height);
         handler.post(() -> {
             touch = Variant.touch(context, viewX, viewY, viewWidth, viewHeight);
@@ -127,6 +132,7 @@ final class Session implements Native.Callbacks {
     @Override
     public void ended(String error) {
         Log.i(TAG, "Session ended" + (error == null ? "" : ": " + error));
+        this.error = error;
         status.accept("CarPlay ended" + (error == null ? "" : " (" + error + ")")
                 + "; waiting for the bike");
         handler.post(() -> {

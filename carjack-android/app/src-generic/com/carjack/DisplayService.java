@@ -165,6 +165,19 @@ public final class DisplayService extends IDisplayService.Stub {
         return run("settings", "get", "secure", "bluetooth_address").trim();
     }
 
+    @Override
+    public void grant(String pkg, String[] permissions) {
+        for (String permission : permissions) {
+            run("pm", "grant", pkg, permission);
+        }
+    }
+
+    @Override
+    public void enableBluetooth() {
+        run("cmd", "bluetooth_manager", "enable");
+        run("cmd", "bluetooth_manager", "wait-for-state:STATE_ON");
+    }
+
     private static String run(String... command) {
         try {
             Process process = new ProcessBuilder(command).redirectErrorStream(true).start();

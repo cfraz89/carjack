@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(4);
+            .version(5);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
@@ -112,6 +112,25 @@ final class ShizukuDisplay {
             return address.matches("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}") ? address : null;
         } catch (RemoteException e) {
             return null;
+        }
+    }
+
+    /**
+     * What the user would otherwise be asked for: carjack's runtime permissions, and Bluetooth
+     * on. Blocks while Shizuku starts the service, so not on the main thread.
+     */
+    static void setUp(String pkg, String[] permissions, boolean enableBluetooth) {
+        IDisplayService s = available() ? bind() : null;
+        if (s == null) {
+            return;
+        }
+        try {
+            s.grant(pkg, permissions);
+            if (enableBluetooth) {
+                s.enableBluetooth();
+            }
+        } catch (RemoteException e) {
+            Log.w(TAG, "Shizuku couldn't set carjack up", e);
         }
     }
 

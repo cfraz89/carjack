@@ -23,8 +23,17 @@
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
+    <!-- The apps the bike can be given, for the picker. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <application
         android:label="carjack"
+        android:theme="@android:style/Theme.DeviceDefault.DayNight"
         android:icon="@android:drawable/stat_sys_data_bluetooth"
         android:extractNativeLibs="false">
 

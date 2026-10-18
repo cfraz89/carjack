@@ -6,29 +6,37 @@ import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.content.res.Configuration;
 import android.graphics.Insets;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
-import android.text.InputType;
+import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
+import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import rikka.shizuku.Shizuku;
 
-/** The one-time setup a phone needs, then start and stop. */
+/** On/off, what's left to set up, and the few choices there are. */
 public final class MainActivity extends Activity {
     private static final int REQUEST_PERMISSIONS = 1;
-    private static final int REQUEST_DISCOVERABLE = 3;
     private static final int REQUEST_SHIZUKU = 4;
     private static final int DISCOVERABLE_SECONDS = 300;
+    private static final String SHIZUKU_PACKAGE = "moe.shizuku.privileged.api";
 
     private static final String[] PERMISSIONS = {
         Manifest.permission.BLUETOOTH_CONNECT,
@@ -38,78 +46,78 @@ public final class MainActivity extends Activity {
         Manifest.permission.POST_NOTIFICATIONS,
     };
 
-    private TextView status;
-    private EditText app;
-    private EditText density;
-    private RadioGroup units;
+    /** Display densities offered, by name; 0 is automatic. */
+    private static final String[] SIZES = {"Default", "Smaller", "Larger", "Largest"};
+    private static final int[] DENSITIES = {0, 160, 240, 280};
+
     private Switch power;
+    private TextView status;
+    private LinearLayout setup;
+    private Spinner bike;
+    private Spinner app;
+    private final List<String> bikeAddresses = new ArrayList<>();
+    private final List<String> appPackages = new ArrayList<>();
+    private boolean settingUp;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(LinearLayout.VERTICAL);
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
-        layout.setPadding(pad, pad, pad, pad);
+        if (getActionBar() != null) {
+            getActionBar().hide();
+        }
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(20), dp(24), dp(20), dp(24));
 
-        status = new TextView(this);
-        layout.addView(status);
-        layout.addView(button("Allow Bluetooth, Wi-Fi and notifications",
-                v -> requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS)));
-        layout.addView(button("Let carjack use Shizuku", v -> {
-            if (!pingShizuku()) {
-                status.setText("Start Shizuku first (Shizuku app › Start via Wireless "
-                        + "debugging), then try again.");
-            } else if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-                Shizuku.requestPermission(REQUEST_SHIZUKU);
-            }
-        }));
-        layout.addView(button("Make this phone visible to pair (5 minutes)", v -> {
-            Intent intent = new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE);
-            intent.putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, DISCOVERABLE_SECONDS);
-            startActivityForResult(intent, REQUEST_DISCOVERABLE);
-        }));
+        TextView title = text("carjack", 30);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        page.addView(title);
+        TextView subtitle = text("CarPlay from this phone", 15);
+        subtitle.setAlpha(0.7f);
+        page.addView(subtitle);
 
-        TextView appLabel = new TextView(this);
-        appLabel.setText("\nThe app the bike shows (a package name; blank for a launcher):");
-        layout.addView(appLabel);
-        app = new EditText(this);
-        app.setInputType(InputType.TYPE_CLASS_TEXT);
-        app.setHint("com.google.android.apps.maps");
-        app.setText(Variant.setting(this, "app", ""));
-        layout.addView(app);
-        TextView densityLabel = new TextView(this);
-        densityLabel.setText("\nThe bike display's density in dpi; higher makes everything bigger "
-                + "(blank for automatic, 200 on a 1080x600 unit):");
-        layout.addView(densityLabel);
-        density = new EditText(this);
-        density.setInputType(InputType.TYPE_CLASS_NUMBER);
-        density.setHint("200");
-        density.setText(Variant.setting(this, "density", ""));
-        layout.addView(density);
-        layout.addView(button("Save", v -> {
-            Variant.prefs(this).edit()
-                    .putString("app", app.getText().toString().trim())
-                    .putString("density", density.getText().toString().trim())
-                    .apply();
-            refresh();
-        }));
+        setup = card(page, color(android.R.color.system_accent3_100,
+                android.R.color.system_accent3_800));
 
-        TextView unitLabel = new TextView(this);
-        unitLabel.setText("\nWhich bike (paired CarPlay units):");
-        layout.addView(unitLabel);
-        units = new RadioGroup(this);
-        layout.addView(units);
-
+        LinearLayout main = card(page, cardColor());
         power = new Switch(this);
-        power.setText("carjack on (stays on, and starts with the phone)");
-        power.setTextSize(18);
-        power.setPadding(0, pad, 0, pad);
+        power.setText("CarPlay");
+        power.setTextSize(22);
+        power.setTypeface(Typeface.DEFAULT_BOLD);
         power.setOnClickListener(v -> setOn(power.isChecked()));
-        layout.addView(power, 1);
+        main.addView(power);
+        status = text("", 15);
+        status.setAlpha(0.75f);
+        status.setPadding(0, dp(4), 0, 0);
+        main.addView(status);
+
+        LinearLayout settings = card(page, cardColor());
+        bike = new Spinner(this);
+        row(settings, "Bike", bike);
+        app = new Spinner(this);
+        row(settings, "App on the bike", app);
+        Spinner size = new Spinner(this);
+        row(settings, "Text and icons", size);
+        size.setAdapter(adapter(java.util.Arrays.asList(SIZES)));
+        size.setSelection(densityIndex());
+        size.setOnItemSelectedListener(selected(densityIndex(), i -> Variant.prefs(this).edit()
+                .putString("density", DENSITIES[i] == 0 ? "" : Integer.toString(DENSITIES[i]))
+                .apply()));
+        fillApps();
+
+        Button pair = new Button(this, null, android.R.attr.borderlessButtonStyle);
+        pair.setText("Make this phone visible to pair");
+        pair.setAllCaps(false);
+        pair.setOnClickListener(v -> startActivity(
+                new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                        .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION,
+                                DISCOVERABLE_SECONDS)));
+        page.addView(pair);
 
         ScrollView scroll = new ScrollView(this);
-        scroll.addView(layout);
+        scroll.setBackgroundColor(color(android.R.color.system_neutral1_10,
+                android.R.color.system_neutral1_900));
+        scroll.addView(page);
         // Drawn edge to edge, so the bars' insets are ours to keep clear of.
         scroll.setOnApplyWindowInsetsListener((v, insets) -> {
             Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
@@ -118,15 +126,89 @@ public final class MainActivity extends Activity {
         });
         setContentView(scroll);
         Shizuku.addRequestPermissionResultListener(shizukuResult);
+        Variant.prefs(this).registerOnSharedPreferenceChangeListener(prefsChanged);
     }
 
     private final Shizuku.OnRequestPermissionResultListener shizukuResult =
-            (code, result) -> refresh();
+            (code, result) -> runOnUiThread(this::refresh);
+
+    /** The service's status, and the switch flipped from the notification. */
+    private final SharedPreferences.OnSharedPreferenceChangeListener prefsChanged =
+            (prefs, key) -> {
+                if ("status".equals(key) || "on".equals(key)) {
+                    runOnUiThread(this::showPower);
+                }
+            };
 
     @Override
     protected void onDestroy() {
         Shizuku.removeRequestPermissionResultListener(shizukuResult);
+        Variant.prefs(this).unregisterOnSharedPreferenceChangeListener(prefsChanged);
         super.onDestroy();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        refresh();
+    }
+
+    private void refresh() {
+        showPower();
+        fillBikes();
+        showSetup();
+        autoSetUp();
+    }
+
+    private void showPower() {
+        boolean on = BootReceiver.isOn(this);
+        power.setChecked(on);
+        status.setText(on ? Variant.setting(this, "status", "Waiting for the bike") : "Off");
+    }
+
+    /** One row per thing still missing; the card goes when nothing is. */
+    private void showSetup() {
+        setup.removeAllViews();
+        if (!pingShizuku()) {
+            step("Start Shizuku, through Wireless debugging", "Open", v -> {
+                Intent open = getPackageManager().getLaunchIntentForPackage(SHIZUKU_PACKAGE);
+                if (open != null) {
+                    startActivity(open);
+                }
+            });
+        } else if (!ShizukuDisplay.available()) {
+            step("Let carjack use Shizuku", "Allow",
+                    v -> Shizuku.requestPermission(REQUEST_SHIZUKU));
+        }
+        // With Shizuku, autoSetUp sees to these.
+        if (!ShizukuDisplay.available()) {
+            if (!permissionsGranted()) {
+                step("Bluetooth, Wi-Fi and notification permissions", "Allow",
+                        v -> requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS));
+            }
+            if (!bluetoothOn()) {
+                step("Bluetooth is off", "Turn on", v -> startActivity(
+                        new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)));
+            }
+        }
+        setup.setVisibility(setup.getChildCount() == 0 ? View.GONE : View.VISIBLE);
+    }
+
+    /** With Shizuku: grant what's missing and switch Bluetooth on, unasked. */
+    private void autoSetUp() {
+        boolean grant = !permissionsGranted();
+        boolean bluetooth = !bluetoothOn();
+        if (settingUp || !(grant || bluetooth) || !ShizukuDisplay.available()) {
+            return;
+        }
+        settingUp = true;
+        new Thread(() -> {
+            ShizukuDisplay.setUp(getPackageName(), PERMISSIONS, bluetooth);
+            runOnUiThread(() -> {
+                settingUp = false;
+                refresh();
+            });
+        }, "carjack-setup").start();
     }
 
     private void setOn(boolean on) {
@@ -142,85 +224,75 @@ public final class MainActivity extends Activity {
         } else {
             stopService(service);
         }
-        refresh();
+        showPower();
     }
 
-    private static boolean pingShizuku() {
-        try {
-            return Shizuku.pingBinder();
-        } catch (RuntimeException e) {
-            return false;
-        }
-    }
-
-    private Button button(String text, View.OnClickListener listener) {
-        Button button = new Button(this);
-        button.setText(text);
-        button.setAllCaps(false);
-        button.setOnClickListener(listener);
-        return button;
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        refresh();
-    }
-
-    /** Automatic, then each paired unit; the saved choice checked. */
-    private void listUnits() {
-        units.setOnCheckedChangeListener(null);
-        units.removeAllViews();
-        String target = Variant.setting(this, "target", "");
-        units.addView(unit("Automatic: whichever is connected", ""));
+    /** Automatic, then each paired CarPlay unit. */
+    private void fillBikes() {
+        List<String> names = new ArrayList<>();
+        bikeAddresses.clear();
+        names.add("Whichever connects");
+        bikeAddresses.add("");
         BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
-        if (adapter != null && adapter.isEnabled()
-                && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                        == PackageManager.PERMISSION_GRANTED) {
+        if (bluetoothOn() && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                == PackageManager.PERMISSION_GRANTED) {
             for (BluetoothDevice device : adapter.getBondedDevices()) {
                 if (Bluetooth.hostsIap(device.getUuids())) {
-                    units.addView(unit(device.getName() + "  " + device.getAddress(),
-                            device.getAddress()));
+                    names.add(device.getName() != null ? device.getName() : device.getAddress());
+                    bikeAddresses.add(device.getAddress());
                 }
             }
         }
-        for (int i = 0; i < units.getChildCount(); i++) {
-            RadioButton button = (RadioButton) units.getChildAt(i);
-            if (target.equalsIgnoreCase((String) button.getTag())) {
-                units.check(button.getId());
+        bike.setOnItemSelectedListener(null);
+        bike.setAdapter(adapter(names));
+        String target = Variant.setting(this, "target", "");
+        int current = 0;
+        for (int i = 0; i < bikeAddresses.size(); i++) {
+            if (bikeAddresses.get(i).equalsIgnoreCase(target)) {
+                current = i;
             }
         }
-        units.setOnCheckedChangeListener((group, id) -> {
-            RadioButton chosen = group.findViewById(id);
-            if (chosen != null) {
-                Variant.prefs(this).edit().putString("target", (String) chosen.getTag()).apply();
+        bike.setSelection(current);
+        bike.setOnItemSelectedListener(selected(current, i -> Variant.prefs(this).edit()
+                .putString("target", bikeAddresses.get(i)).apply()));
+    }
+
+    /** The desktop, then every app with a launcher icon, by name. */
+    private void fillApps() {
+        PackageManager pm = getPackageManager();
+        List<ResolveInfo> found = pm.queryIntentActivities(
+                new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0);
+        List<String[]> apps = new ArrayList<>();
+        for (ResolveInfo info : found) {
+            String pkg = info.activityInfo.packageName;
+            if (!pkg.equals(getPackageName())) {
+                apps.add(new String[] {info.loadLabel(pm).toString(), pkg});
             }
-        });
+        }
+        apps.sort((a, b) -> a[0].compareToIgnoreCase(b[0]));
+        List<String> names = new ArrayList<>();
+        appPackages.clear();
+        names.add("Desktop");
+        appPackages.add("");
+        for (String[] a : apps) {
+            names.add(a[0]);
+            appPackages.add(a[1]);
+        }
+        app.setAdapter(adapter(names));
+        int chosen = Math.max(appPackages.indexOf(Variant.setting(this, "app", "")), 0);
+        app.setSelection(chosen);
+        app.setOnItemSelectedListener(selected(chosen, i -> Variant.prefs(this).edit()
+                .putString("app", appPackages.get(i)).apply()));
     }
 
-    private RadioButton unit(String label, String address) {
-        RadioButton button = new RadioButton(this);
-        button.setId(View.generateViewId());
-        button.setText(label);
-        button.setTag(address);
-        return button;
-    }
-
-    private void refresh() {
-        listUnits();
-        power.setChecked(BootReceiver.isOn(this));
-        StringBuilder text = new StringBuilder("carjack: CarPlay from this phone\n\n");
-        text.append(permissionsGranted() ? "✓" : "✗").append(" Permissions\n");
-        BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
-        text.append(adapter != null && adapter.isEnabled() ? "✓" : "✗").append(" Bluetooth on\n");
-        text.append(!pingShizuku() ? "✗ Shizuku isn't running\n"
-                : ShizukuDisplay.available() ? "✓ Shizuku\n"
-                : "✗ Shizuku hasn't let carjack in\n");
-        text.append("\nTurn carjack on, then pair with the bike once, from its menu or this "
-                + "phone's Bluetooth settings. From then on carjack waits for the bike and gives "
-                + "it a display of its own size; Shizuku has to be running by the time it "
-                + "connects.");
-        status.setText(text);
+    private int densityIndex() {
+        String density = Variant.setting(this, "density", "");
+        for (int i = 1; i < DENSITIES.length; i++) {
+            if (Integer.toString(DENSITIES[i]).equals(density)) {
+                return i;
+            }
+        }
+        return 0;
     }
 
     private boolean permissionsGranted() {
@@ -232,13 +304,117 @@ public final class MainActivity extends Activity {
         return true;
     }
 
+    private boolean bluetoothOn() {
+        BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
+        return adapter != null && adapter.isEnabled();
+    }
+
+    private static boolean pingShizuku() {
+        try {
+            return Shizuku.pingBinder();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         refresh();
     }
 
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        refresh();
+    // Layout helpers.
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private boolean night() {
+        return (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    private int color(int light, int dark) {
+        return getColor(night() ? dark : light);
+    }
+
+    private int cardColor() {
+        return color(android.R.color.system_neutral2_50, android.R.color.system_neutral2_800);
+    }
+
+    private TextView text(String value, int sp) {
+        TextView view = new TextView(this);
+        view.setText(value);
+        view.setTextSize(sp);
+        android.content.res.TypedArray primary =
+                obtainStyledAttributes(new int[] {android.R.attr.textColorPrimary});
+        view.setTextColor(primary.getColorStateList(0));
+        primary.recycle();
+        return view;
+    }
+
+    private LinearLayout card(LinearLayout parent, int background) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(20), dp(16), dp(20), dp(16));
+        GradientDrawable shape = new GradientDrawable();
+        shape.setCornerRadius(dp(24));
+        shape.setColor(background);
+        card.setBackground(shape);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.topMargin = dp(16);
+        parent.addView(card, params);
+        return card;
+    }
+
+    private void row(LinearLayout card, String label, View control) {
+        TextView name = text(label, 13);
+        name.setAlpha(0.7f);
+        name.setPadding(0, card.getChildCount() == 0 ? 0 : dp(12), 0, 0);
+        card.addView(name);
+        card.addView(control);
+    }
+
+    private void step(String what, String action, View.OnClickListener onClick) {
+        LinearLayout line = new LinearLayout(this);
+        line.setGravity(Gravity.CENTER_VERTICAL);
+        TextView label = text(what, 15);
+        line.addView(label, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        Button button = new Button(this);
+        button.setText(action);
+        button.setAllCaps(false);
+        button.setOnClickListener(onClick);
+        line.addView(button);
+        setup.addView(line);
+    }
+
+    private ArrayAdapter<String> adapter(List<String> items) {
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, items);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        return adapter;
+    }
+
+    /**
+     * Calls back for a change from {@code initial} only: a spinner reports its initial selection
+     * once laid out, which would otherwise overwrite a choice missing from today's list.
+     */
+    private static AdapterView.OnItemSelectedListener selected(int initial,
+            java.util.function.IntConsumer onSelected) {
+        return new AdapterView.OnItemSelectedListener() {
+            private int last = initial;
+
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (position != last) {
+                    last = position;
+                    onSelected.accept(position);
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        };
     }
 }

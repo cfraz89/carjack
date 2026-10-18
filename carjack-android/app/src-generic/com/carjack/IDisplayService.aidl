@@ -21,6 +21,11 @@ interface IDisplayService {
     /** The phone's Bluetooth address, which apps aren't given. */
     String bluetoothAddress() = 6;
 
+    /** Grant {@code pkg} these runtime permissions. */
+    void grant(String pkg, in String[] permissions) = 7;
+
+    void enableBluetooth() = 8;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

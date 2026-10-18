@@ -48,6 +48,9 @@ public final class CarjackService extends Service {
     private static final int MAX_CYCLES = 2;
     /** Bluetooth cycles left before only dialling; refilled by a session. */
     private int cyclesLeft = MAX_CYCLES;
+    private static final int MAX_FAILURES = 3;
+    /** Sessions in a row that never got to video. */
+    private int failures;
 
     @Override
     public void onCreate() {
@@ -66,6 +69,7 @@ public final class CarjackService extends Service {
                 .setOnlyAlertOnce(true)
                 .addAction(new Notification.Action.Builder(null, "Stop", stop).build());
         startForeground(1, notification.build(), Variant.foregroundServiceTypes());
+        Variant.onStatus(this, "Waiting for the bike");
 
         Native.init(new File(getFilesDir(), "homekit.bin").getPath());
         thread.start();
@@ -100,6 +104,7 @@ public final class CarjackService extends Service {
     /** Where things are up to, in the notification. */
     void status(String text) {
         Log.i(TAG, "Status: " + text);
+        Variant.onStatus(this, text);
         synchronized (notification) {
             getSystemService(NotificationManager.class)
                     .notify(1, notification.setContentText(text).build());
@@ -198,20 +203,33 @@ public final class CarjackService extends Service {
         sessionDialled = dialled;
         sessionStarted = now();
         offerWait = OFFER_WAIT_MS;
-        cyclesLeft = MAX_CYCLES;
         BluetoothDevice unit = socket.getRemoteDevice();
         status("Setting up CarPlay with " + name(unit) + " over Bluetooth (iAP2)");
         session = new Session(this, handler, socket, wifi, this::status, ended -> {
             if (session == ended) {
                 session = null;
+                Variant.onSessionEnded(this, unit, ended.error);
                 waitingSince = now();
+                if (ended.streamed) {
+                    failures = 0;
+                    cyclesLeft = MAX_CYCLES;
+                } else {
+                    failures++;
+                }
                 // The unit only dials iAP on a fresh link, and stays connected after a session
-                // ends; cycle it so the next one can start.
-                bluetooth.relink(unit);
+                // ends; cycle it so the next one can start - unless they keep failing, when it
+                // waits for the unit to reconnect by itself.
+                if (failures < MAX_FAILURES) {
+                    bluetooth.relink(unit);
+                } else {
+                    status("CarPlay keeps failing with " + name(unit)
+                            + "; waiting for it to reconnect");
+                }
             }
         });
         try {
-            session.start(bluetooth.name(), bluetooth.address(), codec());
+            session.start(bluetooth.name(), Variant.addressFor(this, bluetooth.address(), unit),
+                    codec());
         } catch (IOException e) {
             Log.e(TAG, "Could not start a session", e);
             Bluetooth.closeQuietly(socket);
