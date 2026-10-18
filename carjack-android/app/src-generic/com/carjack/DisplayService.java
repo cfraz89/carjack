@@ -35,7 +35,7 @@ public final class DisplayService extends IDisplayService.Stub {
 
     private final Context context;
     private VirtualDisplay display;
-    /** The phone kept awake, panel dark, while the display is up. */
+    /** The phone kept awake while the display is up. */
     private StayAwake awake;
     private long downTime = -1;
 
