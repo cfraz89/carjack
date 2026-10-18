@@ -62,13 +62,6 @@ final class Variant {
         return Service.START_STICKY;
     }
 
-    /** The adapter's own address suits every unit. */
-    static String addressFor(Context context, String address, BluetoothDevice unit) {
-        return address;
-    }
-
-    static void onSessionEnded(Context context, BluetoothDevice unit, String error) {}
-
     /** No app screen to show it on. */
     static void onStatus(Context context, String text) {}
 

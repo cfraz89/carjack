@@ -208,7 +208,6 @@ public final class CarjackService extends Service {
         session = new Session(this, handler, socket, wifi, this::status, ended -> {
             if (session == ended) {
                 session = null;
-                Variant.onSessionEnded(this, unit, ended.error);
                 waitingSince = now();
                 if (ended.streamed) {
                     failures = 0;
@@ -228,8 +227,7 @@ public final class CarjackService extends Service {
             }
         });
         try {
-            session.start(bluetooth.name(), Variant.addressFor(this, bluetooth.address(), unit),
-                    codec());
+            session.start(bluetooth.name(), bluetooth.address(), codec());
         } catch (IOException e) {
             Log.e(TAG, "Could not start a session", e);
             Bluetooth.closeQuietly(socket);

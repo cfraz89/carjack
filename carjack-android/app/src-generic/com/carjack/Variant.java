@@ -133,32 +133,6 @@ final class Variant {
         return address;
     }
 
-    /** What apps are given for their own address, which some units take better. */
-    private static final String PLACEHOLDER = "02:00:00:00:00:00";
-
-    /**
-     * The address {@code unit} is told. Units differ: the CFMOTO is thought to want the real one,
-     * while the bench AUTO BOX never brings AirPlay up for it but does for the placeholder. So
-     * each unit keeps whichever last worked, swapping after a session that died at AirPlay.
-     */
-    static String addressFor(Context context, String address, BluetoothDevice unit) {
-        boolean placeholder = prefs(context).getBoolean(placeholderKey(unit), false);
-        String chosen = placeholder ? PLACEHOLDER : address;
-        Log.i(TAG, "Telling " + unit.getAddress() + " we are " + chosen);
-        return chosen;
-    }
-
-    static void onSessionEnded(Context context, BluetoothDevice unit, String error) {
-        if (error != null && error.contains("AirPlay endpoint")) {
-            String key = placeholderKey(unit);
-            prefs(context).edit().putBoolean(key, !prefs(context).getBoolean(key, false)).apply();
-        }
-    }
-
-    private static String placeholderKey(BluetoothDevice unit) {
-        return "placeholder_" + unit.getAddress();
-    }
-
     /** A display of the unit's own size with the chosen app on it, or null without Shizuku. */
     static Runnable openDisplay(Context context, int width, int height, int density,
             Surface target) {

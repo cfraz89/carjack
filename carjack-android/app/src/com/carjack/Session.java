@@ -30,8 +30,6 @@ final class Session implements Native.Callbacks {
     private volatile long handle;
     private ScreenStream stream;
     private volatile Touch touch;
-    /** Why it ended, once it has; null for a clean end. */
-    volatile String error;
     /** Video got as far as starting. */
     volatile boolean streamed;
 
@@ -132,7 +130,6 @@ final class Session implements Native.Callbacks {
     @Override
     public void ended(String error) {
         Log.i(TAG, "Session ended" + (error == null ? "" : ": " + error));
-        this.error = error;
         status.accept("CarPlay ended" + (error == null ? "" : " (" + error + ")")
                 + "; waiting for the bike");
         handler.post(() -> {
