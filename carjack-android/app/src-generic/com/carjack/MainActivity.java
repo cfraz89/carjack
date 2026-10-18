@@ -18,6 +18,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
+import android.widget.Switch;
 import android.widget.TextView;
 
 import rikka.shizuku.Shizuku;
@@ -41,6 +42,7 @@ public final class MainActivity extends Activity {
     private EditText app;
     private EditText density;
     private RadioGroup units;
+    private Switch power;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -99,21 +101,12 @@ public final class MainActivity extends Activity {
         units = new RadioGroup(this);
         layout.addView(units);
 
-        layout.addView(button("Turn on (stays on, and starts with the phone)", v -> {
-            // A connected-device foreground service can't start before Bluetooth is granted.
-            if (!permissionsGranted()) {
-                requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS);
-                return;
-            }
-            BootReceiver.setOn(this, true);
-            startForegroundService(new Intent(this, CarjackService.class));
-            refresh();
-        }));
-        layout.addView(button("Turn off", v -> {
-            BootReceiver.setOn(this, false);
-            stopService(new Intent(this, CarjackService.class));
-            refresh();
-        }));
+        power = new Switch(this);
+        power.setText("carjack on (stays on, and starts with the phone)");
+        power.setTextSize(18);
+        power.setPadding(0, pad, 0, pad);
+        power.setOnClickListener(v -> setOn(power.isChecked()));
+        layout.addView(power, 1);
 
         ScrollView scroll = new ScrollView(this);
         scroll.addView(layout);
@@ -134,6 +127,22 @@ public final class MainActivity extends Activity {
     protected void onDestroy() {
         Shizuku.removeRequestPermissionResultListener(shizukuResult);
         super.onDestroy();
+    }
+
+    private void setOn(boolean on) {
+        // A connected-device foreground service can't start before Bluetooth is granted.
+        if (on && !permissionsGranted()) {
+            requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS);
+            on = false;
+        }
+        BootReceiver.setOn(this, on);
+        Intent service = new Intent(this, CarjackService.class);
+        if (on) {
+            startForegroundService(service);
+        } else {
+            stopService(service);
+        }
+        refresh();
     }
 
     private static boolean pingShizuku() {
@@ -199,9 +208,8 @@ public final class MainActivity extends Activity {
 
     private void refresh() {
         listUnits();
+        power.setChecked(BootReceiver.isOn(this));
         StringBuilder text = new StringBuilder("carjack: CarPlay from this phone\n\n");
-        text.append(BootReceiver.isOn(this) ? "● On: listening for the bike\n"
-                : "○ Off\n");
         text.append(permissionsGranted() ? "✓" : "✗").append(" Permissions\n");
         BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
         text.append(adapter != null && adapter.isEnabled() ? "✓" : "✗").append(" Bluetooth on\n");
