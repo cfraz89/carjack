@@ -25,6 +25,8 @@ public final class CarjackService extends Service {
     private static final String CHANNEL = "carjack";
     /** The notification's Stop. */
     static final String ACTION_STOP = "com.carjack.STOP";
+    /** Try again after giving up on a unit. */
+    static final String ACTION_RETRY = "com.carjack.RETRY";
 
     /** How often to page an absent unit, and how long to wait before cycling a link that is up. */
     private static final long OFFER_WAIT_MS = 20_000;
@@ -51,6 +53,10 @@ public final class CarjackService extends Service {
     private static final int MAX_FAILURES = 3;
     /** Sessions in a row that never got to video. */
     private int failures;
+    /** The unit given up on, for Retry. */
+    private BluetoothDevice gaveUpOn;
+    private Notification.Action stopAction;
+    private Notification.Action retryAction;
 
     @Override
     public void onCreate() {
@@ -59,17 +65,16 @@ public final class CarjackService extends Service {
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.createNotificationChannel(
                 new NotificationChannel(CHANNEL, "CarPlay", NotificationManager.IMPORTANCE_LOW));
-        PendingIntent stop = PendingIntent.getService(this, 0,
-                new Intent(this, CarjackService.class).setAction(ACTION_STOP),
-                PendingIntent.FLAG_IMMUTABLE);
+        stopAction = action("Stop", ACTION_STOP, 0);
+        retryAction = action("Retry", ACTION_RETRY, 1);
         notification = new Notification.Builder(this, CHANNEL)
                 .setContentTitle("carjack")
                 .setContentText("Waiting for the bike")
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
                 .setOnlyAlertOnce(true)
-                .addAction(new Notification.Action.Builder(null, "Stop", stop).build());
+                .setActions(stopAction);
         startForeground(1, notification.build(), Variant.foregroundServiceTypes());
-        Variant.onStatus(this, "Waiting for the bike");
+        Variant.onStatus(this, "Waiting for the bike", false);
 
         Native.init(new File(getFilesDir(), "homekit.bin").getPath());
         thread.start();
@@ -101,14 +106,46 @@ public final class CarjackService extends Service {
         });
     }
 
+    private Notification.Action action(String title, String intentAction, int requestCode) {
+        PendingIntent intent = PendingIntent.getService(this, requestCode,
+                new Intent(this, CarjackService.class).setAction(intentAction),
+                PendingIntent.FLAG_IMMUTABLE);
+        return new Notification.Action.Builder(null, title, intent).build();
+    }
+
     /** Where things are up to, in the notification. */
     void status(String text) {
+        status(text, false);
+    }
+
+    /** As {@link #status(String)}, offering Retry where carjack has given up. */
+    private void status(String text, boolean retryable) {
         Log.i(TAG, "Status: " + text);
-        Variant.onStatus(this, text);
+        Variant.onStatus(this, text, retryable);
         synchronized (notification) {
-            getSystemService(NotificationManager.class)
-                    .notify(1, notification.setContentText(text).build());
+            notification.setContentText(text);
+            if (retryable) {
+                notification.setActions(retryAction, stopAction);
+            } else {
+                notification.setActions(stopAction);
+            }
+            getSystemService(NotificationManager.class).notify(1, notification.build());
         }
+    }
+
+    /** A fresh start with the unit given up on: the failure count cleared, its link renewed. */
+    private void retry() {
+        failures = 0;
+        cyclesLeft = MAX_CYCLES;
+        BluetoothDevice unit = gaveUpOn != null ? gaveUpOn : bluetooth.headUnit();
+        gaveUpOn = null;
+        if (session != null || unit == null) {
+            status(session != null ? "Already in a session" : "Waiting for the bike");
+            return;
+        }
+        status("Trying " + name(unit) + " again");
+        waitingSince = now();
+        bluetooth.relink(unit);
     }
 
     private static String name(BluetoothDevice device) {
@@ -221,8 +258,9 @@ public final class CarjackService extends Service {
                 if (failures < MAX_FAILURES) {
                     bluetooth.relink(unit);
                 } else {
+                    gaveUpOn = unit;
                     status("CarPlay keeps failing with " + name(unit)
-                            + "; waiting for it to reconnect");
+                            + "; waiting for it to reconnect", true);
                 }
             }
         });
@@ -252,6 +290,9 @@ public final class CarjackService extends Service {
             Variant.onStopRequested(this);
             stopSelf();
             return START_NOT_STICKY;
+        }
+        if (intent != null && ACTION_RETRY.equals(intent.getAction())) {
+            handler.post(this::retry);
         }
         return Variant.onStartCommand(this, intent);
     }

@@ -62,8 +62,10 @@ final class Variant {
         return Service.START_STICKY;
     }
 
-    /** No app screen to show it on. */
-    static void onStatus(Context context, String text) {}
+    /** No app screen to show these on. */
+    static void onStatus(Context context, String text, boolean retryable) {}
+
+    static void onLinked(Context context, boolean linked) {}
 
     /** Stopped until the next boot. */
     static void onStopRequested(Context context) {}

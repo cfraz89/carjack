@@ -51,9 +51,14 @@ final class Variant {
         return Service.START_STICKY;
     }
 
-    /** For {@link MainActivity} to show beside the switch. */
-    static void onStatus(Context context, String text) {
-        prefs(context).edit().putString("status", text).apply();
+    /** For {@link MainActivity} to show beside the switch, with Retry where it applies. */
+    static void onStatus(Context context, String text, boolean retryable) {
+        prefs(context).edit().putString("status", text).putBoolean("retryable", retryable).apply();
+    }
+
+    /** Whether a unit's link is up, for {@link MainActivity}'s Bluetooth shortcut. */
+    static void onLinked(Context context, boolean linked) {
+        prefs(context).edit().putBoolean("linked", linked).apply();
     }
 
     /** The notification's Stop is the app's Turn off. */

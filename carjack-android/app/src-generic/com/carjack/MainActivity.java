@@ -52,6 +52,8 @@ public final class MainActivity extends Activity {
 
     private Switch power;
     private TextView status;
+    private Button retry;
+    private Button bluetoothSettings;
     private LinearLayout setup;
     private Spinner bike;
     private Spinner app;
@@ -90,6 +92,19 @@ public final class MainActivity extends Activity {
         status.setAlpha(0.75f);
         status.setPadding(0, dp(4), 0, 0);
         main.addView(status);
+        LinearLayout actions = new LinearLayout(this);
+        retry = new Button(this);
+        retry.setText("Retry");
+        retry.setAllCaps(false);
+        retry.setOnClickListener(v -> startService(
+                new Intent(this, CarjackService.class).setAction(CarjackService.ACTION_RETRY)));
+        actions.addView(retry);
+        bluetoothSettings = new Button(this, null, android.R.attr.borderlessButtonStyle);
+        bluetoothSettings.setText("Bluetooth settings");
+        bluetoothSettings.setAllCaps(false);
+        bluetoothSettings.setOnClickListener(v -> openBluetoothSettings());
+        actions.addView(bluetoothSettings);
+        main.addView(actions);
 
         LinearLayout settings = card(page, cardColor());
         bike = new Spinner(this);
@@ -135,7 +150,8 @@ public final class MainActivity extends Activity {
     /** The service's status, and the switch flipped from the notification. */
     private final SharedPreferences.OnSharedPreferenceChangeListener prefsChanged =
             (prefs, key) -> {
-                if ("status".equals(key) || "on".equals(key)) {
+                if ("status".equals(key) || "on".equals(key) || "retryable".equals(key)
+                        || "linked".equals(key)) {
                     runOnUiThread(this::showPower);
                 }
             };
@@ -164,6 +180,15 @@ public final class MainActivity extends Activity {
         boolean on = BootReceiver.isOn(this);
         power.setChecked(on);
         status.setText(on ? Variant.setting(this, "status", "Waiting for the bike") : "Off");
+        SharedPreferences prefs = Variant.prefs(this);
+        retry.setVisibility(on && prefs.getBoolean("retryable", false) ? View.VISIBLE : View.GONE);
+        // Nothing connected: the phone's own Bluetooth page is where that gets sorted.
+        bluetoothSettings.setVisibility(on && !prefs.getBoolean("linked", false)
+                ? View.VISIBLE : View.GONE);
+    }
+
+    private void openBluetoothSettings() {
+        startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS));
     }
 
     /** One row per thing still missing; the card goes when nothing is. */
@@ -190,6 +215,9 @@ public final class MainActivity extends Activity {
                 step("Bluetooth is off", "Turn on", v -> startActivity(
                         new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)));
             }
+        }
+        if (permissionsGranted() && bluetoothOn() && bikeAddresses.size() <= 1) {
+            step("No CarPlay unit is paired yet", "Pair", v -> openBluetoothSettings());
         }
         setup.setVisibility(setup.getChildCount() == 0 ? View.GONE : View.VISIBLE);
     }

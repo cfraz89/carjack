@@ -68,6 +68,7 @@ final class Bluetooth {
 
     void start() {
         running = true;
+        setLinked(null);
         IntentFilter filter = new IntentFilter();
         filter.addAction(BluetoothDevice.ACTION_PAIRING_REQUEST);
         filter.addAction(BluetoothDevice.ACTION_FOUND);
@@ -106,7 +107,7 @@ final class Bluetooth {
                     for (BluetoothDevice device : proxy.getConnectedDevices()) {
                         if (lastLinked == null && isTarget(device)) {
                             Log.i(TAG, "Head unit " + device.getAddress() + " is connected");
-                            lastLinked = device;
+                            setLinked(device);
                         }
                     }
                 } catch (SecurityException e) {
@@ -305,6 +306,11 @@ final class Bluetooth {
         thread.start();
     }
 
+    private void setLinked(BluetoothDevice device) {
+        lastLinked = device;
+        Variant.onLinked(context, device != null);
+    }
+
     /** The unit's link is up, as far as an app can tell. */
     boolean isLinked(BluetoothDevice device) {
         return device.equals(lastLinked);
@@ -325,13 +331,13 @@ final class Bluetooth {
             switch (intent.getAction()) {
                 case BluetoothDevice.ACTION_ACL_CONNECTED:
                     if (isTarget(device)) {
-                        lastLinked = device;
+                        setLinked(device);
                         onUnitLinked.accept(device);
                     }
                     break;
                 case BluetoothDevice.ACTION_ACL_DISCONNECTED:
                     if (device.equals(lastLinked)) {
-                        lastLinked = null;
+                        setLinked(null);
                     }
                     break;
                 case BluetoothAdapter.ACTION_STATE_CHANGED:
