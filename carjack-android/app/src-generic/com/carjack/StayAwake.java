@@ -8,10 +8,8 @@ import android.os.PowerManager;
 import android.util.Log;
 
 /**
- * Keeps the phone from sleeping for as long as the unit has a display: on this Android every
- * virtual display shares the phone's display group, so it stops rendering when the phone sleeps.
- * The phone's screen stays on, dimmed; switching its panel off stops the unit's display too. Runs
- * in the Shizuku process, as the shell user.
+ * Keeps the phone's CPU from suspending for as long as the unit has a display, leaving its screen
+ * to do as it would. Runs in the Shizuku process, as the shell user.
  */
 final class StayAwake {
     private static final String TAG = "carjack";
@@ -25,11 +23,11 @@ final class StayAwake {
 
     void start() {
         try {
-            wakeLock = powerManager().newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK
-                    | PowerManager.ACQUIRE_CAUSES_WAKEUP, "carjack:display");
+            wakeLock = powerManager().newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
+                    "carjack:display");
             wakeLock.acquire();
         } catch (ReflectiveOperationException | RuntimeException e) {
-            Log.w(TAG, "Could not keep the phone awake; the unit's display sleeps with it", e);
+            Log.w(TAG, "Could not keep the phone awake", e);
         }
     }
 
