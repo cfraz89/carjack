@@ -27,7 +27,25 @@ final class Variant {
     static final String EXTRA_RESULT_CODE = "com.carjack.RESULT_CODE";
     static final String EXTRA_RESULT_DATA = "com.carjack.RESULT_DATA";
 
-    static void prepare(Context context) {}
+    private static java.lang.Process logcat;
+
+    /**
+     * Our own log, kept in files/carjack.log (and .1-.3) under Android/data, so a session away
+     * from adb can be read afterwards.
+     */
+    static void prepare(Context context) {
+        java.io.File dir = context.getExternalFilesDir(null);
+        if (dir == null || logcat != null) {
+            return;
+        }
+        try {
+            logcat = new ProcessBuilder("logcat", "-v", "time", "-f",
+                    new java.io.File(dir, "carjack.log").getPath(), "-r", "2048", "-n", "3")
+                    .start();
+        } catch (java.io.IOException e) {
+            Log.w(TAG, "No log file", e);
+        }
+    }
 
     /** Screen capture comes later, with the consent {@link MainActivity} passes on. */
     static int foregroundServiceTypes() {
@@ -56,8 +74,12 @@ final class Variant {
     static void onServiceDestroyed(Service service) {
         Projection.stop();
         ShizukuDisplay.unbind();
-        new Handler(Looper.getMainLooper()).postDelayed(
-                () -> Process.killProcess(Process.myPid()), STOP_GRACE_MS);
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            if (logcat != null) {
+                logcat.destroy();
+            }
+            Process.killProcess(Process.myPid());
+        }, STOP_GRACE_MS);
     }
 
     static String setting(Context context, String key, String fallback) {
