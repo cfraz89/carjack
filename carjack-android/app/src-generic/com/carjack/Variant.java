@@ -125,12 +125,20 @@ final class Variant {
     }
 
     /**
-     * Apps only see a placeholder for their own address, which the unit is told; the user can
-     * copy the real one from the phone's settings.
+     * Apps only see a placeholder for their own address, which the unit is told; the real one is
+     * the user's to copy from the phone's settings, or Shizuku's to read.
      */
     static String bluetoothAddress(Context context, BluetoothAdapter adapter) {
         String address = setting(context, "bluetooth_address", "").trim();
-        return address.isEmpty() ? adapter.getAddress() : address;
+        if (address.isEmpty()) {
+            // Some units (the CFMOTO) won't start CarPlay for the placeholder.
+            address = ShizukuDisplay.bluetoothAddress();
+            if (address == null) {
+                return adapter.getAddress();
+            }
+            prefs(context).edit().putString("bluetooth_address", address).apply();
+        }
+        return address;
     }
 
     /**

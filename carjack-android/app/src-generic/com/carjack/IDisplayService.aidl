@@ -18,6 +18,9 @@ interface IDisplayService {
     /** Bluetooth off and back on, returning once it's on. */
     void cycleBluetooth() = 5;
 
+    /** The phone's Bluetooth address, which apps aren't given. */
+    String bluetoothAddress() = 6;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

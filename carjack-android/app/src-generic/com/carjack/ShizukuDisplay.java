@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(3);
+            .version(4);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
@@ -98,6 +98,20 @@ final class ShizukuDisplay {
         } catch (RemoteException e) {
             Log.w(TAG, "Shizuku couldn't cycle Bluetooth", e);
             return false;
+        }
+    }
+
+    /** The phone's real Bluetooth address through Shizuku, or null. */
+    static String bluetoothAddress() {
+        IDisplayService s = available() ? bind() : null;
+        if (s == null) {
+            return null;
+        }
+        try {
+            String address = s.bluetoothAddress();
+            return address.matches("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}") ? address : null;
+        } catch (RemoteException e) {
+            return null;
         }
     }
 

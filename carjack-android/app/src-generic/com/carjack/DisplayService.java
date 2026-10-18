@@ -160,6 +160,11 @@ public final class DisplayService extends IDisplayService.Stub {
         run("cmd", "bluetooth_manager", "wait-for-state:STATE_ON");
     }
 
+    @Override
+    public String bluetoothAddress() {
+        return run("settings", "get", "secure", "bluetooth_address").trim();
+    }
+
     private static String run(String... command) {
         try {
             Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
