@@ -99,18 +99,21 @@ public final class MainActivity extends Activity {
         units = new RadioGroup(this);
         layout.addView(units);
 
-        layout.addView(button("Start", v -> {
+        layout.addView(button("Turn on (stays on, and starts with the phone)", v -> {
             // A connected-device foreground service can't start before Bluetooth is granted.
             if (!permissionsGranted()) {
                 requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS);
-            } else if (!ShizukuDisplay.available()) {
-                status.setText("carjack needs Shizuku running and its permission first.");
-            } else {
-                startForegroundService(new Intent(this, CarjackService.class));
+                return;
             }
+            BootReceiver.setOn(this, true);
+            startForegroundService(new Intent(this, CarjackService.class));
+            refresh();
         }));
-        layout.addView(button("Stop",
-                v -> stopService(new Intent(this, CarjackService.class))));
+        layout.addView(button("Turn off", v -> {
+            BootReceiver.setOn(this, false);
+            stopService(new Intent(this, CarjackService.class));
+            refresh();
+        }));
 
         ScrollView scroll = new ScrollView(this);
         scroll.addView(layout);
@@ -197,15 +200,18 @@ public final class MainActivity extends Activity {
     private void refresh() {
         listUnits();
         StringBuilder text = new StringBuilder("carjack: CarPlay from this phone\n\n");
+        text.append(BootReceiver.isOn(this) ? "● On: listening for the bike\n"
+                : "○ Off\n");
         text.append(permissionsGranted() ? "✓" : "✗").append(" Permissions\n");
         BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
         text.append(adapter != null && adapter.isEnabled() ? "✓" : "✗").append(" Bluetooth on\n");
         text.append(!pingShizuku() ? "✗ Shizuku isn't running\n"
                 : ShizukuDisplay.available() ? "✓ Shizuku\n"
                 : "✗ Shizuku hasn't let carjack in\n");
-        text.append("\nPair with the bike once, from its menu or this phone's Bluetooth "
-                + "settings, with carjack started. Then Start: carjack waits for the bike and "
-                + "gives it a display of its own size.");
+        text.append("\nTurn carjack on, then pair with the bike once, from its menu or this "
+                + "phone's Bluetooth settings. From then on carjack waits for the bike and gives "
+                + "it a display of its own size; Shizuku has to be running by the time it "
+                + "connects.");
         status.setText(text);
     }
 

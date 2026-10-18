@@ -51,6 +51,11 @@ final class Variant {
         return Service.START_STICKY;
     }
 
+    /** The notification's Stop is the app's Turn off. */
+    static void onStopRequested(Context context) {
+        BootReceiver.setOn(context, false);
+    }
+
     /** How long the service's own teardown gets before the process goes. */
     private static final long STOP_GRACE_MS = 1500;
 

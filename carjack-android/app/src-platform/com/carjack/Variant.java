@@ -62,6 +62,9 @@ final class Variant {
         return Service.START_STICKY;
     }
 
+    /** Stopped until the next boot. */
+    static void onStopRequested(Context context) {}
+
     static void onServiceDestroyed(Service service) {}
 
     /** {@code persist.carjack.<key>}. */

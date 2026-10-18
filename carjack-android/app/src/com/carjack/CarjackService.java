@@ -45,6 +45,9 @@ public final class CarjackService extends Service {
     /** Where we can't page, a unit already linked at start gets only the dial grace. */
     private long offerWait = Variant.canPage() ? OFFER_WAIT_MS : UNIT_DIAL_GRACE_MS;
     private long waitingSince;
+    private static final int MAX_CYCLES = 2;
+    /** Bluetooth cycles left before only dialling; refilled by a session. */
+    private int cyclesLeft = MAX_CYCLES;
 
     @Override
     public void onCreate() {
@@ -71,11 +74,16 @@ public final class CarjackService extends Service {
         if (!Variant.canPage()) {
             // A unit dials iAP only on a fresh link, and may carry it on a channel we dial then
             // too: give it a moment to dial first.
-            bluetooth.setOnUnitLinked(unit -> handler.postDelayed(() -> {
-                if (session == null) {
-                    bluetooth.dial(unit);
-                }
-            }, UNIT_DIAL_GRACE_MS));
+            bluetooth.setOnUnitLinked(unit -> {
+                // A fresh link: give it the full wait before renewing it.
+                waitingSince = now();
+                offerWait = OFFER_WAIT_MS;
+                handler.postDelayed(() -> {
+                    if (session == null) {
+                        bluetooth.dial(unit);
+                    }
+                }, UNIT_DIAL_GRACE_MS);
+            });
         }
         handler.post(() -> {
             bluetooth.start();
@@ -97,6 +105,13 @@ public final class CarjackService extends Service {
                 return;
             }
             BluetoothDevice unit = bluetooth.headUnit();
+            if (!Variant.canPage()) {
+                // Nothing to do until the unit links: its link coming up is the cue.
+                if (unit != null && bluetooth.isLinked(unit)) {
+                    renewLink(unit);
+                }
+                return;
+            }
             if (unit == null) {
                 if (now() - waitingSince >= Bluetooth.DISCOVERY_INTERVAL_MS) {
                     bluetooth.discover();
@@ -110,13 +125,7 @@ public final class CarjackService extends Service {
                 return;
             }
             waitingSince = now();
-            if (!Variant.canPage()) {
-                // A link that's been up a while won't bring an iAP channel; renew it if we can.
-                if (!bluetooth.isLinked(unit) || !Variant.cycleBluetooth()) {
-                    bluetooth.dial(unit);
-                }
-                offerWait = Math.min(offerWait * 2, OFFER_WAIT_MAX_MS);
-            } else if (!Variant.isConnected(unit)) {
+            if (!Variant.isConnected(unit)) {
                 bluetooth.page(unit);
             } else if (Boolean.parseBoolean(Variant.setting(CarjackService.this, "relink", "false"))) {
                 Log.i(TAG, "No iAP channel offered in " + offerWait + "ms; cycling the link");
@@ -125,6 +134,24 @@ public final class CarjackService extends Service {
             }
         }
     };
+
+    /**
+     * Where we can't page: a linked unit that hasn't dialled iAP gets a renewed link, a couple of
+     * times at most so a unit that won't do CarPlay doesn't have Bluetooth cycling all day, and
+     * after that is only dialled.
+     */
+    private void renewLink(BluetoothDevice unit) {
+        if (now() - waitingSince < offerWait) {
+            return;
+        }
+        waitingSince = now();
+        if (cyclesLeft > 0 && Variant.cycleBluetooth()) {
+            cyclesLeft--;
+        } else {
+            bluetooth.dial(unit);
+        }
+        offerWait = Math.min(offerWait * 2, OFFER_WAIT_MAX_MS);
+    }
 
     private void accept(BluetoothSocket socket) {
         boolean dialled = bluetooth.wasDialled(socket);
@@ -144,6 +171,7 @@ public final class CarjackService extends Service {
         sessionDialled = dialled;
         sessionStarted = now();
         offerWait = OFFER_WAIT_MS;
+        cyclesLeft = MAX_CYCLES;
         BluetoothDevice unit = socket.getRemoteDevice();
         session = new Session(this, handler, socket, wifi, ended -> {
             if (session == ended) {
@@ -177,6 +205,7 @@ public final class CarjackService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            Variant.onStopRequested(this);
             stopSelf();
             return START_NOT_STICKY;
         }
