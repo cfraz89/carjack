@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Rounded on top only: the drawer is a bottom sheet. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/sheet" />
+    <corners
+        android:topLeftRadius="@dimen/sheet_corner_radius"
+        android:topRightRadius="@dimen/sheet_corner_radius" />
+</shape>

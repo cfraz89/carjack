@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginBottom="@dimen/setting_row_gap"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingStart="@dimen/setting_row_padding"
+    android:paddingEnd="@dimen/shortcut_padding"
+    android:paddingTop="@dimen/shortcut_padding"
+    android:paddingBottom="@dimen/shortcut_padding"
+    android:background="@drawable/card_background">
+
+    <TextView
+        android:id="@+id/stepper_label"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:textColor="@color/text_primary"
+        android:textSize="@dimen/setting_label_size" />
+
+    <TextView
+        android:id="@+id/stepper_minus"
+        android:layout_width="@dimen/stepper_button_size"
+        android:layout_height="@dimen/stepper_button_size"
+        android:gravity="center"
+        android:text="&#8722;"
+        android:textColor="@color/on_tonal"
+        android:textSize="@dimen/stepper_value_size"
+        android:background="@drawable/stepper_button"
+        android:contentDescription="@string/decrease" />
+
+    <TextView
+        android:id="@+id/stepper_value"
+        android:layout_width="72dp"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:textColor="@color/text_primary"
+        android:textSize="@dimen/stepper_value_size"
+        android:fontFeatureSettings="tnum" />
+
+    <TextView
+        android:id="@+id/stepper_plus"
+        android:layout_width="@dimen/stepper_button_size"
+        android:layout_height="@dimen/stepper_button_size"
+        android:gravity="center"
+        android:text="+"
+        android:textColor="@color/on_tonal"
+        android:textSize="@dimen/stepper_value_size"
+        android:background="@drawable/stepper_button"
+        android:contentDescription="@string/increase" />
+</LinearLayout>

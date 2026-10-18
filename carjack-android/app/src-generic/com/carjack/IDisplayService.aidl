@@ -10,7 +10,7 @@ interface IDisplayService {
     /** {@link Touch} actions, in the display's pixels. */
     void touch(int action, float x, float y) = 2;
 
-    /** Start {@code component} ("pkg/.Activity", or a package) on the display; empty for home. */
+    /** Start {@code component} ("pkg/.Activity", or a package) on the display. */
     void launch(String component) = 3;
 
     void release() = 4;

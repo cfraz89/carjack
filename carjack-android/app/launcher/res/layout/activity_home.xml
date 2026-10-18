@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <!-- The wallpaper is drawn here rather than by windowShowWallpaper: a backdrop blur only sees
+         this window's own surface, and a wallpaper behind the window is not part of it. -->
+    <ImageView
+        android:id="@+id/wallpaper"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:importantForAccessibility="no" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:fitsSystemWindows="true">
+
+        <GridLayout
+            android:id="@+id/shortcut_grid"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:padding="@dimen/grid_padding"
+            android:useDefaultMargins="false" />
+
+        <!-- Floating rather than edge to edge, so the blur has wallpaper on every side. -->
+        <com.carjack.launcher.TaskbarView
+            android:id="@+id/taskbar"
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/taskbar_height"
+            android:layout_marginStart="@dimen/taskbar_margin"
+            android:layout_marginEnd="@dimen/taskbar_margin"
+            android:layout_marginBottom="@dimen/taskbar_margin"
+            android:background="@drawable/taskbar_background" />
+    </LinearLayout>
+</FrameLayout>

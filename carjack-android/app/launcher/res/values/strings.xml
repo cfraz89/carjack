@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Carjack Launcher</string>
+    <string name="all_apps">All apps</string>
+    <string name="apps">Apps</string>
+    <string name="pick_an_app">Pick an app</string>
+    <string name="empty_slot">Add</string>
+    <string name="change_app">Change app</string>
+    <string name="remove_shortcut">Remove shortcut</string>
+    <string name="settings">Settings</string>
+    <string name="back">Back</string>
+    <string name="setting_columns">Columns</string>
+    <string name="setting_rows">Rows</string>
+    <string name="setting_recents">Recent apps in taskbar</string>
+    <string name="decrease">Less</string>
+    <string name="increase">More</string>
+</resources>

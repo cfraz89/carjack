@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Sized for gloved hands rather than for density: every tappable thing clears 64dp. -->
+    <dimen name="taskbar_height">88dp</dimen>
+    <dimen name="taskbar_margin">12dp</dimen>
+    <dimen name="taskbar_corner_radius">44dp</dimen>
+    <dimen name="taskbar_icon_size">56dp</dimen>
+    <dimen name="taskbar_icon_padding">6dp</dimen>
+    <dimen name="taskbar_button_size">64dp</dimen>
+    <dimen name="taskbar_button_padding">20dp</dimen>
+    <!-- All Apps leads the bar, so it runs a quarter larger than a plain 32dp icon. -->
+    <dimen name="taskbar_apps_icon_size">40dp</dimen>
+    <dimen name="taskbar_button_label_gap">10dp</dimen>
+    <!-- Inset that leaves a 32dp icon in the middle of a 64dp round target. -->
+    <dimen name="icon_button_padding">16dp</dimen>
+    <dimen name="taskbar_side_padding">12dp</dimen>
+    <dimen name="taskbar_item_spacing">8dp</dimen>
+    <dimen name="divider_width">2dp</dimen>
+    <dimen name="divider_height">36dp</dimen>
+    <dimen name="divider_margin">12dp</dimen>
+
+    <dimen name="grid_padding">16dp</dimen>
+    <dimen name="shortcut_margin">8dp</dimen>
+    <dimen name="shortcut_icon_size">72dp</dimen>
+    <dimen name="shortcut_icon_min">32dp</dimen>
+    <dimen name="shortcut_label_top">10dp</dimen>
+    <dimen name="shortcut_padding">10dp</dimen>
+    <!-- Material 3's large and extra-large shape tokens. -->
+    <dimen name="corner_radius">28dp</dimen>
+    <dimen name="sheet_corner_radius">28dp</dimen>
+    <dimen name="pill_radius">999dp</dimen>
+    <!-- px, matching the 52px waydroid-build gives the shade and drawer blur: past it the
+         SurfaceFlinger filter adds no passes, only cost. -->
+    <dimen name="blur_radius">52px</dimen>
+
+    <!-- Below the status bar. Small: the panel is only ~524dp tall. -->
+    <dimen name="sheet_top_gap">8dp</dimen>
+    <dimen name="handle_width">40dp</dimen>
+    <dimen name="handle_height">4dp</dimen>
+    <dimen name="handle_margin">16dp</dimen>
+
+    <!-- M3's small top app bar, stretched from 64dp for the same reason the taskbar is. -->
+    <dimen name="top_app_bar_height">80dp</dimen>
+    <dimen name="top_app_bar_nav_size">64dp</dimen>
+    <dimen name="top_app_bar_side_padding">4dp</dimen>
+    <dimen name="top_app_bar_title_gap">8dp</dimen>
+
+    <dimen name="app_cell_width">132dp</dimen>
+    <dimen name="app_cell_padding">14dp</dimen>
+    <dimen name="app_icon_size">64dp</dimen>
+
+    <dimen name="screen_title_size">28sp</dimen>
+    <dimen name="shortcut_label_size">15sp</dimen>
+    <dimen name="taskbar_button_label_size">21sp</dimen>
+    <dimen name="app_label_size">14sp</dimen>
+    <dimen name="setting_label_size">20sp</dimen>
+    <dimen name="stepper_value_size">28sp</dimen>
+    <dimen name="stepper_button_size">64dp</dimen>
+    <dimen name="setting_row_padding">20dp</dimen>
+    <dimen name="setting_row_gap">12dp</dimen>
+</resources>

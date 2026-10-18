@@ -23,9 +23,8 @@
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
-    <!-- The apps the bike can be given, for the picker. -->
+    <!-- The apps the bike can be given, for the picker and the launcher. -->
     <queries>
-        <package android:name="com.carjack.launcher" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
@@ -55,6 +54,26 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- The launcher (launcher/), which carjack opens on the head unit's display by
+             component: not a home app on the phone. -->
+        <activity
+            android:name="com.carjack.launcher.HomeActivity"
+            android:exported="true"
+            android:theme="@style/CarjackTheme.Home"
+            android:launchMode="singleTask"
+            android:stateNotNeeded="true"
+            android:excludeFromRecents="true"
+            android:clearTaskOnLaunch="true"
+            android:configChanges="keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode" />
+        <activity
+            android:name="com.carjack.launcher.AllAppsActivity"
+            android:exported="false"
+            android:theme="@style/CarjackTheme.Panel" />
+        <activity
+            android:name="com.carjack.launcher.SettingsActivity"
+            android:exported="false"
+            android:theme="@style/CarjackTheme.Panel.Full" />
 
         <service
             android:name=".CarjackService"

@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(5);
+            .version(6);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
@@ -59,7 +59,7 @@ final class ShizukuDisplay {
     }
 
     /**
-     * A display drawing into {@code target} with {@code app} on it (blank for the launcher);
+     * A display drawing into {@code target} with {@code app} (a component or package) on it;
      * returns what closes it, or null where Shizuku can't make one.
      */
     static Runnable open(Surface target, int width, int height, int density, String app) {

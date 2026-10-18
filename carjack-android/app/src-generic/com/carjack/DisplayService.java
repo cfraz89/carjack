@@ -134,11 +134,6 @@ public final class DisplayService extends IDisplayService.Stub {
             return;
         }
         String id = Integer.toString(display.getDisplay().getDisplayId());
-        if (component == null || component.isEmpty()) {
-            run("am", "start", "--display", id, "-a", "android.intent.action.MAIN", "-c",
-                    "android.intent.category.SECONDARY_HOME");
-            return;
-        }
         if (!component.contains("/")) {
             // A package: its launcher activity, as the last line resolve-activity prints.
             String resolved = run("cmd", "package", "resolve-activity", "--brief", "-c",

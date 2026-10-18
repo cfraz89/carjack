@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A bottom sheet over home, as tall as the panel allows. AllAppsActivity places it below the
+     status bar and pads the grid clear of the navigation bar. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/all_apps_scrim"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:id="@+id/all_apps_sheet"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginTop="@dimen/sheet_top_gap"
+        android:orientation="vertical"
+        android:background="@drawable/sheet_background"
+        android:clickable="true">
+
+        <!-- The handle and title close the sheet: no scrim shows above it to tap. -->
+        <LinearLayout
+            android:id="@+id/all_apps_header"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/ripple_transparent"
+            android:clickable="true"
+            android:focusable="true">
+
+            <View
+                android:layout_width="@dimen/handle_width"
+                android:layout_height="@dimen/handle_height"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="@dimen/handle_margin"
+                android:background="@drawable/sheet_handle" />
+
+            <TextView
+                android:id="@+id/all_apps_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingStart="@dimen/grid_padding"
+                android:paddingEnd="@dimen/grid_padding"
+                android:paddingTop="@dimen/shortcut_padding"
+                android:paddingBottom="@dimen/shortcut_padding"
+                android:textColor="@color/text_primary"
+                android:textSize="@dimen/screen_title_size"
+                android:fontFamily="sans-serif-medium" />
+        </LinearLayout>
+
+        <!-- auto_fit so the column count follows the head unit rather than being pinned. -->
+        <GridView
+            android:id="@+id/all_apps_grid"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:numColumns="auto_fit"
+            android:columnWidth="@dimen/app_cell_width"
+            android:stretchMode="columnWidth"
+            android:gravity="center"
+            android:padding="@dimen/shortcut_padding"
+            android:clipToPadding="false"
+            android:listSelector="@android:color/transparent"
+            android:scrollbarStyle="outsideOverlay" />
+    </LinearLayout>
+</FrameLayout>

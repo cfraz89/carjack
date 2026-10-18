@@ -138,11 +138,28 @@ final class Variant {
         return address;
     }
 
+    /** The built-in launcher's home screen, which the unit gets unless another app is chosen. */
+    private static final String LAUNCHER = "com.carjack/com.carjack.launcher.HomeActivity";
+
+    /** The chosen app while it's still installed, else the launcher. */
+    private static String appFor(Context context) {
+        String app = setting(context, "app", "");
+        if (app.isEmpty()) {
+            return LAUNCHER;
+        }
+        try {
+            context.getPackageManager().getPackageInfo(app.split("/")[0], 0);
+            return app;
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            Log.w(TAG, app + " isn't installed; the unit gets the launcher");
+            return LAUNCHER;
+        }
+    }
+
     /** A display of the unit's own size with the chosen app on it, or null without Shizuku. */
     static Runnable openDisplay(Context context, int width, int height, int density,
             Surface target) {
-        Runnable close = ShizukuDisplay.open(target, width, height, density,
-                setting(context, "app", ""));
+        Runnable close = ShizukuDisplay.open(target, width, height, density, appFor(context));
         if (close == null) {
             Log.e(TAG, "No display: Shizuku isn't running or hasn't let carjack in");
         }

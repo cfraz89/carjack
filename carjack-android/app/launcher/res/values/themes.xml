@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material rather than DeviceDefault: the UI stays dark whatever the system is set to. The
+         colours themselves are Material You's, from colors.xml. -->
+    <style name="CarjackTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:colorPrimary">@color/accent</item>
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+    <style name="CarjackTheme.Home">
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+
+    <!-- Drawer and settings: translucent over home, with SurfaceFlinger blurring what is behind.
+         Where cross-window blur is off the window falls back to the plain translucent sheet. -->
+    <style name="CarjackTheme.Panel">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowBlurBehindEnabled">true</item>
+        <item name="android:windowBlurBehindRadius">@dimen/blur_radius</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+
+    <style name="CarjackTheme.Panel.Full">
+        <item name="android:windowBackground">@drawable/panel_window</item>
+    </style>
+
+    <!-- DeviceDefault here on purpose: its dialogs follow Material You. -->
+    <style name="CarjackDialog" parent="@android:style/Theme.DeviceDefault.Dialog.Alert">
+        <item name="android:windowBlurBehindEnabled">true</item>
+        <item name="android:windowBlurBehindRadius">@dimen/blur_radius</item>
+    </style>
+</resources>

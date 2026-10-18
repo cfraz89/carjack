@@ -71,6 +71,17 @@ android_library_import {
     static_libs: ["carjack-shizuku-api"],
 }
 
+// The home screen the generic build gives the head unit's display, from carjack-yocto's launcher.
+android_library {
+    name: "carjack-launcher",
+    srcs: ["launcher/src/**/*.kt"],
+    resource_dirs: ["launcher/res"],
+    manifest: "launcher/AndroidManifest.xml",
+    sdk_version: "current",
+    // OnBackInvokedCallback, which HomeActivity holds.
+    min_sdk_version: "33",
+}
+
 android_app {
     name: "CarjackGeneric",
     srcs: [
@@ -81,10 +92,13 @@ android_app {
     aidl: {
         local_include_dirs: ["src-generic"],
     },
-    static_libs: ["carjack-shizuku-provider"],
+    static_libs: [
+        "carjack-shizuku-provider",
+        "carjack-launcher",
+    ],
     manifest: "generic/AndroidManifest.xml",
     sdk_version: "current",
-    min_sdk_version: "31",
+    min_sdk_version: "33",
     jni_libs: ["libcarjack_android"],
     use_embedded_native_libs: true,
     optimize: {

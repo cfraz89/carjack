@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Gives the library its package, and so its R class. Its activities are declared in
+     generic/AndroidManifest.xml, since the app's manifest isn't merged with this one. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.carjack.launcher" />
