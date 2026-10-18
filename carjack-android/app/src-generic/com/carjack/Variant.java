@@ -1,6 +1,5 @@
 package com.carjack;
 
-import android.app.Activity;
 import android.app.Service;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -8,7 +7,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
-import android.hardware.display.VirtualDisplay;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
@@ -16,16 +14,14 @@ import android.util.Log;
 import android.view.Surface;
 
 /**
- * The generic build: an ordinary app on someone's phone. What the platform build does directly is
- * asked of the user instead - permissions, discoverability, pairing, screen capture and touch
- * control - and the screen is the phone's own, mirrored.
+ * The generic build: an ordinary app on someone's phone, with Shizuku standing in for the
+ * privileges the platform build has - the unit's display, touch on it, Bluetooth cycling and the
+ * phone's Bluetooth address. Permissions and pairing are asked of the user.
  */
 final class Variant {
     private static final String TAG = "carjack";
 
     static final String PREFS = "carjack";
-    static final String EXTRA_RESULT_CODE = "com.carjack.RESULT_CODE";
-    static final String EXTRA_RESULT_DATA = "com.carjack.RESULT_DATA";
 
     private static java.lang.Process logcat;
 
@@ -47,21 +43,12 @@ final class Variant {
         }
     }
 
-    /** Screen capture comes later, with the consent {@link MainActivity} passes on. */
     static int foregroundServiceTypes() {
         return ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE;
     }
 
     static int onStartCommand(Service service, Intent intent) {
-        int code = intent == null ? 0 : intent.getIntExtra(EXTRA_RESULT_CODE, 0);
-        Intent data = intent == null ? null : intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent.class);
-        if (code == Activity.RESULT_OK && data != null) {
-            ((CarjackService) service).promote(ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                    | ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
-            Projection.start(service, code, data);
-        }
-        // Screen capture can't survive a restart without asking again.
-        return Service.START_NOT_STICKY;
+        return Service.START_STICKY;
     }
 
     /** How long the service's own teardown gets before the process goes. */
@@ -72,7 +59,6 @@ final class Variant {
      * native session, the listeners and any network request with it.
      */
     static void onServiceDestroyed(Service service) {
-        Projection.stop();
         ShizukuDisplay.unbind();
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
             if (logcat != null) {
@@ -119,58 +105,40 @@ final class Variant {
 
     static void disconnect(BluetoothDevice device) {}
 
-    /** Bluetooth off and on through Shizuku, for a fresh link; false without it. */
+    /** Bluetooth off and on, for a fresh link. */
     static boolean cycleBluetooth() {
         return ShizukuDisplay.cycleBluetooth();
     }
 
     /**
-     * Apps only see a placeholder for their own address, which the unit is told; the real one is
-     * the user's to copy from the phone's settings, or Shizuku's to read.
+     * Apps only see a placeholder for their own address; Shizuku reads the real one, which some
+     * units (the CFMOTO) need in CarPlayAvailability.
      */
     static String bluetoothAddress(Context context, BluetoothAdapter adapter) {
-        String address = setting(context, "bluetooth_address", "").trim();
-        if (address.isEmpty()) {
-            // Some units (the CFMOTO) won't start CarPlay for the placeholder.
-            address = ShizukuDisplay.bluetoothAddress();
-            if (address == null) {
-                return adapter.getAddress();
-            }
-            prefs(context).edit().putString("bluetooth_address", address).apply();
+        String address = ShizukuDisplay.bluetoothAddress();
+        if (address == null) {
+            Log.w(TAG, "No Bluetooth address from Shizuku; the unit gets a placeholder");
+            return adapter.getAddress();
         }
         return address;
     }
 
-    /**
-     * A display of the unit's own size through Shizuku when it's set up, else a mirror of the
-     * phone's screen.
-     */
+    /** A display of the unit's own size with the chosen app on it, or null without Shizuku. */
     static Runnable openDisplay(Context context, int width, int height, int density,
             Surface target) {
-        if (usesShizuku(context)) {
-            Runnable close = ShizukuDisplay.open(target, width, height, density,
-                    setting(context, "app", ""));
-            if (close != null) {
-                return close;
-            }
-            Log.w(TAG, "No Shizuku display; mirroring the phone's screen");
+        Runnable close = ShizukuDisplay.open(target, width, height, density,
+                setting(context, "app", ""));
+        if (close == null) {
+            Log.e(TAG, "No display: Shizuku isn't running or hasn't let carjack in");
         }
-        VirtualDisplay display = Projection.display(width, height, density, target);
-        return () -> Projection.detach(display);
+        return close;
     }
 
-    static boolean usesShizuku(Context context) {
-        return "shizuku".equals(setting(context, "display", "mirror"))
-                && ShizukuDisplay.available();
-    }
-
-    /** Onto the Shizuku display 1:1 while there is one, else onto the mirrored screen. */
+    /** Onto the display, 1:1. */
     static Touch touch(Context context, int viewX, int viewY, int viewWidth, int viewHeight) {
-        GestureTouch mirrored = new GestureTouch(context, viewX, viewY, viewWidth, viewHeight);
         return (action, panelX, panelY) -> {
             IDisplayService display = ShizukuDisplay.active;
             if (display == null) {
-                mirrored.touch(action, panelX, panelY);
                 return;
             }
             try {

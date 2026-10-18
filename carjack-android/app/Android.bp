@@ -1,7 +1,8 @@
 // carjack's Android app, in two builds from one source tree:
 //  - Carjack: platform-signed and preinstalled (motopod), so it gets its permissions and hidden
 //    APIs without anyone at the screen. src-platform/.
-//  - CarjackGeneric: an ordinary app for any phone, on the public SDK. src-generic/.
+//  - CarjackGeneric: an ordinary app for any phone running Shizuku, on the public SDK.
+//    src-generic/.
 // libcarjack_android.so comes from `just android` in the carjack repo, staged beside this file.
 
 cc_prebuilt_library_shared {
@@ -82,7 +83,6 @@ android_app {
     },
     static_libs: ["carjack-shizuku-provider"],
     manifest: "generic/AndroidManifest.xml",
-    resource_dirs: ["generic/res"],
     sdk_version: "current",
     min_sdk_version: "31",
     jni_libs: ["libcarjack_android"],

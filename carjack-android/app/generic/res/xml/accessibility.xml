@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Gestures only: carjack replays the bike's touches and reads nothing on screen. -->
-<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:canPerformGestures="true"
-    android:canRetrieveWindowContent="false"
-    android:accessibilityEventTypes="typeWindowStateChanged"
-    android:accessibilityFeedbackType="feedbackGeneric"
-    android:description="@string/accessibility_description" />
