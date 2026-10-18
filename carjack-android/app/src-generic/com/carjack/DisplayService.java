@@ -26,7 +26,8 @@ public final class DisplayService extends IDisplayService.Stub {
             | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
             | 1 << 6 // SUPPORTS_TOUCH
             | 1 << 8 // DESTROY_CONTENT_ON_REMOVAL
-            | 1 << 9 // SHOULD_SHOW_SYSTEM_DECORATIONS: a launcher and the system bars
+            // No SHOULD_SHOW_SYSTEM_DECORATIONS: the launcher brings its own taskbar, and with
+            // them the Pixel keeps the display in the phone's group, asleep when the phone is.
             | 1 << 10 // TRUSTED
             | 1 << 11 // OWN_DISPLAY_GROUP: awake and unlocked apart from the phone's screen
             | 1 << 12 // ALWAYS_UNLOCKED, which applies only in a group of its own

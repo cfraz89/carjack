@@ -23,6 +23,8 @@ final class ScreenStream {
     private static final int SMALLEST_WIDTH_DP = 480;
     private static final long REPEAT_FRAME_US = 100_000;
     private static final int DEFAULT_BITRATE = 8_000_000;
+    private static final long STALL_MS = 10_000;
+    private static final long WATCHDOG_INTERVAL_MS = 2_000;
 
     private final Context context;
     private final long session;
@@ -32,6 +34,9 @@ final class ScreenStream {
     /** Closes the display the {@link Variant} opened. */
     private Runnable closeDisplay;
     private Relay relay;
+    /** Off the encoder's thread, which is what the watchdog watches. */
+    private final Handler watchdogHandler = new Handler(android.os.Looper.getMainLooper());
+    private volatile long lastOutput;
 
     ScreenStream(Context context, long session, Runnable onError) {
         this.context = context;
@@ -78,6 +83,8 @@ final class ScreenStream {
             target = relay.start();
         }
         closeDisplay = Variant.openDisplay(context, viewWidth, viewHeight, density, target);
+        lastOutput = android.os.SystemClock.uptimeMillis();
+        watchdogHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS);
     }
 
     /**
@@ -151,6 +158,23 @@ final class ScreenStream {
         }
     }
 
+    /**
+     * The encoder repeats a still frame every {@link #REPEAT_FRAME_US}, so a long silence means
+     * the pipeline has wedged; the session ends rather than leaving the unit on a frozen picture.
+     */
+    private final Runnable watchdog = new Runnable() {
+        @Override
+        public void run() {
+            long silent = android.os.SystemClock.uptimeMillis() - lastOutput;
+            if (silent >= STALL_MS) {
+                Log.w(TAG, "No frames from the encoder for " + silent + "ms; ending the session");
+                onError.run();
+                return;
+            }
+            watchdogHandler.postDelayed(this, WATCHDOG_INTERVAL_MS);
+        }
+    };
+
     void requestKeyframe() {
         MediaCodec c = codec;
         if (c == null) {
@@ -165,6 +189,7 @@ final class ScreenStream {
     }
 
     void stop() {
+        watchdogHandler.removeCallbacks(watchdog);
         if (closeDisplay != null) {
             closeDisplay.run();
             closeDisplay = null;
@@ -194,6 +219,7 @@ final class ScreenStream {
             if (c != codec) {
                 return;
             }
+            lastOutput = android.os.SystemClock.uptimeMillis();
             try {
                 if (info.size > 0) {
                     Native.pushFrame(session, c.getOutputBuffer(index), info.offset, info.size,

@@ -7,7 +7,6 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.res.Configuration
 import android.os.Bundle
-import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.widget.GridLayout
@@ -20,7 +19,6 @@ import android.window.OnBackInvokedDispatcher
 class HomeActivity : Activity() {
 
     private companion object {
-        const val TAG = "CarjackHome"
         const val REQUEST_PICK = 1
         const val STATE_PENDING_SLOT = "pending_slot"
     }
@@ -66,17 +64,9 @@ class HomeActivity : Activity() {
         taskbar.refresh()
     }
 
-    /** Re-read on every resume, so a wallpaper picked in Settings shows up on the way back. */
+    /** The system's built-in wallpaper: an ordinary app may not read the phone's own. */
     private fun loadWallpaper() {
-        val manager = WallpaperManager.getInstance(this)
-        val current = try {
-            manager.drawable
-        } catch (e: SecurityException) {
-            Log.w(TAG, "cannot read the wallpaper; falling back to the built-in one", e)
-            null
-        }
-        // Null for a live wallpaper too, which this window cannot draw.
-        wallpaper.setImageDrawable(current ?: manager.builtInDrawable)
+        wallpaper.setImageDrawable(WallpaperManager.getInstance(this).builtInDrawable)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
