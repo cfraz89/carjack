@@ -34,6 +34,7 @@ final class Bluetooth {
     static final UUID IAP_ACCESSORY = UUID.fromString("00000000-deca-fade-deca-deafdecacaff");
     /** Only advertised: units look for it in EIR while bonding. */
     static final UUID CARPLAY_DEVICE = UUID.fromString("2d8d2466-e14d-451c-88bc-7301abea291a");
+    private static final UUID SERIAL_PORT = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb");
 
     private static final long RELISTEN_DELAY_MS = 2000;
     static final long DISCOVERY_INTERVAL_MS = 15000;
@@ -80,6 +81,11 @@ final class Bluetooth {
         // The listeners retry until the adapter is on, which a user may still have to do.
         listen(IAP_DEVICE, "Wireless iAP", onIap);
         listen(CARPLAY_DEVICE, "CarPlay", Bluetooth::closeQuietly);
+        if (!Variant.canPage()) {
+            // A stock stack's iAP record lacks the Serial Port profile some units search for;
+            // a Serial Port record of its own is the nearest an app can get.
+            listen(SERIAL_PORT, "Wireless iAP", onIap);
+        }
         findConnectedUnit(BluetoothProfile.HEADSET);
         findConnectedUnit(BluetoothProfile.A2DP);
         if (adapter.isEnabled()) {
