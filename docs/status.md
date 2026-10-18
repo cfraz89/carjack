@@ -1,8 +1,32 @@
 # Where things stand
 
-**Last updated: 2026-09-15.** This is the living document - if it disagrees with
+**Last updated: 2026-10-19.** This is the living document - if it disagrees with
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
+
+## The CarPlay icon needs the real Bluetooth address, not `0x1101` (2026-10-19)
+
+The bike shows the CarPlay icon to a **stock Pixel 8** running the generic `carjack-android`
+build (Android 16, Shizuku, no patches) - a phone whose iAP record has **no** Serial Port
+(`0x1101`) profile descriptor. Android's stack registers an app's RFCOMM record with the service
+class, protocol list, browse group and name only; the descriptor comes from motopod's own
+Bluetooth patch, which a stock phone doesn't carry. So the
+[`0x1101` explanation](#why-the-unit-shows-no-carplay-icon-for-us-the-record-has-no-0x1101-2026-08-14)
+below is wrong, or at least not the whole story: the bike classifies a phone without it.
+
+What changed on the phone just before the icon appeared was `CarPlayAvailability` (`0x4300`).
+Its wireless group (`8ef7cfa`, `baa72be`) carries the phone's Bluetooth address, and an app is
+only given the placeholder `02:00:00:00:00:00` for its own; the generic build now reads the real
+one through Shizuku (`settings get secure bluetooth_address`). Every earlier attempt sent the
+placeholder and got no icon.
+
+Not yet settled:
+- whether the bike's verdict is made at bond time (as below) or refreshed by each
+  `CarPlayAvailability` - the Pixel was not re-paired between the two runs, as far as known;
+- whether a session completes from the icon: as of this entry the bike tries to start one, and
+  carjack's on-phone log (`Android/data/com.carjack/files/carjack.log`) holds the run.
+
+The bench AUTO BOX takes either address, and is no guide here.
 
 ## `auto` could never resolve a unit that dialled in first (2026-09-15)
 
@@ -223,6 +247,11 @@ To test: restart the bike, run once and let it end **gracefully**, then run agai
 the bike. If the second run connects, the abrupt kill was the cause.
 
 ## Why the unit shows no CarPlay icon for us: the record has no `0x1101` (2026-08-14)
+
+**Superseded (2026-10-19):** a stock phone with no `0x1101` gets the icon once
+`CarPlayAvailability` carries its real Bluetooth address - see
+[the entry at the top](#the-carplay-icon-needs-the-real-bluetooth-address-not-0x1101-2026-10-19).
+The capture analysis below stands as a record of what the bike asks; its conclusion doesn't.
 
 `logs/cfmoto-to-iphone.pklg`, an iPhone-side PacketLogger capture of CarPlay being started from the
 bike repeatedly without a restart. `btmon -r` reads it directly. The bike's probe is a fixed
