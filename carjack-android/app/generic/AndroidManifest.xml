@@ -25,6 +25,7 @@
 
     <!-- The apps the bike can be given, for the picker. -->
     <queries>
+        <package android:name="com.carjack.launcher" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />

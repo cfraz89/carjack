@@ -37,6 +37,9 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_SHIZUKU = 4;
     private static final int DISCOVERABLE_SECONDS = 300;
     private static final String SHIZUKU_PACKAGE = "moe.shizuku.privileged.api";
+    /** carjack-yocto's launcher, in its phone flavour: opened by component, not as a home app. */
+    private static final String LAUNCHER_PACKAGE = "com.carjack.launcher";
+    private static final String LAUNCHER_COMPONENT = LAUNCHER_PACKAGE + "/.HomeActivity";
 
     private static final String[] PERMISSIONS = {
         Manifest.permission.BLUETOOTH_CONNECT,
@@ -302,6 +305,13 @@ public final class MainActivity extends Activity {
         appPackages.clear();
         names.add("Desktop");
         appPackages.add("");
+        try {
+            pm.getPackageInfo(LAUNCHER_PACKAGE, 0);
+            names.add("Carjack launcher");
+            appPackages.add(LAUNCHER_COMPONENT);
+        } catch (PackageManager.NameNotFoundException e) {
+            // Not installed: the companion launcher is a separate apk.
+        }
         for (String[] a : apps) {
             names.add(a[0]);
             appPackages.add(a[1]);
