@@ -158,12 +158,28 @@ public final class DisplayService extends IDisplayService.Stub {
         }
     }
 
+    /**
+     * From dumpsys wifi, which the shell may read where sysfs is closed to it: each client mode's
+     * `mLinkProperties {InterfaceName: <iface> ...` is followed by its
+     * `mWifiInfo ..., MAC: <the address it joined with>, ...`.
+     */
     @Override
     public String interfaceMac(String iface) {
-        if (!iface.matches("[A-Za-z0-9_.-]+")) {
-            return null;
+        String inInterface = null;
+        for (String line : run("dumpsys", "wifi").split("\n")) {
+            line = line.trim();
+            if (line.startsWith("mLinkProperties {InterfaceName: ")) {
+                inInterface = line.substring("mLinkProperties {InterfaceName: ".length())
+                        .split(" ", 2)[0];
+            } else if (line.startsWith("mWifiInfo ") && iface.equals(inInterface)) {
+                java.util.regex.Matcher mac = java.util.regex.Pattern
+                        .compile("MAC: ([0-9a-fA-F:]{17})").matcher(line);
+                if (mac.find() && !"02:00:00:00:00:00".equals(mac.group(1))) {
+                    return mac.group(1);
+                }
+            }
         }
-        return run("cat", "/sys/class/net/" + iface + "/address").trim();
+        return null;
     }
 
     @Override
