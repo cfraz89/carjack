@@ -76,6 +76,7 @@ final class Bluetooth {
         filter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
         filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
         filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
+        filter.addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
         filter.setPriority(IntentFilter.SYSTEM_HIGH_PRIORITY);
         context.registerReceiver(receiver, filter, null, handler, Context.RECEIVER_EXPORTED);
         // The listeners retry until the adapter is on, which a user may still have to do.
@@ -264,7 +265,14 @@ final class Bluetooth {
         device.fetchUuidsWithSdp();
     }
 
+    /**
+     * Only where no one is at a screen to pair (the platform build): on a phone the user pairs,
+     * and a second bond started alongside theirs fails both.
+     */
     private void pair(BluetoothDevice device) {
+        if (!Variant.canPage()) {
+            return;
+        }
         Log.i(TAG, "Found head unit " + device.getAddress() + " (" + device.getName()
                 + "); pairing");
         adapter.cancelDiscovery();
@@ -330,7 +338,18 @@ final class Bluetooth {
                     intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
             switch (intent.getAction()) {
                 case BluetoothDevice.ACTION_ACL_CONNECTED:
-                    if (isTarget(device)) {
+                    // A unit still pairing is left alone: dialling it, or cycling Bluetooth on
+                    // it, breaks the pairing.
+                    if (isTarget(device)
+                            && device.getBondState() == BluetoothDevice.BOND_BONDED) {
+                        setLinked(device);
+                        onUnitLinked.accept(device);
+                    }
+                    break;
+                case BluetoothDevice.ACTION_BOND_STATE_CHANGED:
+                    // Just paired, on a link that came up while pairing.
+                    if (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1)
+                            == BluetoothDevice.BOND_BONDED && isTarget(device)) {
                         setLinked(device);
                         onUnitLinked.accept(device);
                     }
