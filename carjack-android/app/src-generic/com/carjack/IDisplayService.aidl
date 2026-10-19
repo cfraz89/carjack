@@ -26,6 +26,9 @@ interface IDisplayService {
 
     void enableBluetooth() = 8;
 
+    /** The MAC address of network interface {@code iface}, or null. */
+    String interfaceMac(String iface) = 9;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

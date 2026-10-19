@@ -101,6 +101,11 @@ final class AccessoryWifi {
             public void onUnavailable() {
                 answer(null, "the accessory's WiFi did not come up");
             }
+
+            @Override
+            public void onLost(Network network) {
+                Log.w(TAG, "Lost the accessory's WiFi");
+            }
         };
         connectivity.requestNetwork(request, callback, handler, JOIN_TIMEOUT_MS);
     }
@@ -153,6 +158,10 @@ final class AccessoryWifi {
                         hw[0], hw[1], hw[2], hw[3], hw[4], hw[5]);
             }
         } catch (SocketException ignored) {
+        }
+        String mac = Variant.interfaceMac(iface);
+        if (mac != null) {
+            return mac.toUpperCase();
         }
         Log.w(TAG, "No MAC address for " + iface);
         return HIDDEN_MAC;

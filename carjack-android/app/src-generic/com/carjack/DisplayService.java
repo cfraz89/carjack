@@ -41,6 +41,25 @@ public final class DisplayService extends IDisplayService.Stub {
 
     public DisplayService(Context context) {
         this.context = context;
+        startSystemLog();
+    }
+
+    /** Where the system log goes: Downloads, so it can be sent on without adb or a shell app. */
+    private static final String SYSTEM_LOG = "/sdcard/Download/carjack-system.log";
+
+    private Process systemLog;
+
+    /**
+     * The phone's own log - WiFi, connectivity, Bluetooth, codecs - which carjack's app log can't
+     * see, while carjack is running. Two 4 MB files.
+     */
+    private void startSystemLog() {
+        try {
+            systemLog = new ProcessBuilder("logcat", "-b", "main,system,crash", "-v", "time",
+                    "-f", SYSTEM_LOG, "-r", "4096", "-n", "1", "*:I").start();
+        } catch (java.io.IOException e) {
+            Log.w(TAG, "No system log", e);
+        }
     }
 
     /** The shell's package: the display service checks the caller's package against its uid. */
@@ -140,6 +159,14 @@ public final class DisplayService extends IDisplayService.Stub {
     }
 
     @Override
+    public String interfaceMac(String iface) {
+        if (!iface.matches("[A-Za-z0-9_.-]+")) {
+            return null;
+        }
+        return run("cat", "/sys/class/net/" + iface + "/address").trim();
+    }
+
+    @Override
     public void enableBluetooth() {
         run("cmd", "bluetooth_manager", "enable");
         run("cmd", "bluetooth_manager", "wait-for-state:STATE_ON");
@@ -174,6 +201,9 @@ public final class DisplayService extends IDisplayService.Stub {
     @Override
     public void destroy() {
         release();
+        if (systemLog != null) {
+            systemLog.destroy();
+        }
         System.exit(0);
     }
 }

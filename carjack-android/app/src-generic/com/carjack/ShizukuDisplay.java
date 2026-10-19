@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(11);
+            .version(12);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
@@ -98,6 +98,20 @@ final class ShizukuDisplay {
         } catch (RemoteException e) {
             Log.w(TAG, "Shizuku couldn't cycle Bluetooth", e);
             return false;
+        }
+    }
+
+    /** A network interface's MAC through Shizuku, or null. */
+    static String interfaceMac(String iface) {
+        IDisplayService s = available() ? bind() : null;
+        if (s == null) {
+            return null;
+        }
+        try {
+            String mac = s.interfaceMac(iface);
+            return mac != null && mac.matches("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}") ? mac : null;
+        } catch (RemoteException e) {
+            return null;
         }
     }
 

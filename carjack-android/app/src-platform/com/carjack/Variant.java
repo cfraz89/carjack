@@ -62,6 +62,11 @@ final class Variant {
         return Service.START_STICKY;
     }
 
+    /** The platform app reads sysfs itself. */
+    static String interfaceMac(String iface) {
+        return null;
+    }
+
     /** No app screen to show these on. */
     static void onStatus(Context context, String text, boolean retryable) {}
 

@@ -138,6 +138,14 @@ final class Variant {
         return address;
     }
 
+    /**
+     * The MAC {@code iface} joined with, which apps can't read and the unit may check against the
+     * station on its AP; null without Shizuku.
+     */
+    static String interfaceMac(String iface) {
+        return ShizukuDisplay.interfaceMac(iface);
+    }
+
     /** The built-in launcher's home screen, which the unit gets unless another app is chosen. */
     private static final String LAUNCHER = "com.carjack/com.carjack.launcher.HomeActivity";
 
