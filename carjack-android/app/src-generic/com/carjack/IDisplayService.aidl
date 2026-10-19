@@ -7,8 +7,8 @@ interface IDisplayService {
     /** A trusted display of this size drawing into {@code surface}; returns its id, or -1. */
     int create(in Surface surface, int width, int height, int density) = 1;
 
-    /** {@link Touch} actions, in the display's pixels. */
-    void touch(int action, float x, float y) = 2;
+    /** {@link Touch} actions, a pointer id per finger, in the display's pixels. */
+    void touch(int action, int pointer, float x, float y) = 2;
 
     /** Start {@code component} ("pkg/.Activity", or a package) on the display. */
     void launch(String component) = 3;

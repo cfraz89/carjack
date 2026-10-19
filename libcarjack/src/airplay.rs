@@ -478,7 +478,7 @@ async fn handle_accessory_commands(
     tunnel: crate::iap2_tunnel::Tunnel,
     handover: CancellationToken,
 ) {
-    let mut touching = false;
+    let mut touching = [false; 2];
     while let Some(mut cmd) = tx.pop_command().await {
         tracing::debug!("Accessory command: {:?}", cmd.command().get_type());
         match cmd.command() {
@@ -497,24 +497,27 @@ async fn handle_accessory_commands(
             }
             Command::HidSendReport(r) => {
                 let report = r.hid_report.as_ref();
-                if let Some(event) = parse_touch_report(report, &mut touching) {
+                let events = parse_touch_report(report, &mut touching);
+                for event in &events {
                     // The touchscreen's logical maximum is the whole panel, which is also the
                     // compositor's coordinate space, so reports pass through unshifted - the app
                     // sits at the view's origin there and picks up only what lands on it.
                     // The only view onto what the accessory reports at the screen edges, where the
                     // Android system gestures live - see `RUST_LOG=libcarjack::airplay=debug`.
                     tracing::debug!(
-                        "touch {:?} panel=({},{}) report={report:02x?}",
+                        "touch {:?} slot={} panel=({},{}) report={report:02x?}",
                         event.event_type,
+                        event.slot,
                         event.x,
                         event.y,
                     );
-                    if touch_tx.try_send(event).is_err() {
+                    if touch_tx.try_send(event.clone()).is_err() {
                         // A dropped Down loses the whole gesture: the compositor latches focus at
                         // Down, so the motions that follow land nowhere.
                         tracing::warn!("touch queue full, dropped a report");
                     }
-                } else if matches!(report.len(), 5 | 12) {
+                }
+                if events.is_empty() && matches!(report.len(), 5 | 12) {
                     // A no-contact report while no contact is held: normal between gestures, but
                     // it is also what a missed Down looks like, so keep it visible at trace level.
                     tracing::trace!("touch idle report={report:02x?}");
@@ -542,9 +545,8 @@ async fn handle_accessory_commands(
     tracing::debug!("Accessory command handler ended");
 }
 
-/// A CarPlay touchscreen HID report from an accessory with no report ID in its HID descriptor:
-/// 5 bytes - a status byte (bit 0 = tip switch, the rest padding), then X/Y as little-endian u16
-/// in display pixels.
+/// A single-finger CarPlay touchscreen HID report: 5 bytes - a status byte (bit 0 = tip switch,
+/// the rest padding), then X/Y as little-endian u16 in display pixels.
 #[derive(DekuRead, Debug, Clone, Copy, PartialEq)]
 #[deku(endian = "little")]
 struct ShortTouchReport {
@@ -553,49 +555,59 @@ struct ShortTouchReport {
     y: u16,
 }
 
-/// The same from an accessory whose HID descriptor does carry a report ID: 12 bytes - report ID,
-/// status, X/Y as little-endian u16, then 6 bytes we don't use.
-#[derive(DekuRead, Debug, Clone, PartialEq)]
+/// One finger of a 12-byte report: its transducer index (`0x38`), then the tip switch (bit 0) and
+/// X/Y as little-endian u16, per the touchscreen's HID descriptor.
+#[derive(DekuRead, Debug, Clone, Copy, PartialEq)]
 #[deku(endian = "little")]
-struct LongTouchReport {
-    _report_id: u8,
+struct Contact {
+    _index: u8,
     status: u8,
     x: u16,
     y: u16,
-    #[deku(count = "6")]
-    _trailer: Vec<u8>,
 }
 
-/// Decode a CarPlay touchscreen HID report. Both shapes are seen in the wild for the same logical
-/// report, keyed here on length since that alone disambiguates them; a report matching neither
-/// length is ignored. The compositor renders at the accessory's resolution, so coordinates pass
-/// through unscaled. `touching` tracks the contact across reports, to emit Down/Motion/Up.
-fn parse_touch_report(bytes: &[u8], touching: &mut bool) -> Option<TouchEvent> {
-    let (status, x, y) = match bytes.len() {
-        5 => {
-            let (_, r) = ShortTouchReport::from_bytes((bytes, 0)).ok()?;
-            (r.status, r.x, r.y)
-        }
-        12 => {
-            let (_, r) = LongTouchReport::from_bytes((bytes, 0)).ok()?;
-            (r.status, r.x, r.y)
-        }
-        _ => return None,
+/// The two-finger shape: 12 bytes, a contact per 6. Each contact's position in the report is its
+/// slot.
+#[derive(DekuRead, Debug, Clone, Copy, PartialEq)]
+struct LongTouchReport {
+    contacts: [Contact; 2],
+}
+
+/// Decode a CarPlay touchscreen HID report into an event per contact that changed. Both shapes
+/// are seen in the wild, keyed here on length since that alone disambiguates them; a report
+/// matching neither is ignored. The compositor renders at the accessory's resolution, so
+/// coordinates pass through unscaled. `touching` tracks each slot across reports, to emit
+/// Down/Motion/Up.
+fn parse_touch_report(bytes: &[u8], touching: &mut [bool; 2]) -> Vec<TouchEvent> {
+    let contacts: Vec<(u8, u16, u16)> = match bytes.len() {
+        5 => match ShortTouchReport::from_bytes((bytes, 0)) {
+            Ok((_, r)) => vec![(r.status, r.x, r.y)],
+            Err(_) => return Vec::new(),
+        },
+        12 => match LongTouchReport::from_bytes((bytes, 0)) {
+            Ok((_, r)) => r.contacts.iter().map(|c| (c.status, c.x, c.y)).collect(),
+            Err(_) => return Vec::new(),
+        },
+        _ => return Vec::new(),
     };
-    let tip = status & 1 != 0;
-    let event_type = match (*touching, tip) {
-        (false, true) => TouchEventType::Down,
-        (true, true) => TouchEventType::Motion,
-        (true, false) => TouchEventType::Up,
-        (false, false) => return None,
-    };
-    *touching = tip;
-    Some(TouchEvent {
-        event_type,
-        slot: 0,
-        x: x as f64,
-        y: y as f64,
-    })
+    let mut events = Vec::new();
+    for (slot, (status, x, y)) in contacts.into_iter().enumerate() {
+        let tip = status & 1 != 0;
+        let event_type = match (touching[slot], tip) {
+            (false, true) => TouchEventType::Down,
+            (true, true) => TouchEventType::Motion,
+            (true, false) => TouchEventType::Up,
+            (false, false) => continue,
+        };
+        touching[slot] = tip;
+        events.push(TouchEvent {
+            event_type,
+            slot: slot as u32,
+            x: x as f64,
+            y: y as f64,
+        });
+    }
+    events
 }
 
 /// Abort a spawned task when the guard is dropped.
@@ -710,71 +722,95 @@ mod tests {
 
     // Real 5-byte reports: the parser must turn a stream of them into a well-formed
     // Down -> Motion* -> Up gesture with the right coordinates.
-    #[test]
-    fn touch_report_gesture() {
-        let mut touching = false;
-
-        // First contact -> Down at (0x01c7, 0x02eb) = (455, 747).
-        let down =
-            parse_touch_report(&[0x01, 0xc7, 0x01, 0xeb, 0x02], &mut touching).expect("down");
-        assert!(matches!(down.event_type, TouchEventType::Down));
-        assert_eq!((down.x, down.y), (455.0, 747.0));
-        assert!(touching);
-
-        // Still touching, moved -> Motion at (0x0147, 0x02fb) = (327, 763).
-        let mv =
-            parse_touch_report(&[0x01, 0x47, 0x01, 0xfb, 0x02], &mut touching).expect("motion");
-        assert!(matches!(mv.event_type, TouchEventType::Motion));
-        assert_eq!((mv.x, mv.y), (327.0, 763.0));
-
-        // tip=0 -> Up (a real lift-off report).
-        let up = parse_touch_report(&[0x00, 0x00, 0x00, 0x32, 0x03], &mut touching).expect("up");
-        assert!(matches!(up.event_type, TouchEventType::Up));
-        assert!(!touching);
-
-        // No contact while not touching, and non-touch reports -> ignored.
-        assert!(parse_touch_report(&[0, 0, 0, 0, 0], &mut touching).is_none());
-        assert!(parse_touch_report(&[0x01], &mut touching).is_none());
+    /// The one event a report must produce, as (type, slot, x, y).
+    fn only(events: Vec<TouchEvent>) -> (TouchEventType, u32, f64, f64) {
+        assert_eq!(events.len(), 1, "{events:?}");
+        let e = &events[0];
+        (e.event_type, e.slot, e.x, e.y)
     }
 
-    // Other accessories report the same touch in a 12-byte shape; both must parse without one
-    // clobbering the other.
+    #[test]
+    fn touch_report_gesture() {
+        let mut touching = [false; 2];
+
+        // First contact -> Down at (0x01c7, 0x02eb) = (455, 747).
+        let down = parse_touch_report(&[0x01, 0xc7, 0x01, 0xeb, 0x02], &mut touching);
+        assert_eq!(only(down), (TouchEventType::Down, 0, 455.0, 747.0));
+
+        // Still touching, moved -> Motion at (0x0147, 0x02fb) = (327, 763).
+        let mv = parse_touch_report(&[0x01, 0x47, 0x01, 0xfb, 0x02], &mut touching);
+        assert_eq!(only(mv), (TouchEventType::Motion, 0, 327.0, 763.0));
+
+        // tip=0 -> Up (a real lift-off report).
+        let up = parse_touch_report(&[0x00, 0x00, 0x00, 0x32, 0x03], &mut touching);
+        assert_eq!(only(up).0, TouchEventType::Up);
+        assert_eq!(touching, [false; 2]);
+
+        // No contact while not touching, and non-touch reports -> ignored.
+        assert!(parse_touch_report(&[0, 0, 0, 0, 0], &mut touching).is_empty());
+        assert!(parse_touch_report(&[0x01], &mut touching).is_empty());
+    }
+
+    // Other accessories report the same touch in a 12-byte shape, with a second contact behind
+    // the first; both shapes must parse without one clobbering the other.
     #[test]
     fn touch_report_gesture_long_format() {
-        let mut touching = false;
+        let mut touching = [false; 2];
 
         // Down at (0x0104, 0x0172) = (260, 370).
         let down = parse_touch_report(
-            &[
-                0x00, 0x01, 0x04, 0x01, 0x72, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
-            ],
+            &[0x00, 0x01, 0x04, 0x01, 0x72, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
             &mut touching,
-        )
-        .expect("down");
-        assert!(matches!(down.event_type, TouchEventType::Down));
-        assert_eq!((down.x, down.y), (260.0, 370.0));
-        assert!(touching);
+        );
+        assert_eq!(only(down), (TouchEventType::Down, 0, 260.0, 370.0));
 
         // Still touching, moved -> Motion at (0x010b, 0x016b) = (267, 363).
         let mv = parse_touch_report(
-            &[
-                0x00, 0x01, 0x0b, 0x01, 0x6b, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
-            ],
+            &[0x00, 0x01, 0x0b, 0x01, 0x6b, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
             &mut touching,
-        )
-        .expect("motion");
-        assert!(matches!(mv.event_type, TouchEventType::Motion));
-        assert_eq!((mv.x, mv.y), (267.0, 363.0));
+        );
+        assert_eq!(only(mv), (TouchEventType::Motion, 0, 267.0, 363.0));
 
         // tip=0 -> Up at (0x0074, 0x0156) = (116, 342).
         let up = parse_touch_report(
-            &[
-                0x00, 0x00, 0x74, 0x00, 0x56, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
-            ],
+            &[0x00, 0x00, 0x74, 0x00, 0x56, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
             &mut touching,
-        )
-        .expect("up");
-        assert!(matches!(up.event_type, TouchEventType::Up));
-        assert!(!touching);
+        );
+        assert_eq!(only(up), (TouchEventType::Up, 0, 116.0, 342.0));
+    }
+
+    // Two fingers on the bench AUTO BOX: the second lands, the first lifts while the second is
+    // still down, then the second lifts - each finger keeps its own slot throughout.
+    #[test]
+    fn touch_report_two_fingers() {
+        let mut touching = [false; 2];
+
+        let first = parse_touch_report(
+            &[0x00, 0x01, 0x08, 0x01, 0x5a, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+            &mut touching,
+        );
+        assert_eq!(only(first), (TouchEventType::Down, 0, 264.0, 90.0));
+
+        // (0x037b, 0x00e2) = (891, 226) joins; the first holds still and reports a Motion.
+        let both = parse_touch_report(
+            &[0x00, 0x01, 0x08, 0x01, 0x5a, 0x00, 0x01, 0x01, 0x7b, 0x03, 0xe2, 0x00],
+            &mut touching,
+        );
+        let both: Vec<_> = both.iter().map(|e| (e.event_type, e.slot)).collect();
+        assert_eq!(both, [(TouchEventType::Motion, 0), (TouchEventType::Down, 1)]);
+
+        let first_up = parse_touch_report(
+            &[0x00, 0x00, 0x08, 0x01, 0x5a, 0x00, 0x01, 0x01, 0x7b, 0x03, 0xe2, 0x00],
+            &mut touching,
+        );
+        let first_up: Vec<_> = first_up.iter().map(|e| (e.event_type, e.slot)).collect();
+        assert_eq!(first_up, [(TouchEventType::Up, 0), (TouchEventType::Motion, 1)]);
+
+        let second_up = parse_touch_report(
+            &[0x00, 0x00, 0x08, 0x01, 0x5a, 0x00, 0x01, 0x00, 0x7b, 0x03, 0xe2, 0x00],
+            &mut touching,
+        );
+        assert_eq!(only(second_up), (TouchEventType::Up, 1, 891.0, 226.0));
+        assert_eq!(touching, [false; 2]);
     }
 }

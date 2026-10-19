@@ -4,9 +4,7 @@ import android.content.Context;
 import android.content.ContextWrapper;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
-import android.os.SystemClock;
 import android.util.Log;
-import android.view.InputDevice;
 import android.view.InputEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
@@ -35,7 +33,7 @@ public final class DisplayService extends IDisplayService.Stub {
     private VirtualDisplay display;
     /** The phone kept awake while the display is up. */
     private StayAwake awake;
-    private long downTime = -1;
+    private Fingers fingers = new Fingers();
 
     public DisplayService() {
         this(null);
@@ -67,6 +65,7 @@ public final class DisplayService extends IDisplayService.Stub {
             DisplayManager dm = DisplayManager.class.getDeclaredConstructor(Context.class)
                     .newInstance(shellContext());
             display = dm.createVirtualDisplay("carjack", width, height, density, surface, FLAGS);
+            fingers = new Fingers();
             int id = display.getDisplay().getDisplayId();
             Log.i(TAG, "Display " + id + " at " + width + "x" + height + ", " + density + "dpi");
             awake = new StayAwake(shellContext());
@@ -79,41 +78,14 @@ public final class DisplayService extends IDisplayService.Stub {
     }
 
     @Override
-    public synchronized void touch(int action, float x, float y) {
+    public synchronized void touch(int action, int pointer, float x, float y) {
         if (display == null) {
             return;
         }
-        long now = SystemClock.uptimeMillis();
-        int motion;
-        switch (action) {
-            case Touch.DOWN:
-                downTime = now;
-                motion = MotionEvent.ACTION_DOWN;
-                break;
-            case Touch.MOVE:
-                motion = MotionEvent.ACTION_MOVE;
-                break;
-            case Touch.UP:
-                motion = MotionEvent.ACTION_UP;
-                break;
-            default:
-                return;
-        }
-        if (downTime < 0) {
+        MotionEvent event = fingers.event(action, pointer, x, y);
+        if (event == null) {
             return;
         }
-        MotionEvent.PointerProperties props = new MotionEvent.PointerProperties();
-        props.id = 0;
-        props.toolType = MotionEvent.TOOL_TYPE_FINGER;
-        MotionEvent.PointerCoords coords = new MotionEvent.PointerCoords();
-        coords.x = x;
-        coords.y = y;
-        coords.pressure = motion == MotionEvent.ACTION_UP ? 0 : 1;
-        coords.size = 1;
-        MotionEvent event = MotionEvent.obtain(downTime, now, motion, 1,
-                new MotionEvent.PointerProperties[] {props},
-                new MotionEvent.PointerCoords[] {coords}, 0, 0, 1, 1, 0, 0,
-                InputDevice.SOURCE_TOUCHSCREEN, 0);
         try {
             InputEvent.class.getMethod("setDisplayId", int.class)
                     .invoke(event, display.getDisplay().getDisplayId());
@@ -125,9 +97,6 @@ public final class DisplayService extends IDisplayService.Stub {
             Log.w(TAG, "Could not inject a touch", e);
         } finally {
             event.recycle();
-        }
-        if (motion == MotionEvent.ACTION_UP) {
-            downTime = -1;
         }
     }
 

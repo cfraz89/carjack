@@ -120,10 +120,10 @@ final class Session implements Native.Callbacks {
     }
 
     @Override
-    public void touch(int action, float x, float y) {
+    public void touch(int action, int pointer, float x, float y) {
         Touch t = touch;
         if (t != null) {
-            t.touch(action, x, y);
+            t.touch(action, pointer, x, y);
         }
     }
 

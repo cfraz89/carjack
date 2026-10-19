@@ -168,13 +168,13 @@ final class Variant {
 
     /** Onto the display, 1:1. */
     static Touch touch(Context context, int viewX, int viewY, int viewWidth, int viewHeight) {
-        return (action, panelX, panelY) -> {
+        return (action, pointer, panelX, panelY) -> {
             IDisplayService display = ShizukuDisplay.active;
             if (display == null) {
                 return;
             }
             try {
-                display.touch(action, panelX - viewX, panelY - viewY);
+                display.touch(action, pointer, panelX - viewX, panelY - viewY);
             } catch (android.os.RemoteException e) {
                 Log.w(TAG, "Touch lost", e);
             }

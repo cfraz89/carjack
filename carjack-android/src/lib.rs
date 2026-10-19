@@ -118,9 +118,10 @@ impl Platform for JavaPlatform {
         };
         self.call(
             "touch",
-            "(IFF)V",
+            "(IIFF)V",
             &[
                 JValue::Int(action),
+                JValue::Int(event.slot as jint),
                 JValue::Float(event.x as f32),
                 JValue::Float(event.y as f32),
             ],

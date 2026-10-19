@@ -17,8 +17,8 @@ final class Native {
 
         void requestKeyframe();
 
-        /** {@code action}: 0 down, 1 up, 2 move; in the accessory's panel pixels. */
-        void touch(int action, float x, float y);
+        /** {@code action}: 0 down, 1 up, 2 move, of finger {@code pointer}; in panel pixels. */
+        void touch(int action, int pointer, float x, float y);
 
         /** {@code error} is null for a clean end. */
         void ended(String error);
