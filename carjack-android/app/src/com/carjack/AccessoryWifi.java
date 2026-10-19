@@ -67,7 +67,14 @@ final class AccessoryWifi {
         }
         if (bssid != null) {
             try {
-                spec.setBssid(MacAddress.fromString(bssid));
+                MacAddress address = MacAddress.fromString(bssid);
+                // The CFMOTO sends a multicast one (3D:...), no AP's; Android refuses a request
+                // pinned to it outright, so the SSID alone has to do.
+                if (address.getAddressType() == MacAddress.TYPE_UNICAST) {
+                    spec.setBssid(address);
+                } else {
+                    Log.w(TAG, "Ignoring the accessory's BSSID " + bssid + ", which no AP has");
+                }
             } catch (IllegalArgumentException e) {
                 Log.w(TAG, "Ignoring the accessory's BSSID " + bssid);
             }
