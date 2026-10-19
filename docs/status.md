@@ -28,6 +28,11 @@ Not yet settled:
 
 The bench AUTO BOX takes either address, and is no guide here.
 
+The first ride after the icon got through iAP2 and the Wi-Fi hand-over (`CFMOTO-999700`,
+channel 157) and then failed to join in 50 ms, every time: the bike's `bssid` is
+`3D:20:3D:D3:EB:06`, a multicast address no AP can have, and Android refuses a
+`WifiNetworkSpecifier` pinned to it. `5b5d372` joins by SSID alone when the BSSID isn't unicast.
+
 ## `auto` could never resolve a unit that dialled in first (2026-09-15)
 
 On the board, against the bench AUTO BOX. The unit connected, ran a complete HFP session, opened
