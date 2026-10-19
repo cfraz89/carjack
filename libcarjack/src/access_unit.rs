@@ -61,7 +61,12 @@ pub fn split_access_unit(data: &[u8], codec: VideoCodec) -> AccessUnit {
                 au.data.extend_from_slice(&data[start..end]);
             }
             Some(&header) if is_parameter_set(header, codec) => {
-                au.parameter_sets.extend_from_slice(&data[start..end]);
+                au.parameter_sets.extend_from_slice(&data[start..payload]);
+                let nal = &data[payload..end];
+                match codec {
+                    VideoCodec::Hevc => au.parameter_sets.extend(mark_progressive(nal)),
+                    VideoCodec::H264 => au.parameter_sets.extend_from_slice(nal),
+                }
             }
             _ => {}
         }
@@ -74,6 +79,63 @@ pub fn split_access_unit(data: &[u8], codec: VideoCodec) -> AccessUnit {
         );
     }
     au
+}
+
+/// The general constraint byte's `progressive_source_flag` and `frame_only_constraint_flag`.
+const PROGRESSIVE_FRAME_ONLY: u8 = 0x90;
+
+/// Where that byte sits in an HEVC VPS and SPS RBSP, counting the 2-byte NAL header: the
+/// profile_tier_level follows 4 bytes of VPS fields or 1 of SPS fields, and the byte follows its
+/// own profile byte and 4 bytes of compatibility flags.
+const VPS_CONSTRAINT_BYTE: usize = 2 + 4 + 5;
+const SPS_CONSTRAINT_BYTE: usize = 2 + 1 + 5;
+
+/// An HEVC VPS or SPS that says its frames are progressive and frame-only; any other NAL as it
+/// is. Some encoders (the Pixel's Exynos) leave both flags clear, which allows interlaced
+/// fields, and the CFMOTO shows nothing for such a stream - an iPhone and the Linux build both
+/// set them. What we encode is progressive frames, so this only says so.
+fn mark_progressive(nal: &[u8]) -> Vec<u8> {
+    let at = match nal.first().map(|h| (h >> 1) & 0x3f) {
+        Some(32) => VPS_CONSTRAINT_BYTE,
+        Some(33) => SPS_CONSTRAINT_BYTE,
+        _ => return nal.to_vec(),
+    };
+    let mut rbsp = unescape(nal);
+    match rbsp.get_mut(at) {
+        Some(byte) => *byte |= PROGRESSIVE_FRAME_ONLY,
+        None => return nal.to_vec(),
+    }
+    escape(&rbsp)
+}
+
+/// A NAL's payload without its emulation-prevention bytes (the 03 in 00 00 03).
+fn unescape(nal: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nal.len());
+    let mut zeros = 0;
+    for &b in nal {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        out.push(b);
+    }
+    out
+}
+
+/// The reverse: an emulation-prevention byte wherever 00 00 runs into a byte of 3 or less.
+fn escape(rbsp: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rbsp.len() + 4);
+    let mut zeros = 0;
+    for &b in rbsp {
+        if zeros >= 2 && b <= 3 {
+            out.push(3);
+            zeros = 0;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        out.push(b);
+    }
+    out
 }
 
 /// Where the next Annex-B start code begins, and how long it is.
@@ -100,6 +162,57 @@ mod tests {
     ];
 
     const START_CODE: [u8; 4] = [0, 0, 0, 1];
+
+    /// The Pixel 8's Exynos VPS, constraint flags clear, and the one the Linux build sent the
+    /// CFMOTO when it showed a picture (`cfmoto-carjack-fresh.pcapng`). They differ only there.
+    const EXYNOS_VPS: &[u8] = &[
+        0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+        0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x78, 0x2c, 0x09,
+    ];
+    const LINUX_VPS: &[u8] = &[
+        0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00,
+        0x03, 0x00, 0x00, 0x03, 0x00, 0x78, 0x2c, 0x09,
+    ];
+    /// The head of the Exynos SPS, through its level byte.
+    const EXYNOS_SPS_HEAD: &[u8] = &[
+        0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+        0x00, 0x03, 0x00, 0x78, 0xa0, 0x06,
+    ];
+
+    #[test]
+    fn exynos_vps_is_marked_progressive_like_linux() {
+        assert_eq!(mark_progressive(EXYNOS_VPS), LINUX_VPS);
+        // Already marked: left as it is.
+        assert_eq!(mark_progressive(LINUX_VPS), LINUX_VPS);
+    }
+
+    #[test]
+    fn exynos_sps_is_marked_progressive() {
+        let marked = mark_progressive(EXYNOS_SPS_HEAD);
+        let rbsp = unescape(&marked);
+        assert_eq!(rbsp[SPS_CONSTRAINT_BYTE], PROGRESSIVE_FRAME_ONLY);
+        // The level and what follows are untouched.
+        assert_eq!(&marked[marked.len() - 3..], &[0x78, 0xa0, 0x06]);
+    }
+
+    #[test]
+    fn escaping_round_trips() {
+        for nal in [EXYNOS_VPS, LINUX_VPS, EXYNOS_SPS_HEAD] {
+            assert_eq!(escape(&unescape(nal)), nal);
+        }
+    }
+
+    #[test]
+    fn hevc_split_marks_the_parameter_sets() {
+        let mut stream = Vec::new();
+        for nal in [EXYNOS_VPS, &[0x26, 0x01, 0xaf][..]] {
+            stream.extend_from_slice(&START_CODE);
+            stream.extend_from_slice(nal);
+        }
+        let au = split_access_unit(&stream, VideoCodec::Hevc);
+        assert_eq!(&au.parameter_sets[..4], &START_CODE);
+        assert_eq!(&au.parameter_sets[4..], LINUX_VPS);
+    }
 
     fn annexb(nals: &[&[u8]]) -> Vec<u8> {
         let mut out = Vec::new();
