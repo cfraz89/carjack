@@ -11,6 +11,7 @@ import android.opengl.GLES11Ext;
 import android.opengl.GLES20;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.SystemClock;
 import android.view.Surface;
 
 import java.nio.ByteBuffer;
@@ -19,8 +20,9 @@ import java.nio.FloatBuffer;
 import java.util.concurrent.CountDownLatch;
 
 /**
- * Draws the display's frames into part of the encoder's input, for an accessory that keeps a strip
- * of its panel for itself: the stream covers the whole panel, the picture only the view.
+ * Draws the display's frames into the encoder's input: into part of it, for an accessory that keeps
+ * a strip of its panel for itself (the stream covers the whole panel, the picture only the view),
+ * and again on a still screen, which would otherwise leave the encoder with nothing to send.
  */
 final class Relay {
     private static final String VERTEX = ""
@@ -55,6 +57,10 @@ final class Relay {
     private Surface input;
     private int program;
     private final float[] matrix = new float[16];
+    private static final long IDLE_REDRAW_MS = 500;
+    private boolean haveFrame;
+    private long lastDrawMs;
+    private long lastTimestampNs;
 
     Relay(Surface output, int width, int height, int viewX, int viewY, int viewWidth,
             int viewHeight) {
@@ -76,6 +82,7 @@ final class Relay {
             setUp();
             ready.countDown();
         });
+        handler.postDelayed(idleRedraw, IDLE_REDRAW_MS);
         try {
             ready.await();
         } catch (InterruptedException e) {
@@ -130,6 +137,33 @@ final class Relay {
         }
         texture.updateTexImage();
         texture.getTransformMatrix(matrix);
+        haveFrame = true;
+        render(texture.getTimestamp());
+    }
+
+    /**
+     * A still screen stops producing frames, and the encoder repeats the last one only a few
+     * times; a unit left without frames shows black. So the last frame is drawn again when the
+     * display has been idle a while.
+     */
+    private final Runnable idleRedraw = new Runnable() {
+        @Override
+        public void run() {
+            if (texture == null) {
+                return;
+            }
+            if (haveFrame && SystemClock.uptimeMillis() - lastDrawMs >= IDLE_REDRAW_MS) {
+                render(System.nanoTime());
+            }
+            handler.postDelayed(this, IDLE_REDRAW_MS);
+        }
+    };
+
+    private void render(long timestampNs) {
+        // Strictly increasing, whether the time came from the display or the clock.
+        timestampNs = Math.max(timestampNs, lastTimestampNs + 1);
+        lastTimestampNs = timestampNs;
+        lastDrawMs = SystemClock.uptimeMillis();
         GLES20.glViewport(0, 0, width, height);
         GLES20.glClearColor(0, 0, 0, 1);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
@@ -138,7 +172,7 @@ final class Relay {
         GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "tex"), 1, false, matrix,
                 0);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
-        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, texture.getTimestamp());
+        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, timestampNs);
         EGL14.eglSwapBuffers(eglDisplay, eglSurface);
     }
 

@@ -76,12 +76,9 @@ final class ScreenStream {
         Surface input = codec.createInputSurface();
         codec.start();
 
-        Surface target = input;
-        boolean fills = viewX == 0 && viewY == 0 && viewWidth == width && viewHeight == height;
-        if (!fills) {
-            relay = new Relay(input, width, height, viewX, viewY, viewWidth, viewHeight);
-            target = relay.start();
-        }
+        // Always through the relay: besides placing the view, it keeps a still screen sending.
+        relay = new Relay(input, width, height, viewX, viewY, viewWidth, viewHeight);
+        Surface target = relay.start();
         closeDisplay = Variant.openDisplay(context, viewWidth, viewHeight, density, target);
         lastOutput = android.os.SystemClock.uptimeMillis();
         watchdogHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS);
@@ -159,8 +156,8 @@ final class ScreenStream {
     }
 
     /**
-     * The encoder repeats a still frame every {@link #REPEAT_FRAME_US}, so a long silence means
-     * the pipeline has wedged; the session ends rather than leaving the unit on a frozen picture.
+     * The relay redraws a still screen twice a second, so a long silence means the pipeline has
+     * wedged; the session ends rather than leaving the unit on a frozen picture.
      */
     private final Runnable watchdog = new Runnable() {
         @Override
