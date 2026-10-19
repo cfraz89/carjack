@@ -23,6 +23,8 @@ final class ScreenStream {
     private static final int SMALLEST_WIDTH_DP = 480;
     private static final long REPEAT_FRAME_US = 100_000;
     private static final int DEFAULT_BITRATE = 8_000_000;
+    /** What the Linux build gives the CFMOTO, which shows its HEVC: 3 Mbit/s VBR, IDR every 2 s. */
+    private static final int HEVC_BITRATE = 3_000_000;
     private static final long STALL_MS = 10_000;
     private static final long WATCHDOG_INTERVAL_MS = 2_000;
 
@@ -54,10 +56,11 @@ final class ScreenStream {
         MediaFormat format = MediaFormat.createVideoFormat(mime, width, height);
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
-        format.setInteger(MediaFormat.KEY_BIT_RATE, intSetting("bitrate", DEFAULT_BITRATE));
+        format.setInteger(MediaFormat.KEY_BIT_RATE,
+                intSetting("bitrate", hevc ? HEVC_BITRATE : DEFAULT_BITRATE));
         format.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
         format.setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, fps);
-        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10);
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, hevc ? 2 : 10);
         // A still screen still has to answer keyframe requests.
         format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, REPEAT_FRAME_US);
         format.setInteger(MediaFormat.KEY_PRIORITY, 0);
@@ -85,10 +88,10 @@ final class ScreenStream {
     }
 
     /**
-     * Ask for what head units decode: HEVC Main, and H.264 Constrained Baseline (else Baseline)
-     * rather than the High profile phone encoders default to, at a constant bitrate. A unit
-     * handed a profile it can't decode stops reading the stream. Each only where the encoder
-     * offers it.
+     * Ask for what head units decode: HEVC Main at a variable bitrate, as the Linux build sends
+     * it, and H.264 Constrained Baseline (else Baseline) at a constant one, rather than the High
+     * profile phone encoders default to. A unit handed a profile it can't decode stops reading the
+     * stream. Each only where the encoder offers it.
      */
     private static void applyProfile(MediaFormat format,
             MediaCodecInfo.CodecCapabilities caps, boolean hevc) {
@@ -105,11 +108,12 @@ final class ScreenStream {
                 }
             }
         }
+        int mode = hevc
+                ? MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
+                : MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR;
         MediaCodecInfo.EncoderCapabilities encoder = caps.getEncoderCapabilities();
-        if (encoder != null && encoder.isBitrateModeSupported(
-                MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)) {
-            format.setInteger(MediaFormat.KEY_BITRATE_MODE,
-                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+        if (encoder != null && encoder.isBitrateModeSupported(mode)) {
+            format.setInteger(MediaFormat.KEY_BITRATE_MODE, mode);
         }
     }
 

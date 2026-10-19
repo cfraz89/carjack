@@ -80,6 +80,10 @@ impl SessionCtl {
             let Some(sink) = video.as_mut() else { return };
             let au = split_access_unit(data, sink.codec);
             if !au.parameter_sets.is_empty() {
+                if au.parameter_sets != sink.parameter_sets {
+                    // To set against a reference stream when a unit shows nothing.
+                    tracing::info!(sets = ?au.parameter_sets, "Encoder parameter sets");
+                }
                 sink.parameter_sets = au.parameter_sets;
             }
             if codec_config || au.data.is_empty() {
