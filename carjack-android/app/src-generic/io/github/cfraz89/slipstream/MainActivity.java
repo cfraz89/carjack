@@ -30,6 +30,7 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_SHIZUKU = 4;
     private static final int DISCOVERABLE_SECONDS = 300;
     private static final String SHIZUKU_PACKAGE = "moe.shizuku.privileged.api";
+    private static final String TAILSCALE_PACKAGE = "com.tailscale.ipn";
 
     private static final String[] PERMISSIONS = {
         Manifest.permission.BLUETOOTH_CONNECT,
@@ -47,6 +48,7 @@ public final class MainActivity extends Activity {
 
     private Ui ui;
     private LinearLayout setup;
+    private LinearLayout pairCard;
     private LinearLayout powerCard;
     private Switch power;
     private TextView status;
@@ -81,6 +83,10 @@ public final class MainActivity extends Activity {
 
         setup = ui.card(page, R.color.sl_tertiary_container);
         setup.setPadding(ui.dp(20), ui.dp(16), ui.dp(16), ui.dp(16));
+
+        pairCard = ui.card(page, R.color.sl_primary_container);
+        pairCard.setPadding(ui.dp(20), ui.dp(16), ui.dp(16), ui.dp(16));
+        buildPairCard();
 
         powerCard = ui.card(page, R.color.sl_primary_container);
         powerCard.setPadding(0, ui.dp(8), 0, ui.dp(8));
@@ -155,10 +161,50 @@ public final class MainActivity extends Activity {
         autoSetUp();
     }
 
+    /** First-time pairing, step by step: the unit searches, the phone is found, codes match. */
+    private void buildPairCard() {
+        LinearLayout heading = new LinearLayout(this);
+        heading.setGravity(Gravity.CENTER_VERTICAL);
+        heading.addView(ui.icon(R.drawable.ic_sl_bluetooth, R.color.sl_on_primary_container, 20));
+        TextView words = ui.text("Pair your head unit", 16, R.color.sl_on_primary_container);
+        words.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        words.setPadding(ui.dp(10), 0, 0, 0);
+        heading.addView(words);
+        pairCard.addView(heading);
+        String[] steps = {
+            "On the unit, open its phone or Bluetooth menu and add a device",
+            "Make this phone visible, so the unit can find it",
+            "Pick this phone on the unit, and confirm the code on both",
+        };
+        for (int i = 0; i < steps.length; i++) {
+            LinearLayout line = new LinearLayout(this);
+            line.setPadding(0, ui.dp(10), 0, 0);
+            TextView number = ui.text(Integer.toString(i + 1), 13, R.color.sl_on_tertiary);
+            number.setGravity(Gravity.CENTER);
+            number.setBackground(ui.shape(R.color.sl_tertiary, 11));
+            line.addView(number, new LinearLayout.LayoutParams(ui.dp(22), ui.dp(22)));
+            TextView step = ui.text(steps[i], 15, R.color.sl_on_primary_container);
+            step.setPadding(ui.dp(12), 0, 0, 0);
+            line.addView(step);
+            pairCard.addView(line);
+        }
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setPadding(0, ui.dp(14), 0, 0);
+        buttons.addView(ui.button("Make visible", true, v -> startActivity(
+                new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                        .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION,
+                                DISCOVERABLE_SECONDS))));
+        buttons.addView(ui.button("Bluetooth settings", false, v -> openBluetoothSettings()));
+        pairCard.addView(buttons);
+    }
+
     private void showPower() {
         boolean on = BootReceiver.isOn(this);
         power.setChecked(on);
-        status.setText(on ? Variant.setting(this, "status", "Waiting for the unit") : "Off");
+        String waiting = Variant.prefs(this).getBoolean("linked", false) ? "Waiting for the unit"
+                : "Waiting for the unit: turn it on, and it connects by itself";
+        String current = Variant.setting(this, "status", "Waiting for the unit");
+        status.setText(!on ? "Off" : current.equals("Waiting for the unit") ? waiting : current);
         powerCard.setBackground(ui.shape(on ? R.color.sl_primary_container
                 : R.color.sl_surface_container_high, 28));
         boolean showRetry = on && Variant.prefs(this).getBoolean("retryable", false);
@@ -236,14 +282,22 @@ public final class MainActivity extends Activity {
                         new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)));
             }
         }
-        if (permissionsGranted() && bluetoothOn() && unitAddresses.size() <= 1) {
-            step("No head unit is paired yet", "Pair", v -> openBluetoothSettings());
-        }
+        // Pairing has a card of its own, once there's Bluetooth to pair with.
+        pairCard.setVisibility(permissionsGranted() && bluetoothOn() && unitAddresses.size() <= 1
+                ? View.VISIBLE : View.GONE);
         // An app inside a VPN can't reach the unit's Wi-Fi: the stream times out.
         if (inVpn()) {
-            step("A VPN is on. Exclude Slipstream from it (Tailscale: split tunneling), or turn"
-                    + " it off", "VPN", v -> startActivity(
-                            new Intent(android.provider.Settings.ACTION_VPN_SETTINGS)));
+            // Excluding an app is the VPN app's own setting; Android's VPN page only has on/off.
+            Intent tailscale = getPackageManager().getLaunchIntentForPackage(TAILSCALE_PACKAGE);
+            if (tailscale != null) {
+                step("Tailscale blocks the unit's Wi-Fi. In Tailscale's settings, exclude"
+                        + " Slipstream under split tunneling, or turn Tailscale off",
+                        "Tailscale", v -> startActivity(tailscale));
+            } else {
+                step("A VPN is on, which blocks the unit's Wi-Fi. Exclude Slipstream in the VPN"
+                        + " app's settings, or turn it off", "VPN", v -> startActivity(
+                                new Intent(android.provider.Settings.ACTION_VPN_SETTINGS)));
+            }
         }
         if (setup.getChildCount() > 0) {
             LinearLayout heading = new LinearLayout(this);
