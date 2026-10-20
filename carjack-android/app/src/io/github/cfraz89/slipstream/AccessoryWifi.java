@@ -24,7 +24,7 @@ import java.nio.file.Paths;
 
 /**
  * Joins the accessory's access point and routes this process over it. Where the variant can
- * (Shizuku), it becomes the main WiFi, so the radio isn't time-slicing with another network on
+ * (Shizuku), the phone's WiFi switches over to it, so the radio isn't time-slicing with another network on
  * another channel; the phone's own traffic stays on mobile data, its default while this network
  * has no internet. Otherwise it's a local-only second network: with STA+STA concurrency the main
  * connection stays up, elsewhere the framework moves its one radio over. Either way only this
@@ -48,7 +48,7 @@ final class AccessoryWifi {
     private WifiManager.MulticastLock multicast;
     private ConnectivityManager.NetworkCallback callback;
     private Result pending;
-    /** The unit's AP while it's the main WiFi, for leave() to undo. */
+    /** The unit's AP while the phone's WiFi is switched over to it, for leave() to undo. */
     private String primarySsid;
     /** Shell calls, in order: a leave must never land after the next join. */
     private static final java.util.concurrent.ExecutorService SHELL =
@@ -67,7 +67,7 @@ final class AccessoryWifi {
         if (!wifi.isWifiEnabled()) {
             wifi.setWifiEnabled(true);
         }
-        // The main WiFi where the variant can make it so, else a local-only second network.
+        // The phone's WiFi switched over where the variant can, else a local-only second network.
         SHELL.execute(() -> {
             boolean primary = Variant.joinPrimary(ssid, passphrase);
             handler.post(() -> {
@@ -77,7 +77,7 @@ final class AccessoryWifi {
                     }
                 } else if (primary) {
                     primarySsid = ssid;
-                    Log.i(TAG, "On " + ssid + " as the main WiFi");
+                    Log.i(TAG, "Switched the phone's WiFi over to " + ssid);
                     request(new NetworkRequest.Builder()
                             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -108,7 +108,7 @@ final class AccessoryWifi {
                 Log.w(TAG, "Ignoring the accessory's BSSID " + bssid);
             }
         }
-        Log.i(TAG, "Joining " + ssid + " alongside the main WiFi");
+        Log.i(TAG, "Joining " + ssid + " alongside the phone's own WiFi");
         request(new NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -117,7 +117,7 @@ final class AccessoryWifi {
     }
 
     /**
-     * Holds {@code request} for the session: for the main WiFi, it also keeps the framework from
+     * Holds {@code request} for the session: switched over, it also keeps the framework from
      * tearing down a network nothing else wants, having no internet.
      */
     private void request(NetworkRequest request) {

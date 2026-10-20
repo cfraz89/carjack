@@ -30,7 +30,7 @@ interface IDisplayService {
     String interfaceMac(String iface) = 9;
 
     /**
-     * Join {@code ssid} as the phone's main WiFi, with switching away locked while connected;
+     * Switch the phone's WiFi over to {@code ssid}, with switching away locked while connected;
      * true once on it.
      */
     boolean joinPrimary(String ssid, String passphrase) = 10;

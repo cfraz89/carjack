@@ -149,7 +149,7 @@ final class Variant {
     }
 
     /**
-     * The unit's AP as the main WiFi, through Shizuku: one channel for the radio rather than two
+     * The phone's WiFi switched over to the unit's AP, through Shizuku: one channel for the radio rather than two
      * time-sliced. False where it can't, for the local-only request instead. Blocks.
      */
     static boolean joinPrimary(String ssid, String passphrase) {

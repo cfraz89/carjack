@@ -192,7 +192,7 @@ public final class DisplayService extends IDisplayService.Stub {
     private static final long PRIMARY_POLL_MS = 500;
 
     /**
-     * The unit's AP as the main connection, so the radio stays on its channel rather than
+     * The phone's WiFi switched over to the unit's AP, so the radio stays on its channel rather than
      * time-slicing with home WiFi on another. Switching to another saved network while connected
      * is locked out (the associated network selection override); autojoin stays off for it, so
      * it's never joined outside a session.
@@ -214,7 +214,7 @@ public final class DisplayService extends IDisplayService.Stub {
             }
             android.os.SystemClock.sleep(PRIMARY_POLL_MS);
         }
-        Log.w(TAG, "Not on " + ssid + " as the main WiFi after " + PRIMARY_JOIN_MS + "ms");
+        Log.w(TAG, "WiFi not switched over to " + ssid + " after " + PRIMARY_JOIN_MS + "ms");
         leavePrimary(ssid);
         return false;
     }
