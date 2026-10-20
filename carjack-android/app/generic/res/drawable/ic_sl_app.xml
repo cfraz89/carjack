@@ -15,11 +15,11 @@
     <path android:fillColor="#0B1E3A"
         android:pathData="M30,43 h48 a5,5 0,0 1,5 5 v24 a5,5 0,0 1,-5 5 h-48 a5,5 0,0 1,-5 -5 v-24 a5,5 0,0 1,5 -5 z" />
     <path android:strokeColor="#FF5FA2" android:strokeWidth="4" android:strokeLineCap="round"
-        android:pathData="M31,70 C40,70 44,64 52,62 C60,60 66,64 77,57" />
+        android:pathData="M32,70 L68,63" />
     <path android:strokeColor="#FF5FA2" android:strokeWidth="3.5" android:strokeLineCap="round"
         android:strokeAlpha="0.8"
-        android:pathData="M31,60 C40,60 44,54 52,52 C60,50 66,54 77,47" />
+        android:pathData="M38,61 L76,53.5" />
     <path android:strokeColor="#FF5FA2" android:strokeWidth="3" android:strokeLineCap="round"
         android:strokeAlpha="0.6"
-        android:pathData="M37,51 C42,51 45,47 51,45.5" />
+        android:pathData="M45,53 L72,47.5" />
 </vector>

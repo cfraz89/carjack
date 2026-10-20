@@ -7,7 +7,7 @@
     <path android:strokeColor="#FFFFFFFF" android:strokeWidth="9"
         android:pathData="M20,20 h68 a12,12 0,0 1,12 12 v44 a12,12 0,0 1,-12 12 h-68 a12,12 0,0 1,-12 -12 v-44 a12,12 0,0 1,12 -12 z" />
     <path android:strokeColor="#FFFFFFFF" android:strokeWidth="9" android:strokeLineCap="round"
-        android:pathData="M24,70 C38,70 44,60 56,57 C68,54 74,60 86,50" />
+        android:pathData="M26,70 L70,61" />
     <path android:strokeColor="#FFFFFFFF" android:strokeWidth="8" android:strokeLineCap="round"
-        android:pathData="M24,50 C38,50 44,40 56,37 C68,34 74,40 86,30" />
+        android:pathData="M38,50 L82,41" />
 </vector>
