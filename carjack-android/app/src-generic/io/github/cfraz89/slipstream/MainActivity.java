@@ -239,6 +239,12 @@ public final class MainActivity extends Activity {
         if (permissionsGranted() && bluetoothOn() && unitAddresses.size() <= 1) {
             step("No head unit is paired yet", "Pair", v -> openBluetoothSettings());
         }
+        // An app inside a VPN can't reach the unit's Wi-Fi: the stream times out.
+        if (inVpn()) {
+            step("A VPN is on. Exclude Slipstream from it (Tailscale: split tunneling), or turn"
+                    + " it off", "VPN", v -> startActivity(
+                            new Intent(android.provider.Settings.ACTION_VPN_SETTINGS)));
+        }
         if (setup.getChildCount() > 0) {
             LinearLayout heading = new LinearLayout(this);
             heading.setGravity(Gravity.CENTER_VERTICAL);
@@ -336,6 +342,14 @@ public final class MainActivity extends Activity {
     private boolean bluetoothOn() {
         BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
         return adapter != null && adapter.isEnabled();
+    }
+
+    /** This app's traffic goes through a VPN. */
+    private boolean inVpn() {
+        android.net.ConnectivityManager cm =
+                getSystemService(android.net.ConnectivityManager.class);
+        android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(cm.getActiveNetwork());
+        return caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN);
     }
 
     private static boolean pingShizuku() {
