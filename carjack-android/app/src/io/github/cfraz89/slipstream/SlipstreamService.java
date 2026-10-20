@@ -309,14 +309,18 @@ public final class SlipstreamService extends Service {
     public void onDestroy() {
         handler.removeCallbacks(watch);
         handler.post(() -> {
-            if (session != null) {
-                session.stop();
+            // Cleared first, so the session's end isn't taken for a dropped one and relinked.
+            Session stopping = session;
+            session = null;
+            if (stopping != null) {
+                stopping.stop();
             }
             bluetooth.stop();
             wifi.leave();
+            // After leave(), so the variant's own teardown follows the WiFi being handed back.
+            Variant.onServiceDestroyed(this);
             thread.quitSafely();
         });
-        Variant.onServiceDestroyed(this);
         super.onDestroy();
     }
 

@@ -74,16 +74,26 @@ final class Variant {
 
     /**
      * Stop means stopped: once the teardown has had its moment the process ends, taking the
-     * native session, the listeners and any network request with it.
+     * native session, the listeners and any network request with it - unless one of its screens
+     * is up, which would look like a crash. Shizuku goes only once the WiFi is handed back.
      */
     static void onServiceDestroyed(Service service) {
-        ShizukuDisplay.unbind();
-        new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            if (logcat != null) {
-                logcat.destroy();
-            }
-            Process.killProcess(Process.myPid());
-        }, STOP_GRACE_MS);
+        AccessoryWifi.afterShell(() -> {
+            ShizukuDisplay.unbind();
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                android.app.ActivityManager.RunningAppProcessInfo state =
+                        new android.app.ActivityManager.RunningAppProcessInfo();
+                android.app.ActivityManager.getMyMemoryState(state);
+                if (state.importance
+                        <= android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE) {
+                    return;
+                }
+                if (logcat != null) {
+                    logcat.destroy();
+                }
+                Process.killProcess(Process.myPid());
+            }, STOP_GRACE_MS);
+        });
     }
 
     static String setting(Context context, String key, String fallback) {

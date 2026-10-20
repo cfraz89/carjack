@@ -237,6 +237,11 @@ final class AccessoryWifi {
         }
     }
 
+    /** Runs {@code then} once the shell calls queued so far are done. */
+    static void afterShell(Runnable then) {
+        SHELL.execute(then);
+    }
+
     /** Unlocks network switching, which a session cut short (a crash) may have left locked. */
     static void reset() {
         SHELL.execute(() -> Variant.leavePrimary(null));
