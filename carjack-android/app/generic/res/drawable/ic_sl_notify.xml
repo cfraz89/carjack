@@ -1,12 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The status bar's cut of the app icon: one colour, no disc, heavier lines; the system tints it. -->
+<!-- The status bar's cut of the app icon: fairing, screen and two wind lines in one colour,
+     filling the frame; the system tints it. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp" android:height="24dp"
     android:viewportWidth="108" android:viewportHeight="108">
     <path android:fillColor="#FFFFFFFF"
-        android:pathData="M30,98 C40,78 58,58 82,42 C86,39 91,44 88,48 C70,62 58,80 48,100 C44,107 26,105 30,98 Z" />
+        android:pathData="M30,64 C42,50 56,40 80,32 C85,30 88,35 84,38 C70,46 62,54 56,62 Z" />
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M2,82 C10,70 24,62 40,62 L58,66 C72,66 88,66 104,70 C107,72 107,78 104,79 C90,80 78,84 70,92 L66,96 C48,98 28,96 12,90 C4,88 0,86 2,82 Z" />
     <path android:strokeColor="#FFFFFFFF" android:strokeWidth="9" android:strokeLineCap="round"
-        android:pathData="M6,74 C22,74 32,72 44,64 C56,56 64,44 76,34 C84,28 92,26 102,26" />
+        android:pathData="M4,54 C18,48 30,44 44,42 C60,40 72,26 90,18 C96,16 100,16 104,17" />
     <path android:strokeColor="#FFFFFFFF" android:strokeWidth="8" android:strokeLineCap="round"
-        android:pathData="M14,50 C28,50 36,46 46,38 C56,30 64,20 74,14 C80,10 88,9 96,9" />
+        android:pathData="M10,32 C22,26 34,22 48,20 C60,18 68,10 76,5" />
 </vector>
