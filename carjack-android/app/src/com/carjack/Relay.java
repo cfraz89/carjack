@@ -56,6 +56,8 @@ final class Relay {
     private SurfaceTexture texture;
     private Surface input;
     private int program;
+    /** GL reads the vertices from here at every draw, so it must outlive setUp. */
+    private FloatBuffer quad;
     private final float[] matrix = new float[16];
     private static final long IDLE_REDRAW_MS = 500;
     private boolean haveFrame;
@@ -125,7 +127,7 @@ final class Relay {
         texture.setOnFrameAvailableListener(t -> draw(), handler);
         input = new Surface(texture);
 
-        FloatBuffer quad = ByteBuffer.allocateDirect(QUAD.length * 4)
+        quad = ByteBuffer.allocateDirect(QUAD.length * 4)
                 .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD);
         quad.position(0);
         int pos = GLES20.glGetAttribLocation(program, "pos");
