@@ -1,25 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The app icon: a dash display under its cowl on race blue, pink wind streaming across the
-     glass. -->
+<!-- The app icon: a dash display on race blue, pink wind streaming across its glass. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
     <path android:fillColor="#005FAF"
         android:pathData="M54,4a50,50 0,1 1,0 100a50,50 0,1 1,0 -100z" />
-    <!-- The cowl. -->
-    <path android:fillColor="#FFFFFF" android:fillAlpha="0.45"
-        android:pathData="M16,40 C22,26 86,26 92,40 L88,42 C80,33 28,33 20,42 Z" />
     <!-- Bezel, then glass. -->
     <path android:fillColor="#FFFFFF"
-        android:pathData="M29,38 h50 a9,9 0,0 1,9 9 v26 a9,9 0,0 1,-9 9 h-50 a9,9 0,0 1,-9 -9 v-26 a9,9 0,0 1,9 -9 z" />
+        android:pathData="M27,29 h54 a10,10 0,0 1,10 10 v30 a10,10 0,0 1,-10 10 h-54 a10,10 0,0 1,-10 -10 v-30 a10,10 0,0 1,10 -10 z" />
     <path android:fillColor="#0B1E3A"
-        android:pathData="M30,43 h48 a5,5 0,0 1,5 5 v24 a5,5 0,0 1,-5 5 h-48 a5,5 0,0 1,-5 -5 v-24 a5,5 0,0 1,5 -5 z" />
+        android:pathData="M28,34 h52 a6,6 0,0 1,6 6 v28 a6,6 0,0 1,-6 6 h-52 a6,6 0,0 1,-6 -6 v-28 a6,6 0,0 1,6 -6 z" />
     <path android:strokeColor="#FF5FA2" android:strokeWidth="4" android:strokeLineCap="round"
-        android:pathData="M32,70 L68,63" />
+        android:pathData="M30,66 C40,66 44,59 54,58 C64,57 68,62 78,56" />
     <path android:strokeColor="#FF5FA2" android:strokeWidth="3.5" android:strokeLineCap="round"
         android:strokeAlpha="0.8"
-        android:pathData="M38,61 L76,53.5" />
+        android:pathData="M30,57 C40,57 44,50 54,49 C64,48 68,53 78,47" />
     <path android:strokeColor="#FF5FA2" android:strokeWidth="3" android:strokeLineCap="round"
         android:strokeAlpha="0.6"
-        android:pathData="M45,53 L72,47.5" />
+        android:pathData="M36,48 C42,48 46,43 54,42 C58,41.5 61,42 64,41" />
 </vector>
