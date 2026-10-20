@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.carjack">
+    <!-- motopod's preinstalled build keeps this ID; the classes are the generic app's. -->
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -40,7 +41,7 @@
         android:extractNativeLibs="false">
 
         <receiver
-            android:name=".BootReceiver"
+            android:name="io.github.cfraz89.slipstream.BootReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
@@ -48,7 +49,7 @@
         </receiver>
 
         <service
-            android:name=".CarjackService"
+            android:name="io.github.cfraz89.slipstream.SlipstreamService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
     </application>

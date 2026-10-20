@@ -1,25 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- DeviceDefault for Material You's widgets and type, recoloured to carjack's palette. -->
-    <style name="CarjackApp" parent="@android:style/Theme.DeviceDefault.DayNight">
+    <!-- DeviceDefault for Material You's widgets and type, recoloured to Slipstream's palette. -->
+    <style name="SlipstreamApp" parent="@android:style/Theme.DeviceDefault.DayNight">
         <item name="android:windowActionBar">false</item>
         <item name="android:windowNoTitle">true</item>
-        <item name="android:windowBackground">@color/cj_surface</item>
-        <item name="android:colorBackground">@color/cj_surface</item>
-        <item name="android:colorPrimary">@color/cj_primary</item>
-        <item name="android:colorAccent">@color/cj_primary</item>
-        <item name="android:colorControlActivated">@color/cj_primary</item>
-        <item name="android:textColorPrimary">@color/cj_on_surface</item>
-        <item name="android:textColorSecondary">@color/cj_on_surface_variant</item>
+        <item name="android:windowBackground">@color/sl_surface</item>
+        <item name="android:colorBackground">@color/sl_surface</item>
+        <item name="android:colorPrimary">@color/sl_primary</item>
+        <item name="android:colorAccent">@color/sl_primary</item>
+        <item name="android:colorControlActivated">@color/sl_primary</item>
+        <item name="android:textColorPrimary">@color/sl_on_surface</item>
+        <item name="android:textColorSecondary">@color/sl_on_surface_variant</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:alertDialogTheme">@style/CarjackApp.Dialog</item>
+        <item name="android:alertDialogTheme">@style/SlipstreamApp.Dialog</item>
     </style>
 
     <!-- Dark in values-night. -->
-    <style name="CarjackApp.Dialog" parent="@android:style/Theme.DeviceDefault.Light.Dialog.Alert">
-        <item name="android:colorAccent">@color/cj_primary</item>
-        <item name="android:colorControlActivated">@color/cj_primary</item>
-        <item name="android:colorBackground">@color/cj_surface_container_high</item>
+    <style name="SlipstreamApp.Dialog" parent="@android:style/Theme.DeviceDefault.Light.Dialog.Alert">
+        <item name="android:colorAccent">@color/sl_primary</item>
+        <item name="android:colorControlActivated">@color/sl_primary</item>
+        <item name="android:colorBackground">@color/sl_surface_container_high</item>
     </style>
 </resources>

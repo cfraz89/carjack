@@ -1,7 +1,7 @@
-// carjack's Android app, in two builds from one source tree:
+// The Android app over the carjack core, in two builds from one source tree:
 //  - Carjack: platform-signed and preinstalled (motopod), so it gets its permissions and hidden
 //    APIs without anyone at the screen. src-platform/.
-//  - CarjackGeneric: an ordinary app for any phone running Shizuku, on the public SDK.
+//  - Slipstream: an ordinary app for any phone running Shizuku, on the public SDK.
 //    src-generic/.
 // libcarjack_android.so comes from `just android` in the carjack repo, staged beside this file.
 
@@ -83,7 +83,7 @@ android_library {
 }
 
 android_app {
-    name: "CarjackGeneric",
+    name: "Slipstream",
     srcs: [
         "src/**/*.java",
         "src-generic/**/*.java",

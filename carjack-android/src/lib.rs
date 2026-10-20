@@ -1,6 +1,6 @@
 //! carjack's CarPlay core for the Android app. The app owns Bluetooth, WiFi, the screen and
 //! input; this runs iAP2, the CarPlay handshake and AirPlay between them. The JNI surface is
-//! `com.carjack.Native`.
+//! `io.github.cfraz89.slipstream.Native`.
 
 mod logcat;
 pub mod session;
@@ -137,7 +137,7 @@ fn string(env: &mut JNIEnv, s: &JString) -> Option<String> {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_carjack_Native_init(
+pub extern "system" fn Java_io_github_cfraz89_slipstream_Native_init(
     mut env: JNIEnv,
     _class: JClass,
     homekit_path: JString,
@@ -153,7 +153,7 @@ pub extern "system" fn Java_com_carjack_Native_init(
 /// Start a session on `iap_fd`, the app's end of its RFCOMM relay; ownership passes here.
 /// `codec` is 0 for whatever the accessory implies, 1 for H264, 2 for HEVC.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_carjack_Native_startSession(
+pub extern "system" fn Java_io_github_cfraz89_slipstream_Native_startSession(
     mut env: JNIEnv,
     _class: JClass,
     callbacks: JObject,
@@ -209,7 +209,7 @@ pub extern "system" fn Java_com_carjack_Native_startSession(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_carjack_Native_stopSession(
+pub extern "system" fn Java_io_github_cfraz89_slipstream_Native_stopSession(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -222,7 +222,7 @@ pub extern "system" fn Java_com_carjack_Native_stopSession(
 /// `iface` null means the join failed, with `detail` saying why; otherwise `detail` is the MAC
 /// the interface joined with.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_carjack_Native_wifiJoined(
+pub extern "system" fn Java_io_github_cfraz89_slipstream_Native_wifiJoined(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -240,7 +240,7 @@ pub extern "system" fn Java_com_carjack_Native_wifiJoined(
 
 /// One encoder output buffer. Blocks while the accessory is behind.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_carjack_Native_pushFrame(
+pub extern "system" fn Java_io_github_cfraz89_slipstream_Native_pushFrame(
     env: JNIEnv,
     _class: JClass,
     handle: jlong,

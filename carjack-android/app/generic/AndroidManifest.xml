@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The generic build: an ordinary app for any phone running Shizuku. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.carjack">
+    package="io.github.cfraz89.slipstream">
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
@@ -38,9 +38,9 @@
     </queries>
 
     <application
-        android:label="carjack"
-        android:theme="@style/CarjackApp"
-        android:icon="@drawable/ic_cj_app"
+        android:label="Slipstream"
+        android:theme="@style/SlipstreamApp"
+        android:icon="@drawable/ic_sl_app"
         android:extractNativeLibs="false">
 
         <activity
@@ -67,35 +67,35 @@
             </intent-filter>
         </receiver>
 
-        <!-- The launcher (launcher/), which carjack opens on the head unit's display by
+        <!-- The launcher (launcher/), which Slipstream opens on the head unit's display by
              component: not a home app on the phone. -->
         <activity
-            android:name="com.carjack.launcher.HomeActivity"
+            android:name="io.github.cfraz89.slipstream.launcher.HomeActivity"
             android:exported="true"
-            android:theme="@style/CarjackTheme.Home"
+            android:theme="@style/SlipstreamTheme.Home"
             android:launchMode="singleTask"
             android:stateNotNeeded="true"
             android:excludeFromRecents="true"
             android:clearTaskOnLaunch="true"
             android:configChanges="keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode" />
         <activity
-            android:name="com.carjack.launcher.AllAppsActivity"
+            android:name="io.github.cfraz89.slipstream.launcher.AllAppsActivity"
             android:exported="false"
-            android:theme="@style/CarjackTheme.Panel" />
+            android:theme="@style/SlipstreamTheme.Panel" />
         <activity
-            android:name="com.carjack.launcher.SettingsActivity"
+            android:name="io.github.cfraz89.slipstream.launcher.SettingsActivity"
             android:exported="false"
-            android:theme="@style/CarjackTheme.Panel.Full" />
+            android:theme="@style/SlipstreamTheme.Panel.Full" />
 
         <service
-            android:name=".CarjackService"
+            android:name=".SlipstreamService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
-        <!-- Shizuku's handshake: how its server hands carjack a binder. -->
+        <!-- Shizuku's handshake: how its server hands Slipstream a binder. -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="com.carjack.shizuku"
+            android:authorities="io.github.cfraz89.slipstream.shizuku"
             android:enabled="true"
             android:exported="true"
             android:multiprocess="false"

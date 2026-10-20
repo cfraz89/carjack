@@ -1,21 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Material 3 roles from two seeds, CFMOTO's race blue (primary) and pink (tertiary); light tones
-     here, dark in values-night. cj_ keeps them apart from the launcher's own colours. -->
+     here, dark in values-night. sl_ keeps them apart from the launcher's own colours. -->
 <resources>
-    <color name="cj_primary">#005FAF</color>
-    <color name="cj_on_primary">#FFFFFF</color>
-    <color name="cj_primary_container">#D4E3FF</color>
-    <color name="cj_on_primary_container">#001C3A</color>
-    <color name="cj_tertiary">#B90063</color>
-    <color name="cj_on_tertiary">#FFFFFF</color>
-    <color name="cj_tertiary_container">#FFD9E2</color>
-    <color name="cj_on_tertiary_container">#3F001A</color>
-    <color name="cj_surface">#F9F9FF</color>
-    <color name="cj_surface_container">#EDEDF4</color>
-    <color name="cj_surface_container_high">#E7E8EE</color>
-    <color name="cj_surface_container_highest">#E1E2E8</color>
-    <color name="cj_on_surface">#1A1C20</color>
-    <color name="cj_on_surface_variant">#43474E</color>
-    <color name="cj_outline">#74777F</color>
-    <color name="cj_outline_variant">#C3C6CF</color>
+    <color name="sl_primary">#005FAF</color>
+    <color name="sl_on_primary">#FFFFFF</color>
+    <color name="sl_primary_container">#D4E3FF</color>
+    <color name="sl_on_primary_container">#001C3A</color>
+    <color name="sl_tertiary">#B90063</color>
+    <color name="sl_on_tertiary">#FFFFFF</color>
+    <color name="sl_tertiary_container">#FFD9E2</color>
+    <color name="sl_on_tertiary_container">#3F001A</color>
+    <color name="sl_surface">#F9F9FF</color>
+    <color name="sl_surface_container">#EDEDF4</color>
+    <color name="sl_surface_container_high">#E7E8EE</color>
+    <color name="sl_surface_container_highest">#E1E2E8</color>
+    <color name="sl_on_surface">#1A1C20</color>
+    <color name="sl_on_surface_variant">#43474E</color>
+    <color name="sl_outline">#74777F</color>
+    <color name="sl_outline_variant">#C3C6CF</color>
 </resources>

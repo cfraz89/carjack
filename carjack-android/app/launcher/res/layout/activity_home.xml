@@ -27,7 +27,7 @@
             android:useDefaultMargins="false" />
 
         <!-- Floating rather than edge to edge, so the blur has wallpaper on every side. -->
-        <com.carjack.launcher.TaskbarView
+        <io.github.cfraz89.slipstream.launcher.TaskbarView
             android:id="@+id/taskbar"
             android:layout_width="match_parent"
             android:layout_height="@dimen/taskbar_height"
