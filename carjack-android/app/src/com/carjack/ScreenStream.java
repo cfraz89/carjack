@@ -213,11 +213,12 @@ final class ScreenStream {
 
     /** How much of each session's start is kept, in encoder buffers: the config and ~6 s. */
     private static final int SAMPLE_BUFFERS = 60;
+    private static final int KEPT_SAMPLES = 6;
     private int sampled;
     private java.io.FileOutputStream sample;
 
     /**
-     * The start of the stream as the unit gets it, in files/stream-start.hevc (or .h264) beside
+     * The start of the stream as the unit gets it, in files/stream-HHmmss.hevc (or .h264) beside
      * the log: playable, so what a unit shows black for can be looked at.
      */
     private void sample(java.nio.ByteBuffer buffer, MediaCodec.BufferInfo info) {
@@ -228,8 +229,18 @@ final class ScreenStream {
                     sampled = SAMPLE_BUFFERS;
                     return;
                 }
-                String name = codec.getName().contains("hevc") ? "stream-start.hevc"
-                        : "stream-start.h264";
+                // One per session, by start time, the last few kept.
+                String name = "stream-" + new java.text.SimpleDateFormat("HHmmss",
+                        java.util.Locale.ROOT).format(new java.util.Date())
+                        + (codec.getName().contains("hevc") ? ".hevc" : ".h264");
+                java.io.File[] old = dir.listFiles((d, n) -> n.startsWith("stream-"));
+                if (old != null && old.length >= KEPT_SAMPLES) {
+                    java.util.Arrays.sort(old, (a, b) -> Long.compare(a.lastModified(),
+                            b.lastModified()));
+                    for (int i = 0; i <= old.length - KEPT_SAMPLES; i++) {
+                        old[i].delete();
+                    }
+                }
                 sample = new java.io.FileOutputStream(new java.io.File(dir, name));
             }
             byte[] bytes = new byte[info.size];
