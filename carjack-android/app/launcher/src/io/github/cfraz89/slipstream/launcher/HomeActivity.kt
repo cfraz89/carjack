@@ -52,6 +52,14 @@ class HomeActivity : Activity() {
         )
         WallpaperManager.getInstance(this)
             .addOnColorsChangedListener(wallpaperChanged, Handler(mainLooper))
+        // Both need the laid-out size, which onResume may come before.
+        wallpaper.addOnLayoutChangeListener { _, left, top, right, bottom,
+                                              oldLeft, oldTop, oldRight, oldBottom ->
+            if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
+                loadWallpaper()
+                blurWallpaper()
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -69,35 +77,39 @@ class HomeActivity : Activity() {
     }
 
     /**
-     * The phone's own wallpaper, which the wallpaper service hands an app holding
-     * READ_MEDIA_IMAGES; the system's built-in one without it. Read again only once it changes.
+     * The chosen wallpaper ([Wallpapers]), framed for this screen, so it needs the laid-out size;
+     * read again only when the choice, the phone's wallpaper or the size changes.
      */
     private fun loadWallpaper() {
-        if (wallpaperStale || wallpaper.drawable == null) {
-            wallpaperStale = false
-            val manager = WallpaperManager.getInstance(this)
-            val drawable = try {
-                manager.drawable
-            } catch (e: SecurityException) {
-                null
-            } ?: manager.builtInDrawable
-            wallpaper.setImageDrawable(drawable)
-        }
-        // Once laid out: the blurred copy is cut to the size the wallpaper is shown at.
-        wallpaper.post {
-            Blur.setWallpaper(
-                wallpaper.drawable,
-                wallpaper,
-                resources.getDimension(R.dimen.blur_radius),
-            )
-        }
+        val width = wallpaper.width
+        val height = wallpaper.height
+        if (width == 0 || height == 0) return
+        val key = "${Wallpapers.stamp(this)} ${width}x$height $wallpaperGeneration"
+        if (key == loadedWallpaper) return
+        loadedWallpaper = key
+        Thread({
+            val drawable = Wallpapers.load(this, width, height)
+            runOnUiThread {
+                if (isDestroyed || key != loadedWallpaper) return@runOnUiThread
+                wallpaper.setImageDrawable(drawable)
+                blurWallpaper()
+            }
+        }, "slipstream-wallpaper").start()
     }
 
-    private var wallpaperStale = true
+    /** The panels' blurred copy, cut to the size the wallpaper is shown at. */
+    private fun blurWallpaper() {
+        Blur.setWallpaper(wallpaper.drawable, wallpaper, resources.getDimension(R.dimen.blur_radius))
+    }
+
+    private var loadedWallpaper: String? = null
+    private var wallpaperGeneration = 0
 
     private val wallpaperChanged = WallpaperManager.OnColorsChangedListener { _, _ ->
-        wallpaperStale = true
-        runOnUiThread { if (!isDestroyed) loadWallpaper() }
+        runOnUiThread {
+            wallpaperGeneration++
+            if (!isDestroyed) loadWallpaper()
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

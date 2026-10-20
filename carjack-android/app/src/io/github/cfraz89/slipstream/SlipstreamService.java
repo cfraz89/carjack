@@ -70,7 +70,7 @@ public final class SlipstreamService extends Service {
         notification = new Notification.Builder(this, CHANNEL)
                 .setContentTitle(getApplicationInfo().loadLabel(getPackageManager()))
                 .setContentText("Waiting for the unit")
-                .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+                .setSmallIcon(Variant.NOTIFICATION_ICON)
                 .setOnlyAlertOnce(true)
                 .setActions(stopAction);
         startForeground(1, notification.build(), Variant.foregroundServiceTypes());

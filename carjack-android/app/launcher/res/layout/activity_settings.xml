@@ -53,6 +53,38 @@
             android:paddingEnd="@dimen/grid_padding"
             android:paddingBottom="@dimen/grid_padding">
 
+            <LinearLayout
+                android:id="@+id/setting_wallpaper"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="@dimen/setting_row_gap"
+                android:minHeight="@dimen/stepper_button_size"
+                android:orientation="vertical"
+                android:gravity="center_vertical"
+                android:paddingStart="@dimen/setting_row_padding"
+                android:paddingEnd="@dimen/setting_row_padding"
+                android:paddingTop="@dimen/shortcut_padding"
+                android:paddingBottom="@dimen/shortcut_padding"
+                android:background="@drawable/card_background"
+                android:foreground="@drawable/ripple_transparent"
+                android:clickable="true"
+                android:focusable="true">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/setting_wallpaper"
+                    android:textColor="@color/text_primary"
+                    android:textSize="@dimen/setting_label_size" />
+
+                <TextView
+                    android:id="@+id/setting_wallpaper_value"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="@dimen/app_label_size" />
+            </LinearLayout>
+
             <include
                 android:id="@+id/setting_columns"
                 layout="@layout/row_stepper" />

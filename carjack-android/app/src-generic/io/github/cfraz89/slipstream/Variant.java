@@ -22,6 +22,7 @@ final class Variant {
     private static final String TAG = "carjack";
 
     static final String PREFS = "slipstream";
+    static final int NOTIFICATION_ICON = R.drawable.ic_sl_notify;
     /** The installed app's ID, for Shizuku's service component, which is built statically. */
     static final String APP_ID = "io.github.cfraz89.slipstream";
 

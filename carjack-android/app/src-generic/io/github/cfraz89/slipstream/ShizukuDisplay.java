@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(13);
+            .version(14);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
@@ -138,6 +138,44 @@ final class ShizukuDisplay {
             s.leavePrimary(ssid);
         } catch (RemoteException e) {
             Log.w(TAG, "Shizuku couldn't leave " + ssid, e);
+        }
+    }
+
+    /**
+     * The phone's wallpaper as the system would frame it for a {@code width}x{@code height}
+     * display, about that size; null where Shizuku can't read it (a live wallpaper, say). Blocks.
+     */
+    static android.graphics.Bitmap framedWallpaper(int width, int height) {
+        IDisplayService s = available() ? bind() : null;
+        if (s == null) {
+            return null;
+        }
+        try (android.os.ParcelFileDescriptor original = s.wallpaperOriginal()) {
+            if (original == null) {
+                return null;
+            }
+            android.graphics.BitmapRegionDecoder decoder =
+                    android.graphics.BitmapRegionDecoder.newInstance(original);
+            int[] c = s.wallpaperCrop(width, height);
+            android.graphics.Rect crop = c != null && c.length == 4
+                    ? new android.graphics.Rect(c[0], c[1], c[2], c[3])
+                    : new android.graphics.Rect(0, 0, decoder.getWidth(), decoder.getHeight());
+            crop.intersect(0, 0, decoder.getWidth(), decoder.getHeight());
+            android.graphics.BitmapFactory.Options options =
+                    new android.graphics.BitmapFactory.Options();
+            options.inSampleSize = 1;
+            while (crop.width() / (options.inSampleSize * 2) >= width
+                    && crop.height() / (options.inSampleSize * 2) >= height) {
+                options.inSampleSize *= 2;
+            }
+            Log.i(TAG, "Wallpaper for " + width + "x" + height + ": " + crop + " of "
+                    + decoder.getWidth() + "x" + decoder.getHeight());
+            android.graphics.Bitmap bitmap = decoder.decodeRegion(crop, options);
+            decoder.recycle();
+            return bitmap;
+        } catch (RemoteException | java.io.IOException | RuntimeException e) {
+            Log.w(TAG, "No framed wallpaper", e);
+            return null;
         }
     }
 

@@ -234,6 +234,50 @@ public final class DisplayService extends IDisplayService.Stub {
         run("cmd", "wifi", "set-network-selection-config", "enabled", "enabled", "-a", "0");
     }
 
+    /*
+     * The wallpaper calls below are hidden, and need READ_WALLPAPER_INTERNAL, which the shell
+     * has: they're how a home screen of the unit's size would frame the phone's wallpaper, from
+     * the original rather than the phone's own portrait crop of it.
+     */
+
+    @Override
+    public android.os.ParcelFileDescriptor wallpaperOriginal() {
+        try {
+            return (android.os.ParcelFileDescriptor) android.app.WallpaperManager.class
+                    .getMethod("getWallpaperFile", int.class, boolean.class)
+                    .invoke(wallpapers(), android.app.WallpaperManager.FLAG_SYSTEM, false);
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            Log.w(TAG, "No original wallpaper", e);
+            return null;
+        }
+    }
+
+    @Override
+    public int[] wallpaperCrop(int width, int height) {
+        try {
+            @SuppressWarnings("unchecked")
+            java.util.List<android.graphics.Rect> crops =
+                    (java.util.List<android.graphics.Rect>) android.app.WallpaperManager.class
+                            .getMethod("getBitmapCrops", java.util.List.class, int.class,
+                                    boolean.class)
+                            .invoke(wallpapers(),
+                                    java.util.List.of(new android.graphics.Point(width, height)),
+                                    android.app.WallpaperManager.FLAG_SYSTEM, true);
+            if (crops == null || crops.isEmpty()) {
+                return null;
+            }
+            android.graphics.Rect crop = crops.get(0);
+            return new int[] {crop.left, crop.top, crop.right, crop.bottom};
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            Log.w(TAG, "No wallpaper crop for " + width + "x" + height, e);
+            return null;
+        }
+    }
+
+    private android.app.WallpaperManager wallpapers() {
+        return android.app.WallpaperManager.getInstance(shellContext());
+    }
+
     private static String run(String... command) {
         try {
             Process process = new ProcessBuilder(command).redirectErrorStream(true).start();

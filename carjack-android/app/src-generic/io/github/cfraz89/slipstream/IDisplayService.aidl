@@ -1,5 +1,6 @@
 package io.github.cfraz89.slipstream;
 
+import android.os.ParcelFileDescriptor;
 import android.view.Surface;
 
 /** {@link DisplayService}, run by Shizuku with the shell user's privileges. */
@@ -37,6 +38,15 @@ interface IDisplayService {
 
     /** Forget {@code ssid} (if not null) and unlock switching, so the phone goes back. */
     void leavePrimary(String ssid) = 11;
+
+    /** The phone's wallpaper as it was set, uncropped; null for a live or default one. */
+    ParcelFileDescriptor wallpaperOriginal() = 12;
+
+    /**
+     * Where the system would crop that original for a display this size, as left, top, right,
+     * bottom; null where it can't say.
+     */
+    int[] wallpaperCrop(int width, int height) = 13;
 
     /** Shizuku's teardown call. */
     void destroy() = 16777114;

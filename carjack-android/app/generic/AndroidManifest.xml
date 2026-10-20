@@ -38,6 +38,7 @@
     </queries>
 
     <application
+        android:name=".SlipstreamApplication"
         android:label="Slipstream"
         android:theme="@style/SlipstreamApp"
         android:icon="@drawable/ic_sl_app"

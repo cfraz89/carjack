@@ -12,6 +12,11 @@
     <string name="setting_columns">Columns</string>
     <string name="setting_rows">Rows</string>
     <string name="setting_recents">Recent apps in taskbar</string>
+    <string name="setting_wallpaper">Wallpaper</string>
+    <string name="wallpaper_phone">The phone\'s wallpaper</string>
+    <string name="wallpaper_builtin">Built-in</string>
+    <string name="wallpaper_photo">A photo</string>
+    <string name="wallpaper_pick_photo">Choose a photo…</string>
     <string name="decrease">Less</string>
     <string name="increase">More</string>
 </resources>

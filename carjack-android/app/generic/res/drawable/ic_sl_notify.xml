@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The status bar's cut of the app icon: one colour, no disc, heavier lines; the system tints it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M30,98 C40,78 58,58 82,42 C86,39 91,44 88,48 C70,62 58,80 48,100 C44,107 26,105 30,98 Z" />
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="9" android:strokeLineCap="round"
+        android:pathData="M6,74 C22,74 32,72 44,64 C56,56 64,44 76,34 C84,28 92,26 102,26" />
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="8" android:strokeLineCap="round"
+        android:pathData="M14,50 C28,50 36,46 46,38 C56,30 64,20 74,14 C80,10 88,9 96,9" />
+</vector>
