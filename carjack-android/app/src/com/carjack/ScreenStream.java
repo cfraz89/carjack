@@ -211,6 +211,40 @@ final class ScreenStream {
         thread.quitSafely();
     }
 
+    /** How much of each session's start is kept, in encoder buffers: the config and ~6 s. */
+    private static final int SAMPLE_BUFFERS = 60;
+    private int sampled;
+    private java.io.FileOutputStream sample;
+
+    /**
+     * The start of the stream as the unit gets it, in files/stream-start.hevc (or .h264) beside
+     * the log: playable, so what a unit shows black for can be looked at.
+     */
+    private void sample(java.nio.ByteBuffer buffer, MediaCodec.BufferInfo info) {
+        try {
+            if (sample == null) {
+                java.io.File dir = context.getExternalFilesDir(null);
+                if (dir == null) {
+                    sampled = SAMPLE_BUFFERS;
+                    return;
+                }
+                String name = codec.getName().contains("hevc") ? "stream-start.hevc"
+                        : "stream-start.h264";
+                sample = new java.io.FileOutputStream(new java.io.File(dir, name));
+            }
+            byte[] bytes = new byte[info.size];
+            buffer.position(info.offset);
+            buffer.get(bytes);
+            sample.write(bytes);
+            if (++sampled == SAMPLE_BUFFERS) {
+                sample.close();
+            }
+        } catch (IOException e) {
+            Log.w(TAG, "No stream sample", e);
+            sampled = SAMPLE_BUFFERS;
+        }
+    }
+
     private final MediaCodec.Callback callback = new MediaCodec.Callback() {
         @Override
         public void onInputBufferAvailable(MediaCodec c, int index) {}
@@ -222,6 +256,12 @@ final class ScreenStream {
             }
             lastOutput = android.os.SystemClock.uptimeMillis();
             try {
+                if ((info.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
+                    Log.i(TAG, "Keyframe of " + info.size + " bytes");
+                }
+                if (info.size > 0 && sampled < SAMPLE_BUFFERS) {
+                    sample(c.getOutputBuffer(index), info);
+                }
                 if (info.size > 0) {
                     Native.pushFrame(session, c.getOutputBuffer(index), info.offset, info.size,
                             (info.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0,
