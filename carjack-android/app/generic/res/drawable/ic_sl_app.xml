@@ -1,25 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The app icon: a sport bike's front in profile on race blue - fairing, tinted screen, the dash
-     display behind it in pink - with pink wind streaming over the screen. -->
+<!-- The app icon: a dash display under its cowl on race blue, pink wind streaming across the
+     glass. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
     <path android:fillColor="#005FAF"
         android:pathData="M54,4a50,50 0,1 1,0 100a50,50 0,1 1,0 -100z" />
-    <path android:fillColor="#FFFFFF" android:fillAlpha="0.55"
-        android:pathData="M44,52 C52,44 62,37 78,32 C81,31 83,33 81,35 C70,40 62,47 56,54 Z" />
-    <path android:fillColor="#FF5FA2"
-        android:pathData="M57,51 L67,46 C68,45.5 69,46 69.5,47 L70.5,49.5 C71,50.5 70.5,51 69.5,51.5 L60,56 Z" />
+    <!-- The cowl. -->
+    <path android:fillColor="#FFFFFF" android:fillAlpha="0.45"
+        android:pathData="M16,40 C22,26 86,26 92,40 L88,42 C80,33 28,33 20,42 Z" />
+    <!-- Bezel, then glass. -->
     <path android:fillColor="#FFFFFF"
-        android:pathData="M16,66 C22,58 32,53 44,52 L58,56 C68,56 80,56 94,59 C96,60 96,64 94,65 C82,66 72,68 66,74 L64,76 C50,78 34,76 22,72 C18,71 15,69 16,66 Z" />
-    <path android:fillColor="#005FAF"
-        android:pathData="M20,66 C24,63 30,62 36,63 C32,66 26,68 21,68 Z" />
+        android:pathData="M29,38 h50 a9,9 0,0 1,9 9 v26 a9,9 0,0 1,-9 9 h-50 a9,9 0,0 1,-9 -9 v-26 a9,9 0,0 1,9 -9 z" />
+    <path android:fillColor="#0B1E3A"
+        android:pathData="M30,43 h48 a5,5 0,0 1,5 5 v24 a5,5 0,0 1,-5 5 h-48 a5,5 0,0 1,-5 -5 v-24 a5,5 0,0 1,5 -5 z" />
     <path android:strokeColor="#FF5FA2" android:strokeWidth="4" android:strokeLineCap="round"
-        android:pathData="M6,58 C16,54 28,48 42,46 C56,44 66,33 82,27 C86,26 89,27 92,28" />
+        android:pathData="M31,70 C40,70 44,64 52,62 C60,60 66,64 77,57" />
     <path android:strokeColor="#FF5FA2" android:strokeWidth="3.5" android:strokeLineCap="round"
         android:strokeAlpha="0.8"
-        android:pathData="M10,46 C20,42 30,38 44,36 C56,34 64,25 76,19 C79,18 82,18 84,18" />
+        android:pathData="M31,60 C40,60 44,54 52,52 C60,50 66,54 77,47" />
     <path android:strokeColor="#FF5FA2" android:strokeWidth="3" android:strokeLineCap="round"
         android:strokeAlpha="0.6"
-        android:pathData="M20,34 C28,31 36,28 48,26 C56,24 62,19 70,13" />
+        android:pathData="M37,51 C42,51 45,47 51,45.5" />
 </vector>

@@ -1,15 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The status bar's cut of the app icon: fairing, screen and two wind lines in one colour,
-     filling the frame; the system tints it. -->
+<!-- The status bar's cut of the app icon: the display's outline and two wind lines in one
+     colour, filling the frame; the system tints it. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp" android:height="24dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#FFFFFFFF"
-        android:pathData="M30,64 C42,50 56,40 80,32 C85,30 88,35 84,38 C70,46 62,54 56,62 Z" />
-    <path android:fillColor="#FFFFFFFF"
-        android:pathData="M2,82 C10,70 24,62 40,62 L58,66 C72,66 88,66 104,70 C107,72 107,78 104,79 C90,80 78,84 70,92 L66,96 C48,98 28,96 12,90 C4,88 0,86 2,82 Z" />
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="9"
+        android:pathData="M20,20 h68 a12,12 0,0 1,12 12 v44 a12,12 0,0 1,-12 12 h-68 a12,12 0,0 1,-12 -12 v-44 a12,12 0,0 1,12 -12 z" />
     <path android:strokeColor="#FFFFFFFF" android:strokeWidth="9" android:strokeLineCap="round"
-        android:pathData="M4,54 C18,48 30,44 44,42 C60,40 72,26 90,18 C96,16 100,16 104,17" />
+        android:pathData="M24,70 C38,70 44,60 56,57 C68,54 74,60 86,50" />
     <path android:strokeColor="#FFFFFFFF" android:strokeWidth="8" android:strokeLineCap="round"
-        android:pathData="M10,32 C22,26 34,22 48,20 C60,18 68,10 76,5" />
+        android:pathData="M24,50 C38,50 44,40 56,37 C68,34 74,40 86,30" />
 </vector>
