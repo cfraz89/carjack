@@ -72,7 +72,7 @@ public final class MainActivity extends Activity {
         LinearLayout names = new LinearLayout(this);
         names.setOrientation(LinearLayout.VERTICAL);
         names.setPadding(ui.dp(16), 0, 0, 0);
-        TextView title = ui.text("carjack", 32, R.color.cj_on_surface);
+        TextView title = ui.text("carjack", 32, R.color.cj_tertiary);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         names.addView(title);
         names.addView(ui.text("CarPlay from this phone", 15, R.color.cj_on_surface_variant));
@@ -85,6 +85,11 @@ public final class MainActivity extends Activity {
         powerCard = ui.card(page, R.color.cj_primary_container);
         powerCard.setPadding(0, ui.dp(8), 0, ui.dp(8));
         power = new Switch(this);
+        int[][] states = {{android.R.attr.state_checked}, {}};
+        power.setThumbTintList(new android.content.res.ColorStateList(states, new int[] {
+                ui.color(R.color.cj_on_tertiary), ui.color(R.color.cj_outline)}));
+        power.setTrackTintList(new android.content.res.ColorStateList(states, new int[] {
+                ui.color(R.color.cj_tertiary), ui.color(R.color.cj_surface_container_highest)}));
         power.setOnClickListener(v -> setOn(power.isChecked()));
         status = ui.row(powerCard, getDrawable(R.drawable.ic_cj_cast), true, "Enabled", "",
                 power, v -> setOn(!power.isChecked()));

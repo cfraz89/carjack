@@ -78,7 +78,7 @@ final class Ui {
     }
 
     TextView heading(String value) {
-        TextView view = text(value, 14, R.color.cj_primary);
+        TextView view = text(value, 14, R.color.cj_tertiary);
         view.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         view.setPadding(dp(16), dp(20), dp(16), dp(8));
         return view;
