@@ -67,6 +67,13 @@ final class Variant {
         return null;
     }
 
+    /** The board keeps its own STA+STA local-only join. */
+    static boolean joinPrimary(String ssid, String passphrase) {
+        return false;
+    }
+
+    static void leavePrimary(String ssid) {}
+
     /** No app screen to show these on. */
     static void onStatus(Context context, String text, boolean retryable) {}
 

@@ -115,6 +115,32 @@ final class ShizukuDisplay {
         }
     }
 
+    /** {@link IDisplayService#joinPrimary}; false where Shizuku can't. Blocks up to ~20 s. */
+    static boolean joinPrimary(String ssid, String passphrase) {
+        IDisplayService s = available() ? bind() : null;
+        if (s == null) {
+            return false;
+        }
+        try {
+            return s.joinPrimary(ssid, passphrase);
+        } catch (RemoteException e) {
+            Log.w(TAG, "Shizuku couldn't join " + ssid, e);
+            return false;
+        }
+    }
+
+    static void leavePrimary(String ssid) {
+        IDisplayService s = available() ? bind() : null;
+        if (s == null) {
+            return;
+        }
+        try {
+            s.leavePrimary(ssid);
+        } catch (RemoteException e) {
+            Log.w(TAG, "Shizuku couldn't leave " + ssid, e);
+        }
+    }
+
     /** The phone's real Bluetooth address through Shizuku, or null. */
     static String bluetoothAddress() {
         IDisplayService s = available() ? bind() : null;

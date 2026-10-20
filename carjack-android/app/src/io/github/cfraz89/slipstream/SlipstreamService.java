@@ -80,6 +80,7 @@ public final class SlipstreamService extends Service {
         thread.start();
         handler = new Handler(thread.getLooper());
         wifi = new AccessoryWifi(this, handler);
+        AccessoryWifi.reset();
         bluetooth = new Bluetooth(this, handler, socket -> handler.post(() -> accept(socket)));
         if (!Variant.canPage()) {
             // A unit dials iAP only on a fresh link, and may carry it on a channel we dial then

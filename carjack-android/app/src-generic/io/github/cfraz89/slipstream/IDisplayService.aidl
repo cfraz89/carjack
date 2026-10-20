@@ -29,6 +29,15 @@ interface IDisplayService {
     /** The MAC address of network interface {@code iface}, or null. */
     String interfaceMac(String iface) = 9;
 
+    /**
+     * Join {@code ssid} as the phone's main WiFi, with switching away locked while connected;
+     * true once on it.
+     */
+    boolean joinPrimary(String ssid, String passphrase) = 10;
+
+    /** Forget {@code ssid} (if not null) and unlock switching, so the phone goes back. */
+    void leavePrimary(String ssid) = 11;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

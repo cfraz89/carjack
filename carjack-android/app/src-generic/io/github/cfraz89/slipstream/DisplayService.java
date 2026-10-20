@@ -188,6 +188,52 @@ public final class DisplayService extends IDisplayService.Stub {
         run("cmd", "bluetooth_manager", "wait-for-state:STATE_ON");
     }
 
+    private static final long PRIMARY_JOIN_MS = 20_000;
+    private static final long PRIMARY_POLL_MS = 500;
+
+    /**
+     * The unit's AP as the main connection, so the radio stays on its channel rather than
+     * time-slicing with home WiFi on another. Switching to another saved network while connected
+     * is locked out (the associated network selection override); autojoin stays off for it, so
+     * it's never joined outside a session.
+     */
+    @Override
+    public boolean joinPrimary(String ssid, String passphrase) {
+        run("cmd", "wifi", "set-network-selection-config", "enabled", "enabled", "-a", "2");
+        boolean open = passphrase == null || passphrase.isEmpty();
+        if (open) {
+            run("cmd", "wifi", "connect-network", ssid, "open", "-d");
+        } else {
+            run("cmd", "wifi", "connect-network", ssid, "wpa2", passphrase, "-d");
+        }
+        String connected = "Wifi is connected to \"" + ssid + "\"";
+        long deadline = android.os.SystemClock.uptimeMillis() + PRIMARY_JOIN_MS;
+        while (android.os.SystemClock.uptimeMillis() < deadline) {
+            if (run("cmd", "wifi", "status").contains(connected)) {
+                return true;
+            }
+            android.os.SystemClock.sleep(PRIMARY_POLL_MS);
+        }
+        Log.w(TAG, "Not on " + ssid + " as the main WiFi after " + PRIMARY_JOIN_MS + "ms");
+        leavePrimary(ssid);
+        return false;
+    }
+
+    @Override
+    public void leavePrimary(String ssid) {
+        if (ssid != null) {
+            // list-networks rows: "<id> <ssid> <security>".
+            for (String line : run("cmd", "wifi", "list-networks").split("\n")) {
+                String[] cols = line.trim().split("\\s+");
+                if (cols.length >= 3 && cols[0].matches("\\d+")
+                        && line.contains(" " + ssid + " ")) {
+                    run("cmd", "wifi", "forget-network", cols[0]);
+                }
+            }
+        }
+        run("cmd", "wifi", "set-network-selection-config", "enabled", "enabled", "-a", "0");
+    }
+
     private static String run(String... command) {
         try {
             Process process = new ProcessBuilder(command).redirectErrorStream(true).start();

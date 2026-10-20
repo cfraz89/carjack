@@ -23,10 +23,12 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 
 /**
- * Joins the accessory's access point as a peer-to-peer network and routes this process over it.
- * Where the device runs two STAs (STA+STA local-only concurrency) that is the second one and the
- * primary connection stays up; elsewhere the framework moves its one radio over. Either way only
- * this process uses the accessory's network, which has no internet.
+ * Joins the accessory's access point and routes this process over it. Where the variant can
+ * (Shizuku), it becomes the main WiFi, so the radio isn't time-slicing with another network on
+ * another channel; the phone's own traffic stays on mobile data, its default while this network
+ * has no internet. Otherwise it's a local-only second network: with STA+STA concurrency the main
+ * connection stays up, elsewhere the framework moves its one radio over. Either way only this
+ * process uses the accessory's network.
  */
 final class AccessoryWifi {
     private static final String TAG = "carjack";
@@ -46,6 +48,11 @@ final class AccessoryWifi {
     private WifiManager.MulticastLock multicast;
     private ConnectivityManager.NetworkCallback callback;
     private Result pending;
+    /** The unit's AP while it's the main WiFi, for leave() to undo. */
+    private String primarySsid;
+    /** Shell calls, in order: a leave must never land after the next join. */
+    private static final java.util.concurrent.ExecutorService SHELL =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
 
     AccessoryWifi(Context context, Handler handler) {
         this.handler = handler;
@@ -60,7 +67,29 @@ final class AccessoryWifi {
         if (!wifi.isWifiEnabled()) {
             wifi.setWifiEnabled(true);
         }
+        // The main WiFi where the variant can make it so, else a local-only second network.
+        SHELL.execute(() -> {
+            boolean primary = Variant.joinPrimary(ssid, passphrase);
+            handler.post(() -> {
+                if (pending != result) {
+                    if (primary) {
+                        SHELL.execute(() -> Variant.leavePrimary(ssid));
+                    }
+                } else if (primary) {
+                    primarySsid = ssid;
+                    Log.i(TAG, "On " + ssid + " as the main WiFi");
+                    request(new NetworkRequest.Builder()
+                            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                            .build());
+                } else {
+                    joinLocalOnly(ssid, passphrase, bssid);
+                }
+            });
+        });
+    }
 
+    private void joinLocalOnly(String ssid, String passphrase, String bssid) {
         WifiNetworkSpecifier.Builder spec = new WifiNetworkSpecifier.Builder().setSsid(ssid);
         if (passphrase != null && !passphrase.isEmpty()) {
             spec.setWpa2Passphrase(passphrase);
@@ -79,12 +108,19 @@ final class AccessoryWifi {
                 Log.w(TAG, "Ignoring the accessory's BSSID " + bssid);
             }
         }
-        NetworkRequest request = new NetworkRequest.Builder()
+        Log.i(TAG, "Joining " + ssid + " alongside the main WiFi");
+        request(new NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                 .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .setNetworkSpecifier(spec.build())
-                .build();
-        Log.i(TAG, "Joining " + ssid);
+                .build());
+    }
+
+    /**
+     * Holds {@code request} for the session: for the main WiFi, it also keeps the framework from
+     * tearing down a network nothing else wants, having no internet.
+     */
+    private void request(NetworkRequest request) {
         callback = new ConnectivityManager.NetworkCallback(
                 ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO) {
             @Override
@@ -194,5 +230,15 @@ final class AccessoryWifi {
             connectivity.unregisterNetworkCallback(callback);
             callback = null;
         }
+        if (primarySsid != null) {
+            String ssid = primarySsid;
+            primarySsid = null;
+            SHELL.execute(() -> Variant.leavePrimary(ssid));
+        }
+    }
+
+    /** Unlocks network switching, which a session cut short (a crash) may have left locked. */
+    static void reset() {
+        SHELL.execute(() -> Variant.leavePrimary(null));
     }
 }

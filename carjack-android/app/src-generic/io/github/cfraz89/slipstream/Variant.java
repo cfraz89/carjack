@@ -148,6 +148,19 @@ final class Variant {
         return ShizukuDisplay.interfaceMac(iface);
     }
 
+    /**
+     * The unit's AP as the main WiFi, through Shizuku: one channel for the radio rather than two
+     * time-sliced. False where it can't, for the local-only request instead. Blocks.
+     */
+    static boolean joinPrimary(String ssid, String passphrase) {
+        return ShizukuDisplay.joinPrimary(ssid, passphrase);
+    }
+
+    /** Back off the unit's AP; with a null SSID, just unlocks switching. Blocks. */
+    static void leavePrimary(String ssid) {
+        ShizukuDisplay.leavePrimary(ssid);
+    }
+
     /** The built-in launcher's home screen, which the unit gets unless another app is chosen. */
     private static final String LAUNCHER = APP_ID + "/" + APP_ID + ".launcher.HomeActivity";
 
