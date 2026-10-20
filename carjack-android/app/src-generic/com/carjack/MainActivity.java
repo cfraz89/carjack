@@ -52,7 +52,6 @@ public final class MainActivity extends Activity {
     private TextView status;
     private LinearLayout actions;
     private View retry;
-    private View bluetoothSettings;
     private LinearLayout settings;
     private final List<String> unitNames = new ArrayList<>();
     private final List<String> unitAddresses = new ArrayList<>();
@@ -87,7 +86,7 @@ public final class MainActivity extends Activity {
         powerCard.setPadding(0, ui.dp(8), 0, ui.dp(8));
         power = new Switch(this);
         power.setOnClickListener(v -> setOn(power.isChecked()));
-        status = ui.row(powerCard, getDrawable(R.drawable.ic_cj_cast), true, "CarPlay", "",
+        status = ui.row(powerCard, getDrawable(R.drawable.ic_cj_cast), true, "Enabled", "",
                 power, v -> setOn(!power.isChecked()));
         ((TextView) ((ViewGroup) status.getParent()).getChildAt(0)).setTextSize(20);
         actions = new LinearLayout(this);
@@ -95,9 +94,6 @@ public final class MainActivity extends Activity {
         retry = ui.button("Retry", true, v -> startService(
                 new Intent(this, CarjackService.class).setAction(CarjackService.ACTION_RETRY)));
         actions.addView(retry);
-        bluetoothSettings = ui.button("Bluetooth settings", false,
-                v -> openBluetoothSettings());
-        actions.addView(bluetoothSettings);
         powerCard.addView(actions);
 
         page.addView(ui.heading("Connection"));
@@ -160,13 +156,8 @@ public final class MainActivity extends Activity {
         status.setText(on ? Variant.setting(this, "status", "Waiting for the unit") : "Off");
         powerCard.setBackground(ui.shape(on ? R.color.cj_primary_container
                 : R.color.cj_surface_container_high, 28));
-        SharedPreferences prefs = Variant.prefs(this);
-        boolean showRetry = on && prefs.getBoolean("retryable", false);
-        // Nothing connected: the phone's own Bluetooth page is where that gets sorted.
-        boolean showSettings = on && !prefs.getBoolean("linked", false);
-        retry.setVisibility(showRetry ? View.VISIBLE : View.GONE);
-        bluetoothSettings.setVisibility(showSettings ? View.VISIBLE : View.GONE);
-        actions.setVisibility(showRetry || showSettings ? View.VISIBLE : View.GONE);
+        boolean showRetry = on && Variant.prefs(this).getBoolean("retryable", false);
+        actions.setVisibility(showRetry ? View.VISIBLE : View.GONE);
     }
 
     /** Each a row showing its current value, opening its choices. */
@@ -174,7 +165,7 @@ public final class MainActivity extends Activity {
         settings.removeAllViews();
         int unit = Math.max(0, indexOfIgnoreCase(unitAddresses,
                 Variant.setting(this, "target", "")));
-        ui.row(settings, getDrawable(R.drawable.ic_cj_bluetooth), true, "Unit",
+        ui.row(settings, getDrawable(R.drawable.ic_cj_unit), true, "Unit",
                 unitNames.get(unit), ui.chevron(), v -> chooseUnit());
 
         String app = Choices.current(this);
@@ -182,7 +173,7 @@ public final class MainActivity extends Activity {
         ui.row(settings, Choices.icon(this, app), glyph, "On connect", Choices.name(this, app),
                 ui.chevron(), v -> startActivity(new Intent(this, OnConnectActivity.class)));
 
-        ui.row(settings, getDrawable(R.drawable.ic_cj_text_size), true, "Text and icons",
+        ui.row(settings, getDrawable(R.drawable.ic_cj_text_size), true, "Scale",
                 SIZES[densityIndex()], ui.chevron(), v -> chooseSize());
     }
 
@@ -201,7 +192,7 @@ public final class MainActivity extends Activity {
 
     private void chooseSize() {
         new AlertDialog.Builder(this)
-                .setTitle("Text and icons on the unit")
+                .setTitle("Scale on the unit")
                 .setSingleChoiceItems(SIZES, densityIndex(), (d, i) -> {
                     Variant.prefs(this).edit().putString("density",
                             DENSITIES[i] == 0 ? "" : Integer.toString(DENSITIES[i])).apply();
