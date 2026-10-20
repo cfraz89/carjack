@@ -96,6 +96,9 @@ impl SessionCtl {
                 nal_size_len: NAL_SIZE_LEN,
                 sps_pps: sink.parameter_sets.clone(),
             });
+            if config.is_some() {
+                tracing::debug!("Keyframe sent with the parameter sets");
+            }
             let frame = EncodedFrame {
                 data: au.data,
                 nals: au.nals,
@@ -111,6 +114,10 @@ impl SessionCtl {
 /// How hard to try the AirPlay endpoint before giving up on the session.
 const AIRPLAY_CONNECT_ATTEMPTS: usize = 4;
 const AIRPLAY_CONNECT_DELAY: Duration = Duration::from_millis(500);
+
+/// How long a keyframe request waits for its answer before the next is passed on: up to 1 s.
+const KEYFRAME_ANSWER_POLL: Duration = Duration::from_millis(10);
+const KEYFRAME_ANSWER_POLLS: usize = 100;
 
 /// How long to wait for the accessory's invite before giving up on it.
 const INVITE_WAIT: Duration = Duration::from_secs(15);
@@ -305,6 +312,14 @@ pub async fn run(
             while keyframe_rx.recv().await.is_some() {
                 answer_with_config.store(true, Ordering::Relaxed);
                 platform.request_keyframe();
+                // MediaCodec folds requests close together into one keyframe, and a unit that
+                // asked twice waits for two; so the next request waits for this one's answer.
+                for _ in 0..KEYFRAME_ANSWER_POLLS {
+                    if !answer_with_config.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    tokio::time::sleep(KEYFRAME_ANSWER_POLL).await;
+                }
             }
         }
     }));
