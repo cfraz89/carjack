@@ -131,7 +131,7 @@ final class Session implements Native.Callbacks {
     public void ended(String error) {
         Log.i(TAG, "Session ended" + (error == null ? "" : ": " + error));
         status.accept("CarPlay ended" + (error == null ? "" : " (" + error + ")")
-                + "; waiting for the bike");
+                + "; waiting for the unit");
         handler.post(() -> {
             if (stream != null) {
                 stream.stop();

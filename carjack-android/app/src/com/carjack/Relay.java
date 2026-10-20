@@ -63,9 +63,8 @@ final class Relay {
     private boolean haveFrame;
     private long lastDrawMs;
     private long lastTimestampNs;
-    private static final int REPORT_TICKS = 10;
-    private int ticks;
-    private long displayFrames;
+    private static final int CAPTURE_WIDTH = 480;
+    private java.util.function.Consumer<android.graphics.Bitmap> pendingCapture;
 
     Relay(Surface output, int width, int height, int viewX, int viewY, int viewWidth,
             int viewHeight) {
@@ -143,7 +142,6 @@ final class Relay {
         texture.updateTexImage();
         texture.getTransformMatrix(matrix);
         haveFrame = true;
-        displayFrames++;
         render(texture.getTimestamp());
     }
 
@@ -158,33 +156,42 @@ final class Relay {
             if (texture == null) {
                 return;
             }
-            boolean reportDue = ++ticks % REPORT_TICKS == 0;
-            if (reportDue && !haveFrame) {
-                android.util.Log.i("carjack", "Relay: no display frames yet");
-            }
-            if (haveFrame && (reportDue
-                    || SystemClock.uptimeMillis() - lastDrawMs >= IDLE_REDRAW_MS)) {
-                render(System.nanoTime(), reportDue);
+            if (haveFrame && SystemClock.uptimeMillis() - lastDrawMs >= IDLE_REDRAW_MS) {
+                render(System.nanoTime());
             }
             handler.postDelayed(this, IDLE_REDRAW_MS);
         }
     };
 
-    /** Whether the display is reaching the relay, and what colour the view's centre is drawn. */
-    private void report() {
-        ByteBuffer pixel = ByteBuffer.allocateDirect(4);
-        GLES20.glReadPixels(viewX + viewWidth / 2, height - viewY - viewHeight / 2, 1, 1,
-                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixel);
-        android.util.Log.i("carjack", "Relay: " + displayFrames + " display frames, centre rgb "
-                + (pixel.get(0) & 0xff) + "," + (pixel.get(1) & 0xff) + ","
-                + (pixel.get(2) & 0xff) + ", gl error " + GLES20.glGetError());
+    /** The picture as the unit next gets it, {@link #CAPTURE_WIDTH} wide, to {@code sink}. */
+    void capture(java.util.function.Consumer<android.graphics.Bitmap> sink) {
+        handler.post(() -> {
+            if (texture == null || !haveFrame) {
+                return;
+            }
+            pendingCapture = sink;
+            render(System.nanoTime());
+        });
+    }
+
+    /** The view, the right way up: GL's rows run bottom to top. */
+    private android.graphics.Bitmap readView() {
+        ByteBuffer pixels = ByteBuffer.allocateDirect(viewWidth * viewHeight * 4);
+        GLES20.glReadPixels(viewX, height - viewY - viewHeight, viewWidth, viewHeight,
+                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels);
+        android.graphics.Bitmap raw = android.graphics.Bitmap.createBitmap(viewWidth, viewHeight,
+                android.graphics.Bitmap.Config.ARGB_8888);
+        raw.copyPixelsFromBuffer(pixels);
+        float scale = (float) CAPTURE_WIDTH / viewWidth;
+        android.graphics.Matrix flip = new android.graphics.Matrix();
+        flip.setScale(scale, -scale);
+        android.graphics.Bitmap upright = android.graphics.Bitmap.createBitmap(raw, 0, 0,
+                viewWidth, viewHeight, flip, true);
+        raw.recycle();
+        return upright;
     }
 
     private void render(long timestampNs) {
-        render(timestampNs, false);
-    }
-
-    private void render(long timestampNs, boolean report) {
         // Strictly increasing, whether the time came from the display or the clock.
         timestampNs = Math.max(timestampNs, lastTimestampNs + 1);
         lastTimestampNs = timestampNs;
@@ -197,8 +204,9 @@ final class Relay {
         GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "tex"), 1, false, matrix,
                 0);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
-        if (report) {
-            report();
+        if (pendingCapture != null) {
+            pendingCapture.accept(readView());
+            pendingCapture = null;
         }
         EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, timestampNs);
         EGL14.eglSwapBuffers(eglDisplay, eglSurface);

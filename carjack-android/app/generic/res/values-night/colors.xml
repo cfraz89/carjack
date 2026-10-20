@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="cj_primary">#A5C8FF</color>
+    <color name="cj_on_primary">#00315F</color>
+    <color name="cj_primary_container">#004786</color>
+    <color name="cj_on_primary_container">#D4E3FF</color>
+    <color name="cj_tertiary">#FFB1C8</color>
+    <color name="cj_on_tertiary">#650032</color>
+    <color name="cj_tertiary_container">#8E0049</color>
+    <color name="cj_on_tertiary_container">#FFD9E2</color>
+    <color name="cj_surface">#111318</color>
+    <color name="cj_surface_container">#1E2025</color>
+    <color name="cj_surface_container_high">#282A2F</color>
+    <color name="cj_surface_container_highest">#33353A</color>
+    <color name="cj_on_surface">#E2E2E9</color>
+    <color name="cj_on_surface_variant">#C3C6CF</color>
+    <color name="cj_outline">#8D9199</color>
+    <color name="cj_outline_variant">#43474E</color>
+</resources>

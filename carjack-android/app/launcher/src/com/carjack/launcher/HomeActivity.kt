@@ -7,6 +7,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.res.Configuration
 import android.os.Bundle
+import android.os.Handler
 import android.view.LayoutInflater
 import android.view.View
 import android.widget.GridLayout
@@ -49,9 +50,12 @@ class HomeActivity : Activity() {
             OnBackInvokedDispatcher.PRIORITY_DEFAULT,
             swallowBack,
         )
+        WallpaperManager.getInstance(this)
+            .addOnColorsChangedListener(wallpaperChanged, Handler(mainLooper))
     }
 
     override fun onDestroy() {
+        WallpaperManager.getInstance(this).removeOnColorsChangedListener(wallpaperChanged)
         onBackInvokedDispatcher.unregisterOnBackInvokedCallback(swallowBack)
         super.onDestroy()
     }
@@ -64,9 +68,36 @@ class HomeActivity : Activity() {
         taskbar.refresh()
     }
 
-    /** The system's built-in wallpaper: an ordinary app may not read the phone's own. */
+    /**
+     * The phone's own wallpaper, which the wallpaper service hands an app holding
+     * READ_MEDIA_IMAGES; the system's built-in one without it. Read again only once it changes.
+     */
     private fun loadWallpaper() {
-        wallpaper.setImageDrawable(WallpaperManager.getInstance(this).builtInDrawable)
+        if (wallpaperStale || wallpaper.drawable == null) {
+            wallpaperStale = false
+            val manager = WallpaperManager.getInstance(this)
+            val drawable = try {
+                manager.drawable
+            } catch (e: SecurityException) {
+                null
+            } ?: manager.builtInDrawable
+            wallpaper.setImageDrawable(drawable)
+        }
+        // Once laid out: the blurred copy is cut to the size the wallpaper is shown at.
+        wallpaper.post {
+            Blur.setWallpaper(
+                wallpaper.drawable,
+                wallpaper,
+                resources.getDimension(R.dimen.blur_radius),
+            )
+        }
+    }
+
+    private var wallpaperStale = true
+
+    private val wallpaperChanged = WallpaperManager.OnColorsChangedListener { _, _ ->
+        wallpaperStale = true
+        runOnUiThread { if (!isDestroyed) loadWallpaper() }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -116,9 +147,6 @@ class HomeActivity : Activity() {
         }
     }
 
-    private val blurRadius: Float
-        get() = resources.getDimension(R.dimen.blur_radius)
-
     private fun bindCell(cell: View, index: Int) {
         val icon = cell.findViewById<ImageView>(R.id.shortcut_icon)
         val label = cell.findViewById<TextView>(R.id.shortcut_label)
@@ -134,7 +162,7 @@ class HomeActivity : Activity() {
             // Only an empty slot gets a plate; a filled one sits straight on the wallpaper.
             cell.setBackgroundResource(R.drawable.slot_background)
             cell.clipToOutline = true
-            Blur.apply(cell, blurRadius)
+            Blur.apply(cell)
             cell.alpha = 0.7f
             cell.isLongClickable = false
             cell.setOnLongClickListener(null)

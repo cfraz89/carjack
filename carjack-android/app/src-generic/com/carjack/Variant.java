@@ -155,6 +155,10 @@ final class Variant {
         if (app.isEmpty()) {
             return LAUNCHER;
         }
+        if (app.equals(Previews.HOME)) {
+            android.content.ComponentName home = homeApp(context);
+            return home != null ? home.flattenToString() : LAUNCHER;
+        }
         try {
             context.getPackageManager().getPackageInfo(app.split("/")[0], 0);
             return app;
@@ -162,6 +166,20 @@ final class Variant {
             Log.w(TAG, app + " isn't installed; the unit gets the launcher");
             return LAUNCHER;
         }
+    }
+
+    /** The phone's own home app, or null where none is set as the default. */
+    static android.content.ComponentName homeApp(Context context) {
+        android.content.pm.ResolveInfo info = context.getPackageManager().resolveActivity(
+                new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
+                android.content.pm.PackageManager.MATCH_DEFAULT_ONLY);
+        // With no default, the chooser resolves; it isn't a home app.
+        if (info == null || info.activityInfo == null
+                || info.activityInfo.packageName.equals("android")) {
+            return null;
+        }
+        return new android.content.ComponentName(info.activityInfo.packageName,
+                info.activityInfo.name);
     }
 
     /** A display of the unit's own size with the chosen app on it, or null without Shizuku. */

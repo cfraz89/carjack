@@ -22,19 +22,25 @@
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+    <!-- What the wallpaper service asks of an app reading the phone's wallpaper. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 
-    <!-- The apps the bike can be given, for the picker and the launcher. -->
+    <!-- The apps the unit can be given, for the picker and the launcher; and the home app. -->
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
     </queries>
 
     <application
         android:label="carjack"
-        android:theme="@android:style/Theme.DeviceDefault.DayNight"
-        android:icon="@android:drawable/stat_sys_data_bluetooth"
+        android:theme="@style/CarjackApp"
+        android:icon="@drawable/ic_cj_app"
         android:extractNativeLibs="false">
 
         <activity
@@ -45,6 +51,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".OnConnectActivity"
+            android:exported="false" />
+        <activity
+            android:name=".AppPickerActivity"
+            android:exported="false" />
 
         <receiver
             android:name=".BootReceiver"

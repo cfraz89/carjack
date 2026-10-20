@@ -27,6 +27,8 @@ final class ScreenStream {
     private static final int HEVC_BITRATE = 3_000_000;
     private static final long STALL_MS = 10_000;
     private static final long WATCHDOG_INTERVAL_MS = 2_000;
+    private static final long FIRST_PREVIEW_MS = 6_000;
+    private static final long PREVIEW_INTERVAL_MS = 60_000;
 
     private final Context context;
     private final long session;
@@ -85,7 +87,22 @@ final class ScreenStream {
         closeDisplay = Variant.openDisplay(context, viewWidth, viewHeight, density, target);
         lastOutput = android.os.SystemClock.uptimeMillis();
         watchdogHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS);
+        watchdogHandler.postDelayed(preview, FIRST_PREVIEW_MS);
     }
+
+    /** What the unit shows, now and then, as the on-connect picker's thumbnail. */
+    private final Runnable preview = new Runnable() {
+        @Override
+        public void run() {
+            Relay r = relay;
+            if (r == null) {
+                return;
+            }
+            String app = Variant.setting(context, "app", "");
+            r.capture(bitmap -> Previews.save(context, app, bitmap));
+            watchdogHandler.postDelayed(this, PREVIEW_INTERVAL_MS);
+        }
+    };
 
     /**
      * Ask for what head units decode: HEVC Main at a variable bitrate, as the Linux build sends
@@ -191,6 +208,7 @@ final class ScreenStream {
 
     void stop() {
         watchdogHandler.removeCallbacks(watchdog);
+        watchdogHandler.removeCallbacks(preview);
         if (closeDisplay != null) {
             closeDisplay.run();
             closeDisplay = null;

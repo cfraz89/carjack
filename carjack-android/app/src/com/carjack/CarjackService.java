@@ -69,12 +69,12 @@ public final class CarjackService extends Service {
         retryAction = action("Retry", ACTION_RETRY, 1);
         notification = new Notification.Builder(this, CHANNEL)
                 .setContentTitle("carjack")
-                .setContentText("Waiting for the bike")
+                .setContentText("Waiting for the unit")
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
                 .setOnlyAlertOnce(true)
                 .setActions(stopAction);
         startForeground(1, notification.build(), Variant.foregroundServiceTypes());
-        Variant.onStatus(this, "Waiting for the bike", false);
+        Variant.onStatus(this, "Waiting for the unit", false);
 
         Native.init(new File(getFilesDir(), "homekit.bin").getPath());
         thread.start();
@@ -141,7 +141,7 @@ public final class CarjackService extends Service {
         BluetoothDevice unit = gaveUpOn != null ? gaveUpOn : bluetooth.headUnit();
         gaveUpOn = null;
         if (session != null || unit == null) {
-            status(session != null ? "Already in a session" : "Waiting for the bike");
+            status(session != null ? "Already in a session" : "Waiting for the unit");
             return;
         }
         status("Trying " + name(unit) + " again");

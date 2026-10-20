@@ -2,27 +2,20 @@ package com.carjack;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
-import android.content.res.Configuration;
-import android.graphics.Insets;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
-import android.view.WindowInsets;
-import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
-import android.widget.Button;
+import android.view.ViewGroup;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 
@@ -44,102 +37,86 @@ public final class MainActivity extends Activity {
         Manifest.permission.BLUETOOTH_ADVERTISE,
         Manifest.permission.NEARBY_WIFI_DEVICES,
         Manifest.permission.POST_NOTIFICATIONS,
+        // The phone's wallpaper, for the launcher on the unit.
+        Manifest.permission.READ_MEDIA_IMAGES,
     };
 
     /** Display densities offered, by name; 0 is automatic. */
     private static final String[] SIZES = {"Default", "Smaller", "Larger", "Largest"};
     private static final int[] DENSITIES = {0, 160, 240, 280};
 
+    private Ui ui;
+    private LinearLayout setup;
+    private LinearLayout powerCard;
     private Switch power;
     private TextView status;
-    private Button retry;
-    private Button bluetoothSettings;
-    private LinearLayout setup;
-    private Spinner bike;
-    private Spinner app;
-    private final List<String> bikeAddresses = new ArrayList<>();
-    private final List<String> appPackages = new ArrayList<>();
+    private LinearLayout actions;
+    private View retry;
+    private View bluetoothSettings;
+    private LinearLayout settings;
+    private final List<String> unitNames = new ArrayList<>();
+    private final List<String> unitAddresses = new ArrayList<>();
     private boolean settingUp;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        if (getActionBar() != null) {
-            getActionBar().hide();
-        }
-        LinearLayout page = new LinearLayout(this);
-        page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(20), dp(24), dp(20), dp(24));
+        ui = new Ui(this);
+        LinearLayout page = ui.page();
 
-        TextView title = text("carjack", 30);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        page.addView(title);
-        TextView subtitle = text("CarPlay from this phone", 15);
-        subtitle.setAlpha(0.7f);
-        page.addView(subtitle);
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(ui.dp(8), ui.dp(24), ui.dp(8), ui.dp(12));
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.ic_cj_app);
+        header.addView(logo, new LinearLayout.LayoutParams(ui.dp(56), ui.dp(56)));
+        LinearLayout names = new LinearLayout(this);
+        names.setOrientation(LinearLayout.VERTICAL);
+        names.setPadding(ui.dp(16), 0, 0, 0);
+        TextView title = ui.text("carjack", 32, R.color.cj_on_surface);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        names.addView(title);
+        names.addView(ui.text("CarPlay from this phone", 15, R.color.cj_on_surface_variant));
+        header.addView(names);
+        page.addView(header);
 
-        setup = card(page, color(android.R.color.system_accent3_100,
-                android.R.color.system_accent3_800));
+        setup = ui.card(page, R.color.cj_tertiary_container);
+        setup.setPadding(ui.dp(20), ui.dp(16), ui.dp(16), ui.dp(16));
 
-        LinearLayout main = card(page, cardColor());
+        powerCard = ui.card(page, R.color.cj_primary_container);
+        powerCard.setPadding(0, ui.dp(8), 0, ui.dp(8));
         power = new Switch(this);
-        power.setText("CarPlay");
-        power.setTextSize(22);
-        power.setTypeface(Typeface.DEFAULT_BOLD);
         power.setOnClickListener(v -> setOn(power.isChecked()));
-        main.addView(power);
-        status = text("", 15);
-        status.setAlpha(0.75f);
-        status.setPadding(0, dp(4), 0, 0);
-        main.addView(status);
-        LinearLayout actions = new LinearLayout(this);
-        retry = new Button(this);
-        retry.setText("Retry");
-        retry.setAllCaps(false);
-        retry.setOnClickListener(v -> startService(
+        status = ui.row(powerCard, getDrawable(R.drawable.ic_cj_cast), true, "CarPlay", "",
+                power, v -> setOn(!power.isChecked()));
+        ((TextView) ((ViewGroup) status.getParent()).getChildAt(0)).setTextSize(20);
+        actions = new LinearLayout(this);
+        actions.setPadding(ui.dp(72), 0, ui.dp(16), ui.dp(8));
+        retry = ui.button("Retry", true, v -> startService(
                 new Intent(this, CarjackService.class).setAction(CarjackService.ACTION_RETRY)));
         actions.addView(retry);
-        bluetoothSettings = new Button(this, null, android.R.attr.borderlessButtonStyle);
-        bluetoothSettings.setText("Bluetooth settings");
-        bluetoothSettings.setAllCaps(false);
-        bluetoothSettings.setOnClickListener(v -> openBluetoothSettings());
+        bluetoothSettings = ui.button("Bluetooth settings", false,
+                v -> openBluetoothSettings());
         actions.addView(bluetoothSettings);
-        main.addView(actions);
+        powerCard.addView(actions);
 
-        LinearLayout settings = card(page, cardColor());
-        bike = new Spinner(this);
-        row(settings, "Bike", bike);
-        app = new Spinner(this);
-        row(settings, "App on the bike", app);
-        Spinner size = new Spinner(this);
-        row(settings, "Text and icons", size);
-        size.setAdapter(adapter(java.util.Arrays.asList(SIZES)));
-        size.setSelection(densityIndex());
-        size.setOnItemSelectedListener(selected(densityIndex(), i -> Variant.prefs(this).edit()
-                .putString("density", DENSITIES[i] == 0 ? "" : Integer.toString(DENSITIES[i]))
-                .apply()));
-        fillApps();
+        page.addView(ui.heading("Connection"));
+        settings = ui.card(page, R.color.cj_surface_container);
+        settings.setPadding(0, ui.dp(4), 0, ui.dp(4));
+        ((LinearLayout.LayoutParams) settings.getLayoutParams()).topMargin = 0;
 
-        Button pair = new Button(this, null, android.R.attr.borderlessButtonStyle);
-        pair.setText("Make this phone visible to pair");
-        pair.setAllCaps(false);
-        pair.setOnClickListener(v -> startActivity(
-                new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+        page.addView(ui.heading("Pairing"));
+        LinearLayout pairing = ui.card(page, R.color.cj_surface_container);
+        pairing.setPadding(0, ui.dp(4), 0, ui.dp(4));
+        ((LinearLayout.LayoutParams) pairing.getLayoutParams()).topMargin = 0;
+        ui.row(pairing, getDrawable(R.drawable.ic_cj_visibility), true,
+                "Make this phone visible", "So a unit can find it to pair", null,
+                v -> startActivity(new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
                         .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION,
                                 DISCOVERABLE_SECONDS)));
-        page.addView(pair);
+        ui.row(pairing, getDrawable(R.drawable.ic_cj_bluetooth), true, "Bluetooth settings",
+                "Pair or forget units", null, v -> openBluetoothSettings());
 
-        ScrollView scroll = new ScrollView(this);
-        scroll.setBackgroundColor(color(android.R.color.system_neutral1_10,
-                android.R.color.system_neutral1_900));
-        scroll.addView(page);
-        // Drawn edge to edge, so the bars' insets are ours to keep clear of.
-        scroll.setOnApplyWindowInsetsListener((v, insets) -> {
-            Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
-            v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
-            return WindowInsets.CONSUMED;
-        });
-        setContentView(scroll);
         Shizuku.addRequestPermissionResultListener(shizukuResult);
         Variant.prefs(this).registerOnSharedPreferenceChangeListener(prefsChanged);
     }
@@ -171,7 +148,8 @@ public final class MainActivity extends Activity {
 
     private void refresh() {
         showPower();
-        fillBikes();
+        findUnits();
+        showSettings();
         showSetup();
         autoSetUp();
     }
@@ -179,12 +157,58 @@ public final class MainActivity extends Activity {
     private void showPower() {
         boolean on = BootReceiver.isOn(this);
         power.setChecked(on);
-        status.setText(on ? Variant.setting(this, "status", "Waiting for the bike") : "Off");
+        status.setText(on ? Variant.setting(this, "status", "Waiting for the unit") : "Off");
+        powerCard.setBackground(ui.shape(on ? R.color.cj_primary_container
+                : R.color.cj_surface_container_high, 28));
         SharedPreferences prefs = Variant.prefs(this);
-        retry.setVisibility(on && prefs.getBoolean("retryable", false) ? View.VISIBLE : View.GONE);
+        boolean showRetry = on && prefs.getBoolean("retryable", false);
         // Nothing connected: the phone's own Bluetooth page is where that gets sorted.
-        bluetoothSettings.setVisibility(on && !prefs.getBoolean("linked", false)
-                ? View.VISIBLE : View.GONE);
+        boolean showSettings = on && !prefs.getBoolean("linked", false);
+        retry.setVisibility(showRetry ? View.VISIBLE : View.GONE);
+        bluetoothSettings.setVisibility(showSettings ? View.VISIBLE : View.GONE);
+        actions.setVisibility(showRetry || showSettings ? View.VISIBLE : View.GONE);
+    }
+
+    /** Each a row showing its current value, opening its choices. */
+    private void showSettings() {
+        settings.removeAllViews();
+        int unit = Math.max(0, indexOfIgnoreCase(unitAddresses,
+                Variant.setting(this, "target", "")));
+        ui.row(settings, getDrawable(R.drawable.ic_cj_bluetooth), true, "Unit",
+                unitNames.get(unit), ui.chevron(), v -> chooseUnit());
+
+        String app = Choices.current(this);
+        boolean glyph = app.equals(Previews.HOME) && Variant.homeApp(this) == null;
+        ui.row(settings, Choices.icon(this, app), glyph, "On connect", Choices.name(this, app),
+                ui.chevron(), v -> startActivity(new Intent(this, OnConnectActivity.class)));
+
+        ui.row(settings, getDrawable(R.drawable.ic_cj_text_size), true, "Text and icons",
+                SIZES[densityIndex()], ui.chevron(), v -> chooseSize());
+    }
+
+    private void chooseUnit() {
+        int current = Math.max(0, indexOfIgnoreCase(unitAddresses,
+                Variant.setting(this, "target", "")));
+        new AlertDialog.Builder(this)
+                .setTitle("Unit")
+                .setSingleChoiceItems(unitNames.toArray(new String[0]), current, (d, i) -> {
+                    Variant.prefs(this).edit().putString("target", unitAddresses.get(i)).apply();
+                    d.dismiss();
+                    showSettings();
+                })
+                .show();
+    }
+
+    private void chooseSize() {
+        new AlertDialog.Builder(this)
+                .setTitle("Text and icons on the unit")
+                .setSingleChoiceItems(SIZES, densityIndex(), (d, i) -> {
+                    Variant.prefs(this).edit().putString("density",
+                            DENSITIES[i] == 0 ? "" : Integer.toString(DENSITIES[i])).apply();
+                    d.dismiss();
+                    showSettings();
+                })
+                .show();
     }
 
     private void openBluetoothSettings() {
@@ -208,7 +232,7 @@ public final class MainActivity extends Activity {
         // With Shizuku, autoSetUp sees to these.
         if (!ShizukuDisplay.available()) {
             if (!permissionsGranted()) {
-                step("Bluetooth, Wi-Fi and notification permissions", "Allow",
+                step("Bluetooth, Wi-Fi, notification and photo permissions", "Allow",
                         v -> requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS));
             }
             if (!bluetoothOn()) {
@@ -216,8 +240,19 @@ public final class MainActivity extends Activity {
                         new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)));
             }
         }
-        if (permissionsGranted() && bluetoothOn() && bikeAddresses.size() <= 1) {
+        if (permissionsGranted() && bluetoothOn() && unitAddresses.size() <= 1) {
             step("No CarPlay unit is paired yet", "Pair", v -> openBluetoothSettings());
+        }
+        if (setup.getChildCount() > 0) {
+            LinearLayout heading = new LinearLayout(this);
+            heading.setGravity(Gravity.CENTER_VERTICAL);
+            heading.addView(ui.icon(R.drawable.ic_cj_shield, R.color.cj_on_tertiary_container,
+                    20));
+            TextView words = ui.text("Finish setting up", 16, R.color.cj_on_tertiary_container);
+            words.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            words.setPadding(ui.dp(10), 0, 0, 0);
+            heading.addView(words);
+            setup.addView(heading, 0);
         }
         setup.setVisibility(setup.getChildCount() == 0 ? View.GONE : View.VISIBLE);
     }
@@ -256,61 +291,31 @@ public final class MainActivity extends Activity {
     }
 
     /** Automatic, then each paired CarPlay unit. */
-    private void fillBikes() {
-        List<String> names = new ArrayList<>();
-        bikeAddresses.clear();
-        names.add("Whichever connects");
-        bikeAddresses.add("");
+    private void findUnits() {
+        unitNames.clear();
+        unitAddresses.clear();
+        unitNames.add("Whichever connects");
+        unitAddresses.add("");
         BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
         if (bluetoothOn() && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
                 == PackageManager.PERMISSION_GRANTED) {
             for (BluetoothDevice device : adapter.getBondedDevices()) {
                 if (Bluetooth.hostsIap(device.getUuids())) {
-                    names.add(device.getName() != null ? device.getName() : device.getAddress());
-                    bikeAddresses.add(device.getAddress());
+                    unitNames.add(device.getName() != null ? device.getName()
+                            : device.getAddress());
+                    unitAddresses.add(device.getAddress());
                 }
             }
         }
-        bike.setOnItemSelectedListener(null);
-        bike.setAdapter(adapter(names));
-        String target = Variant.setting(this, "target", "");
-        int current = 0;
-        for (int i = 0; i < bikeAddresses.size(); i++) {
-            if (bikeAddresses.get(i).equalsIgnoreCase(target)) {
-                current = i;
-            }
-        }
-        bike.setSelection(current);
-        bike.setOnItemSelectedListener(selected(current, i -> Variant.prefs(this).edit()
-                .putString("target", bikeAddresses.get(i)).apply()));
     }
 
-    /** carjack's launcher, then every app with a launcher icon, by name. */
-    private void fillApps() {
-        PackageManager pm = getPackageManager();
-        List<ResolveInfo> found = pm.queryIntentActivities(
-                new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0);
-        List<String[]> apps = new ArrayList<>();
-        for (ResolveInfo info : found) {
-            String pkg = info.activityInfo.packageName;
-            if (!pkg.equals(getPackageName())) {
-                apps.add(new String[] {info.loadLabel(pm).toString(), pkg});
+    private static int indexOfIgnoreCase(List<String> list, String value) {
+        for (int i = 0; i < list.size(); i++) {
+            if (list.get(i).equalsIgnoreCase(value)) {
+                return i;
             }
         }
-        apps.sort((a, b) -> a[0].compareToIgnoreCase(b[0]));
-        List<String> names = new ArrayList<>();
-        appPackages.clear();
-        names.add("Carjack launcher");
-        appPackages.add("");
-        for (String[] a : apps) {
-            names.add(a[0]);
-            appPackages.add(a[1]);
-        }
-        app.setAdapter(adapter(names));
-        int chosen = Math.max(appPackages.indexOf(Variant.setting(this, "app", "")), 0);
-        app.setSelection(chosen);
-        app.setOnItemSelectedListener(selected(chosen, i -> Variant.prefs(this).edit()
-                .putString("app", appPackages.get(i)).apply()));
+        return -1;
     }
 
     private int densityIndex() {
@@ -350,99 +355,15 @@ public final class MainActivity extends Activity {
         refresh();
     }
 
-    // Layout helpers.
-
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
-    }
-
-    private boolean night() {
-        return (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
-                == Configuration.UI_MODE_NIGHT_YES;
-    }
-
-    private int color(int light, int dark) {
-        return getColor(night() ? dark : light);
-    }
-
-    private int cardColor() {
-        return color(android.R.color.system_neutral2_50, android.R.color.system_neutral2_800);
-    }
-
-    private TextView text(String value, int sp) {
-        TextView view = new TextView(this);
-        view.setText(value);
-        view.setTextSize(sp);
-        android.content.res.TypedArray primary =
-                obtainStyledAttributes(new int[] {android.R.attr.textColorPrimary});
-        view.setTextColor(primary.getColorStateList(0));
-        primary.recycle();
-        return view;
-    }
-
-    private LinearLayout card(LinearLayout parent, int background) {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(20), dp(16), dp(20), dp(16));
-        GradientDrawable shape = new GradientDrawable();
-        shape.setCornerRadius(dp(24));
-        shape.setColor(background);
-        card.setBackground(shape);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        params.topMargin = dp(16);
-        parent.addView(card, params);
-        return card;
-    }
-
-    private void row(LinearLayout card, String label, View control) {
-        TextView name = text(label, 13);
-        name.setAlpha(0.7f);
-        name.setPadding(0, card.getChildCount() == 0 ? 0 : dp(12), 0, 0);
-        card.addView(name);
-        card.addView(control);
-    }
-
     private void step(String what, String action, View.OnClickListener onClick) {
         LinearLayout line = new LinearLayout(this);
         line.setGravity(Gravity.CENTER_VERTICAL);
-        TextView label = text(what, 15);
+        line.setPadding(0, ui.dp(12), 0, 0);
+        TextView label = ui.text(what, 15, R.color.cj_on_tertiary_container);
+        label.setPadding(0, 0, ui.dp(12), 0);
         line.addView(label, new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        Button button = new Button(this);
-        button.setText(action);
-        button.setAllCaps(false);
-        button.setOnClickListener(onClick);
-        line.addView(button);
+        line.addView(ui.button(action, true, onClick));
         setup.addView(line);
-    }
-
-    private ArrayAdapter<String> adapter(List<String> items) {
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, items);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        return adapter;
-    }
-
-    /**
-     * Calls back for a change from {@code initial} only: a spinner reports its initial selection
-     * once laid out, which would otherwise overwrite a choice missing from today's list.
-     */
-    private static AdapterView.OnItemSelectedListener selected(int initial,
-            java.util.function.IntConsumer onSelected) {
-        return new AdapterView.OnItemSelectedListener() {
-            private int last = initial;
-
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (position != last) {
-                    last = position;
-                    onSelected.accept(position);
-                }
-            }
-
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {}
-        };
     }
 }

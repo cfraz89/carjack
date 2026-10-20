@@ -32,7 +32,7 @@ class TaskbarView @JvmOverloads constructor(
         findViewById<View>(R.id.taskbar_settings).setOnClickListener { onSettings?.invoke() }
         // Clipped, so the blur follows the pill rather than filling the bounding box.
         clipToOutline = true
-        Blur.apply(this, resources.getDimension(R.dimen.blur_radius))
+        Blur.apply(this)
     }
 
     fun refresh() {

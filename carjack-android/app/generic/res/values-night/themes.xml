@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="CarjackApp.Dialog" parent="@android:style/Theme.DeviceDefault.Dialog.Alert">
+        <item name="android:colorAccent">@color/cj_primary</item>
+        <item name="android:colorControlActivated">@color/cj_primary</item>
+        <item name="android:colorBackground">@color/cj_surface_container_high</item>
+    </style>
+</resources>
