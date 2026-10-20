@@ -81,11 +81,14 @@
         <activity
             android:name="io.github.cfraz89.slipstream.launcher.AllAppsActivity"
             android:exported="false"
-            android:theme="@style/SlipstreamTheme.Panel" />
+            android:theme="@style/SlipstreamTheme.Panel"
+            android:launchMode="singleTop" />
+        <!-- singleTop, both: taps queued up behind a lagging stream open one, not a stack. -->
         <activity
             android:name="io.github.cfraz89.slipstream.launcher.SettingsActivity"
             android:exported="false"
-            android:theme="@style/SlipstreamTheme.Panel.Full" />
+            android:theme="@style/SlipstreamTheme.Panel.Full"
+            android:launchMode="singleTop" />
 
         <service
             android:name=".SlipstreamService"
