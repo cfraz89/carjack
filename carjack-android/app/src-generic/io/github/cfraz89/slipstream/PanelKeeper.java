@@ -46,8 +46,9 @@ final class PanelKeeper {
     private final PowerManager power;
     private final DisplayManager displays;
     private Thread ticker;
-    private Process touches;
-    private Process keys;
+    /** What stops each watcher. */
+    private Runnable touches;
+    private Runnable keys;
     private volatile long lastTouch;
     private volatile boolean panelOff;
     private long idleMs;
@@ -100,14 +101,18 @@ final class PanelKeeper {
         }
         idleMs = parse(savedTimeout, DEFAULT_TIMEOUT_MS);
         put(SYSTEM, TIMEOUT, HELD_TIMEOUT);
-        put(GLOBAL, POWER_PRESS, POWER_PRESS_NOTHING);
         lastTouch = SystemClock.uptimeMillis();
-        touches = watch("ABS_MT_POSITION_X", line -> touched());
-        keys = watch("KEY_POWER", line -> {
-            if (line.contains("KEY_POWER") && line.contains("DOWN")) {
+        touches = watch("ABS_MT_POSITION_X", (type, code, value) -> touched());
+        keys = watch("KEY_POWER", (type, code, value) -> {
+            if (type == EV_KEY && code == KEY_POWER && value == 1) {
+                Log.i(TAG, "Power key pressed");
                 powerPressed();
             }
         });
+        // The press is only ours to take where we can see it; otherwise it sleeps as ever.
+        if (keys != null) {
+            put(GLOBAL, POWER_PRESS, POWER_PRESS_NOTHING);
+        }
         ticker = new Thread(this::tick, "slipstream-panel");
         ticker.start();
         Log.i(TAG, "Keeping the phone awake; its panel goes off after " + idleMs
@@ -120,9 +125,9 @@ final class PanelKeeper {
         }
         ticker.interrupt();
         ticker = null;
-        for (Process watcher : new Process[] {touches, keys}) {
+        for (Runnable watcher : new Runnable[] {touches, keys}) {
             if (watcher != null) {
-                watcher.destroy();
+                watcher.run();
             }
         }
         touches = null;
@@ -221,34 +226,68 @@ final class PanelKeeper {
         }
     }
 
+    /** One input event: its type, code and value, as the kernel's struct input_event has them. */
+    private interface InputEvent {
+        void on(int type, int code, int value);
+    }
+
+    private static final int EV_KEY = 1;
+    private static final int KEY_POWER = 116;
+    /** struct input_event on arm64: a 16-byte timeval, then u16 type, u16 code, s32 value. */
+    private static final int EVENT_SIZE = 24;
+
     /**
-     * Follows the input device that reports {@code capability} (in getevent's listing), handing
-     * each event line to {@code onLine}; null where there's none.
+     * Follows the input device that reports {@code capability} (in getevent's listing), read
+     * straight from its node - getevent's own output is block-buffered through a pipe, holding a
+     * single key press back indefinitely. Returns what stops it, or null where there's none.
      */
-    private Process watch(String capability, java.util.function.Consumer<String> onLine) {
+    private Runnable watch(String capability, InputEvent onEvent) {
         String device = inputDevice(capability);
         if (device == null) {
             Log.w(TAG, "No input device with " + capability);
             return null;
         }
-        Process process;
+        java.io.FileInputStream in;
         try {
-            process = new ProcessBuilder("getevent", "-ql", device).start();
+            in = new java.io.FileInputStream(device);
         } catch (IOException e) {
             Log.w(TAG, "Can't watch " + device, e);
             return null;
         }
-        new Thread(() -> {
-            try (BufferedReader in = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(), StandardCharsets.US_ASCII))) {
-                String line;
-                while ((line = in.readLine()) != null) {
-                    onLine.accept(line);
+        Log.i(TAG, "Watching " + device + " for " + capability);
+        java.util.concurrent.atomic.AtomicBoolean stopped =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        Thread reader = new Thread(() -> {
+            byte[] event = new byte[EVENT_SIZE];
+            java.nio.ByteBuffer fields = java.nio.ByteBuffer.wrap(event)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            try {
+                while (!stopped.get()) {
+                    int read = 0;
+                    while (read < EVENT_SIZE) {
+                        int n = in.read(event, read, EVENT_SIZE - read);
+                        if (n < 0) {
+                            return;
+                        }
+                        read += n;
+                    }
+                    if (!stopped.get()) {
+                        onEvent.on(fields.getShort(16) & 0xffff, fields.getShort(18) & 0xffff,
+                                fields.getInt(20));
+                    }
                 }
             } catch (IOException ignored) {
+            } finally {
+                try {
+                    in.close();
+                } catch (IOException ignored) {
+                }
             }
-        }, "slipstream-" + capability).start();
-        return process;
+        }, "slipstream-" + capability);
+        // A read blocks until the next event, so a stopped watcher may linger until then.
+        reader.setDaemon(true);
+        reader.start();
+        return () -> stopped.set(true);
     }
 
     private static String inputDevice(String capability) {
