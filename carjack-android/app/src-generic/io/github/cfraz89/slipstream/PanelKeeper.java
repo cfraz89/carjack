@@ -242,11 +242,21 @@ final class PanelKeeper {
      * single key press back indefinitely. Returns what stops it, or null where there's none.
      */
     private Runnable watch(String capability, InputEvent onEvent) {
-        String device = inputDevice(capability);
-        if (device == null) {
+        java.util.List<Runnable> stops = new java.util.ArrayList<>();
+        for (String device : inputDevices(capability)) {
+            Runnable stop = watchDevice(device, capability, onEvent);
+            if (stop != null) {
+                stops.add(stop);
+            }
+        }
+        if (stops.isEmpty()) {
             Log.w(TAG, "No input device with " + capability);
             return null;
         }
+        return () -> stops.forEach(Runnable::run);
+    }
+
+    private Runnable watchDevice(String device, String capability, InputEvent onEvent) {
         java.io.FileInputStream in;
         try {
             in = new java.io.FileInputStream(device);
@@ -290,16 +300,22 @@ final class PanelKeeper {
         return () -> stopped.set(true);
     }
 
-    private static String inputDevice(String capability) {
+    /**
+     * Every input device reporting {@code capability}: more than one may, as the power key does
+     * on a Pixel - the button's own gpio_keys, and the touchscreen for its wake gesture.
+     */
+    private static java.util.List<String> inputDevices(String capability) {
+        java.util.List<String> devices = new java.util.ArrayList<>();
         String device = null;
         for (String line : run("getevent", "-pl").split("\n")) {
             if (line.startsWith("add device")) {
                 device = line.substring(line.indexOf(':') + 1).trim();
-            } else if (device != null && line.contains(capability)) {
-                return device;
+            } else if (device != null && line.contains(capability)
+                    && !devices.contains(device)) {
+                devices.add(device);
             }
         }
-        return null;
+        return devices;
     }
 
     private static long parse(String value, long fallback) {
