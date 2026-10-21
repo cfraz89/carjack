@@ -74,6 +74,8 @@ final class ShizukuDisplay {
                 return null;
             }
             s.launch(app);
+            Log.i(TAG, "Display up; the phone's panel " + (keepPanel
+                    ? "goes dark instead of the phone sleeping" : "sleeps with the phone, as usual"));
             if (keepPanel) {
                 s.keepPanel(true);
             }
