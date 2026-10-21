@@ -232,7 +232,9 @@ public final class MainActivity extends Activity {
         unlocked.setClickable(false);
         ui.row(settings, getDrawable(R.drawable.ic_sl_lock_open), true,
                 "Stay unlocked while connected",
-                "The screen going off doesn't lock the phone, so apps keep showing on the unit",
+                "The screen can go off without locking, so the unit carries on. For the power"
+                        + " button too, turn off \"Power button instantly locks\" in the screen"
+                        + " lock's settings",
                 unlocked, v -> {
                     unlocked.setChecked(!unlocked.isChecked());
                     Variant.prefs(this).edit()
