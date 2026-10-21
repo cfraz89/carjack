@@ -17,29 +17,42 @@ import java.nio.file.Files;
 /**
  * The phone's screen going dark without the phone going to sleep, while the unit's display is
  * up: asleep, Android drops the touches sent to the unit, whose display shares the phone's
- * display group. Android's own timeout is held off; in its place, once the phone's touchscreen
- * has been idle that long the panel is switched off ({@code cmd display power-off}), and a touch
- * on it brings it back. The power button still sleeps the phone as ever. Runs in the shell.
+ * display group, and a lock screen would hide its apps. So for the session Android's own timeout
+ * is held off and the power button's short press does nothing; in their place the panel is
+ * switched off ({@code cmd display power-off}) once the phone's touchscreen has been idle for the
+ * user's timeout, or at a press of the power button. A touch or another press brings it back.
+ * Runs in the shell.
  */
 final class PanelKeeper {
     private static final String TAG = "carjack";
+    private static final String SYSTEM = "system";
+    private static final String GLOBAL = "global";
     private static final String TIMEOUT = "screen_off_timeout";
     private static final String BRIGHTNESS_MODE = "screen_brightness_mode";
+    private static final String POWER_PRESS = "power_button_short_press";
     /** Never, in effect. */
     private static final String HELD_TIMEOUT = Integer.toString(Integer.MAX_VALUE);
+    /** PhoneWindowManager's SHORT_PRESS_POWER_NOTHING: the press is ours to act on. */
+    private static final String POWER_PRESS_NOTHING = "0";
     private static final long DEFAULT_TIMEOUT_MS = 30_000;
     private static final long TICK_MS = 1_000;
-    /** The settings to put back, kept on disk so a crash can't leave the phone never sleeping. */
+    /**
+     * What to put back, kept on disk so a crash can't leave the phone never sleeping: the
+     * timeout, the power press, and the brightness mode while the panel is dark. A line is empty
+     * where the setting was unset.
+     */
     private static final File SAVED = new File("/data/local/tmp/slipstream-panel");
 
     private final PowerManager power;
     private final DisplayManager displays;
     private Thread ticker;
     private Process touches;
+    private Process keys;
     private volatile long lastTouch;
     private volatile boolean panelOff;
     private long idleMs;
-    private String savedTimeout = "";
+    private String savedTimeout;
+    private String savedPowerPress;
     /** The user's brightness mode, held while the panel is dark. */
     private String brightnessWhileDark;
 
@@ -57,13 +70,15 @@ final class PanelKeeper {
         try {
             String[] saved = new String(Files.readAllBytes(SAVED.toPath()),
                     StandardCharsets.UTF_8).split("\n", -1);
-            put(TIMEOUT, saved[0]);
-            // Only there when the panel was dark: the mode to go back to.
-            if (saved.length > 1 && !saved[1].isEmpty()) {
-                put(BRIGHTNESS_MODE, saved[1]);
+            put(SYSTEM, TIMEOUT, saved[0]);
+            if (saved.length > 1) {
+                put(GLOBAL, POWER_PRESS, saved[1]);
+            }
+            if (saved.length > 2 && !saved[2].isEmpty()) {
+                put(SYSTEM, BRIGHTNESS_MODE, saved[2]);
                 run("cmd", "display", "power-reset", "0");
             }
-            Log.i(TAG, "Put back the screen timeout a stopped session left held");
+            Log.i(TAG, "Put back the screen settings a stopped session left held");
         } catch (IOException e) {
             Log.w(TAG, "Couldn't read " + SAVED, e);
         }
@@ -75,20 +90,26 @@ final class PanelKeeper {
             return;
         }
         restoreLeftovers();
-        String timeout = get(TIMEOUT);
-        savedTimeout = timeout == null ? "" : timeout;
-        save(null);
-        if (!SAVED.exists()) {
-            Log.w(TAG, "Can't keep the screen timeout safe; leaving it alone");
+        savedTimeout = get(SYSTEM, TIMEOUT);
+        savedPowerPress = get(GLOBAL, POWER_PRESS);
+        if (!save(null)) {
+            Log.w(TAG, "Can't keep the screen settings safe; leaving them alone");
             return;
         }
-        idleMs = parse(timeout, DEFAULT_TIMEOUT_MS);
-        put(TIMEOUT, HELD_TIMEOUT);
+        idleMs = parse(savedTimeout, DEFAULT_TIMEOUT_MS);
+        put(SYSTEM, TIMEOUT, HELD_TIMEOUT);
+        put(GLOBAL, POWER_PRESS, POWER_PRESS_NOTHING);
         lastTouch = SystemClock.uptimeMillis();
-        watchTouches();
+        touches = watch("ABS_MT_POSITION_X", line -> touched());
+        keys = watch("KEY_POWER", line -> {
+            if (line.contains("KEY_POWER") && line.contains("DOWN")) {
+                powerPressed();
+            }
+        });
         ticker = new Thread(this::tick, "slipstream-panel");
         ticker.start();
-        Log.i(TAG, "Keeping the phone awake; its panel goes off after " + idleMs + "ms idle");
+        Log.i(TAG, "Keeping the phone awake; its panel goes off after " + idleMs
+                + "ms idle or at the power button");
     }
 
     synchronized void stop() {
@@ -97,10 +118,13 @@ final class PanelKeeper {
         }
         ticker.interrupt();
         ticker = null;
-        if (touches != null) {
-            touches.destroy();
-            touches = null;
+        for (Process watcher : new Process[] {touches, keys}) {
+            if (watcher != null) {
+                watcher.destroy();
+            }
         }
+        touches = null;
+        keys = null;
         if (panelOff) {
             lit();
         }
@@ -111,15 +135,14 @@ final class PanelKeeper {
         while (!Thread.currentThread().isInterrupted()) {
             synchronized (this) {
                 if (!power.isInteractive()) {
-                    // The power button: asleep the ordinary way. Start over once it wakes.
+                    // Asleep after all (a long press's Power off, say): start over once awake.
                     if (panelOff) {
                         lit();
                     }
                     lastTouch = SystemClock.uptimeMillis();
                 } else if (panelOff) {
                     // A brightness change re-applies the panel's state; keep it off.
-                    Display phone = displays.getDisplay(Display.DEFAULT_DISPLAY);
-                    if (phone != null && phone.getState() != Display.STATE_OFF) {
+                    if (phoneState() != Display.STATE_OFF) {
                         run("cmd", "display", "power-off", "0");
                     }
                 } else if (SystemClock.uptimeMillis() - lastTouch >= idleMs) {
@@ -134,12 +157,37 @@ final class PanelKeeper {
         }
     }
 
+    private synchronized void touched() {
+        lastTouch = SystemClock.uptimeMillis();
+        if (panelOff) {
+            lit();
+            Log.i(TAG, "Phone panel back on at a touch");
+        }
+    }
+
+    /** With the short press left to us: dark if lit, lit if we darkened it. */
+    private synchronized void powerPressed() {
+        lastTouch = SystemClock.uptimeMillis();
+        if (panelOff) {
+            lit();
+            Log.i(TAG, "Phone panel back on at the power button");
+        } else if (power.isInteractive() && phoneState() == Display.STATE_ON) {
+            dark();
+        }
+        // Otherwise asleep: Android wakes it as ever.
+    }
+
+    private int phoneState() {
+        Display phone = displays.getDisplay(Display.DEFAULT_DISPLAY);
+        return phone == null ? Display.STATE_UNKNOWN : phone.getState();
+    }
+
     /** Off, with manual brightness meanwhile: auto-brightness would keep re-lighting it. */
     private void dark() {
         panelOff = true;
-        brightnessWhileDark = get(BRIGHTNESS_MODE);
-        save(brightnessWhileDark);
-        put(BRIGHTNESS_MODE, "0");
+        brightnessWhileDark = get(SYSTEM, BRIGHTNESS_MODE);
+        save(brightnessWhileDark == null ? "" : brightnessWhileDark);
+        put(SYSTEM, BRIGHTNESS_MODE, "0");
         run("cmd", "display", "power-off", "0");
         Log.i(TAG, "Phone panel off; the unit carries on");
     }
@@ -147,63 +195,59 @@ final class PanelKeeper {
     /** Back as it was: the brightness mode the user had, and the panel's proper state. */
     private void lit() {
         panelOff = false;
-        put(BRIGHTNESS_MODE, brightnessWhileDark);
+        put(SYSTEM, BRIGHTNESS_MODE, brightnessWhileDark);
         save(null);
         run("cmd", "display", "power-reset", "0");
     }
 
-    private synchronized void panelOn() {
-        if (panelOff) {
-            lit();
-            Log.i(TAG, "Phone panel back on");
-        }
-    }
-
-    /** The held timeout, and the brightness mode while dark, for a crash to be undone with. */
-    private void save(String brightness) {
+    private boolean save(String brightness) {
+        String saved = nonNull(savedTimeout) + "\n" + nonNull(savedPowerPress) + "\n"
+                + nonNull(brightness);
         try {
-            Files.write(SAVED.toPath(), (savedTimeout + "\n" + (brightness == null ? "" : brightness))
-                    .getBytes(StandardCharsets.UTF_8));
+            Files.write(SAVED.toPath(), saved.getBytes(StandardCharsets.UTF_8));
+            return true;
         } catch (IOException e) {
-            Log.w(TAG, "Couldn't update " + SAVED, e);
+            Log.w(TAG, "Couldn't write " + SAVED, e);
+            return false;
         }
     }
 
-    /** Any event from the phone's touchscreen is a touch: the panel comes back, idle restarts. */
-    private void watchTouches() {
-        String device = touchscreen();
+    /**
+     * Follows the input device that reports {@code capability} (in getevent's listing), handing
+     * each event line to {@code onLine}; null where there's none.
+     */
+    private Process watch(String capability, java.util.function.Consumer<String> onLine) {
+        String device = inputDevice(capability);
         if (device == null) {
-            Log.w(TAG, "No touchscreen to watch; the panel comes back with the power button only");
-            return;
+            Log.w(TAG, "No input device with " + capability);
+            return null;
         }
+        Process process;
         try {
-            touches = new ProcessBuilder("getevent", "-q", device).start();
+            process = new ProcessBuilder("getevent", "-ql", device).start();
         } catch (IOException e) {
             Log.w(TAG, "Can't watch " + device, e);
-            return;
+            return null;
         }
-        Process watched = touches;
         new Thread(() -> {
             try (BufferedReader in = new BufferedReader(
-                    new InputStreamReader(watched.getInputStream(), StandardCharsets.US_ASCII))) {
-                while (in.readLine() != null) {
-                    lastTouch = SystemClock.uptimeMillis();
-                    if (panelOff) {
-                        panelOn();
-                    }
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.US_ASCII))) {
+                String line;
+                while ((line = in.readLine()) != null) {
+                    onLine.accept(line);
                 }
             } catch (IOException ignored) {
             }
-        }, "slipstream-touches").start();
+        }, "slipstream-" + capability).start();
+        return process;
     }
 
-    /** The input device reporting multi-touch positions, from getevent's device listing. */
-    private static String touchscreen() {
+    private static String inputDevice(String capability) {
         String device = null;
         for (String line : run("getevent", "-pl").split("\n")) {
             if (line.startsWith("add device")) {
                 device = line.substring(line.indexOf(':') + 1).trim();
-            } else if (device != null && line.contains("ABS_MT_POSITION_X")) {
+            } else if (device != null && line.contains(capability)) {
                 return device;
             }
         }
@@ -219,17 +263,21 @@ final class PanelKeeper {
         }
     }
 
-    /** A system setting, or null where unset. */
-    private static String get(String key) {
-        String value = run("settings", "get", "system", key).trim();
+    private static String nonNull(String value) {
+        return value == null ? "" : value;
+    }
+
+    /** A setting, or null where unset. */
+    private static String get(String namespace, String key) {
+        String value = run("settings", "get", namespace, key).trim();
         return value.isEmpty() || value.equals("null") ? null : value;
     }
 
-    private static void put(String key, String value) {
+    private static void put(String namespace, String key, String value) {
         if (value == null || value.isEmpty() || value.equals("null")) {
-            run("settings", "delete", "system", key);
+            run("settings", "delete", namespace, key);
         } else {
-            run("settings", "put", "system", key, value);
+            run("settings", "put", namespace, key, value);
         }
     }
 
