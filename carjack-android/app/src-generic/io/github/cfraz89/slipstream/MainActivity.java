@@ -227,6 +227,20 @@ public final class MainActivity extends Activity {
         ui.row(settings, getDrawable(R.drawable.ic_sl_text_size), true, "Scale",
                 SIZES[densityIndex()], ui.chevron(), v -> chooseSize());
 
+        Switch dark = new Switch(this);
+        dark.setChecked(Variant.keepsPanel(this));
+        dark.setClickable(false);
+        ui.row(settings, getDrawable(R.drawable.ic_sl_cast), true,
+                "Dark screen keeps the unit going (experimental)",
+                "During a session the phone's screen goes dark instead of the phone sleeping, so"
+                        + " the unit stays usable. Power button or a touch brings it back."
+                        + " Takes effect next session",
+                dark, v -> {
+                    dark.setChecked(!dark.isChecked());
+                    Variant.prefs(this).edit()
+                            .putBoolean("keep_panel", dark.isChecked()).apply();
+                });
+
         Switch unlocked = new Switch(this);
         unlocked.setChecked(Variant.holdsUnlock(this));
         unlocked.setClickable(false);

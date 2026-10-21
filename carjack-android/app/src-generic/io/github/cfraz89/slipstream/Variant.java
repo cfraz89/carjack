@@ -72,6 +72,11 @@ final class Variant {
     /** A day: in effect, no locking on screen-off while the unit is connected. */
     private static final String HELD_LOCK_AFTER = Integer.toString(24 * 60 * 60 * 1000);
 
+    /** Whether the phone's panel goes dark rather than the phone sleeping; off until proven. */
+    static boolean keepsPanel(Context context) {
+        return prefs(context).getBoolean("keep_panel", false);
+    }
+
     /** Whether to keep the phone unlocked while a unit's connected; the user's choice. */
     static boolean holdsUnlock(Context context) {
         return prefs(context).getBoolean("hold_unlock", true);
@@ -265,7 +270,8 @@ final class Variant {
     /** A display of the unit's own size with the chosen app on it, or null without Shizuku. */
     static Runnable openDisplay(Context context, int width, int height, int density,
             Surface target) {
-        Runnable close = ShizukuDisplay.open(target, width, height, density, appFor(context));
+        Runnable close = ShizukuDisplay.open(target, width, height, density, appFor(context),
+                keepsPanel(context));
         if (close == null) {
             Log.e(TAG, "No display: Shizuku isn't running or hasn't let Slipstream in");
         }

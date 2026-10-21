@@ -97,13 +97,6 @@ public final class DisplayService extends IDisplayService.Stub {
             Log.i(TAG, "Display " + id + " at " + width + "x" + height + ", " + density + "dpi");
             awake = new StayAwake(shellContext());
             awake.start();
-            try {
-                panel = new PanelKeeper(shellContext());
-                panel.start();
-            } catch (ReflectiveOperationException | RuntimeException e) {
-                Log.w(TAG, "No panel keeping; the phone sleeps as usual", e);
-                panel = null;
-            }
             return id;
         } catch (ReflectiveOperationException | RuntimeException e) {
             Log.e(TAG, "Could not create a display", e);
@@ -320,6 +313,26 @@ public final class DisplayService extends IDisplayService.Stub {
             Thread.currentThread().interrupt();
         }
         return "";
+    }
+
+    @Override
+    public synchronized void keepPanel(boolean keep) {
+        if (!keep || display == null) {
+            if (panel != null) {
+                panel.stop();
+                panel = null;
+            }
+            return;
+        }
+        if (panel == null) {
+            try {
+                panel = new PanelKeeper(shellContext());
+                panel.start();
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                Log.w(TAG, "No panel keeping; the phone sleeps as usual", e);
+                panel = null;
+            }
+        }
     }
 
     @Override

@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(18);
+            .version(19);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
@@ -60,9 +60,11 @@ final class ShizukuDisplay {
 
     /**
      * A display drawing into {@code target} with {@code app} (a component or package) on it;
-     * returns what closes it, or null where Shizuku can't make one.
+     * returns what closes it, or null where Shizuku can't make one. {@code keepPanel}: the phone's
+     * panel goes dark rather than the phone sleeping, meanwhile.
      */
-    static Runnable open(Surface target, int width, int height, int density, String app) {
+    static Runnable open(Surface target, int width, int height, int density, String app,
+            boolean keepPanel) {
         IDisplayService s = bind();
         if (s == null) {
             return null;
@@ -72,6 +74,9 @@ final class ShizukuDisplay {
                 return null;
             }
             s.launch(app);
+            if (keepPanel) {
+                s.keepPanel(true);
+            }
             active = s;
             return () -> {
                 active = null;

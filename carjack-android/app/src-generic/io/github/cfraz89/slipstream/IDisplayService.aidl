@@ -54,6 +54,12 @@ interface IDisplayService {
     /** Sets a Settings.Secure value; null deletes it, back to the default. */
     void setSecureSetting(String key, String value) = 15;
 
+    /**
+     * While the display is up, whether the phone's panel goes dark instead of the phone
+     * sleeping ({@link PanelKeeper}).
+     */
+    void keepPanel(boolean keep) = 16;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

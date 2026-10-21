@@ -77,6 +77,8 @@ final class PanelKeeper {
             if (saved.length > 2 && !saved[2].isEmpty()) {
                 put(SYSTEM, BRIGHTNESS_MODE, saved[2]);
                 run("cmd", "display", "power-reset", "0");
+                run("input", "keyevent", "KEYCODE_SLEEP");
+                run("input", "keyevent", "KEYCODE_WAKEUP");
             }
             Log.i(TAG, "Put back the screen settings a stopped session left held");
         } catch (IOException e) {
@@ -192,12 +194,19 @@ final class PanelKeeper {
         Log.i(TAG, "Phone panel off; the unit carries on");
     }
 
-    /** Back as it was: the brightness mode the user had, and the panel's proper state. */
+    /**
+     * Back as it was: the brightness mode the user had, and the panel's proper state. power-reset
+     * alone can be refused (silently: "runnable is null") when the display manager has the panel
+     * down as on already, so the phone also sleeps and wakes, a moment's dip, which always has
+     * the panel brought back up properly.
+     */
     private void lit() {
         panelOff = false;
         put(SYSTEM, BRIGHTNESS_MODE, brightnessWhileDark);
         save(null);
         run("cmd", "display", "power-reset", "0");
+        run("input", "keyevent", "KEYCODE_SLEEP");
+        run("input", "keyevent", "KEYCODE_WAKEUP");
     }
 
     private boolean save(String brightness) {
