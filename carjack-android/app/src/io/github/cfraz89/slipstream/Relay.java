@@ -156,7 +156,8 @@ final class Relay {
             if (texture == null) {
                 return;
             }
-            if (haveFrame && SystemClock.uptimeMillis() - lastDrawMs >= IDLE_REDRAW_MS) {
+            // Before the display's first frame too: black, but the session can start on it.
+            if (SystemClock.uptimeMillis() - lastDrawMs >= IDLE_REDRAW_MS) {
                 render(System.nanoTime());
             }
             handler.postDelayed(this, IDLE_REDRAW_MS);
@@ -199,11 +200,14 @@ final class Relay {
         GLES20.glViewport(0, 0, width, height);
         GLES20.glClearColor(0, 0, 0, 1);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-        // GL's origin is bottom left; the view's is top left.
-        GLES20.glViewport(viewX, height - viewY - viewHeight, viewWidth, viewHeight);
-        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "tex"), 1, false, matrix,
-                0);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        // Without a frame from the display yet, the texture holds nothing to draw.
+        if (haveFrame) {
+            // GL's origin is bottom left; the view's is top left.
+            GLES20.glViewport(viewX, height - viewY - viewHeight, viewWidth, viewHeight);
+            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "tex"), 1, false,
+                    matrix, 0);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        }
         if (pendingCapture != null) {
             pendingCapture.accept(readView());
             pendingCapture = null;

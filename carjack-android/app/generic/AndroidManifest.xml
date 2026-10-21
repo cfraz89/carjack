@@ -69,7 +69,8 @@
         </receiver>
 
         <!-- The launcher (launcher/), which Slipstream opens on the head unit's display by
-             component: not a home app on the phone. -->
+             component: not a home app on the phone. Shown when locked: the unit's display sits
+             in the phone's display group, which the lock screen would otherwise hide. -->
         <activity
             android:name="io.github.cfraz89.slipstream.launcher.HomeActivity"
             android:exported="true"
@@ -78,18 +79,21 @@
             android:stateNotNeeded="true"
             android:excludeFromRecents="true"
             android:clearTaskOnLaunch="true"
+            android:showWhenLocked="true"
             android:configChanges="keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode" />
         <activity
             android:name="io.github.cfraz89.slipstream.launcher.AllAppsActivity"
             android:exported="false"
             android:theme="@style/SlipstreamTheme.Panel"
-            android:launchMode="singleTop" />
+            android:launchMode="singleTop"
+            android:showWhenLocked="true" />
         <!-- singleTop, both: taps queued up behind a lagging stream open one, not a stack. -->
         <activity
             android:name="io.github.cfraz89.slipstream.launcher.SettingsActivity"
             android:exported="false"
             android:theme="@style/SlipstreamTheme.Panel.Full"
-            android:launchMode="singleTop" />
+            android:launchMode="singleTop"
+            android:showWhenLocked="true" />
 
         <service
             android:name=".SlipstreamService"

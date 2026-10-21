@@ -51,12 +51,17 @@ public final class DisplayService extends IDisplayService.Stub {
 
     /**
      * The phone's own log - WiFi, connectivity, Bluetooth, codecs - which the app's log can't see,
-     * while Slipstream is running. Two 4 MB files.
+     * while Slipstream is running. Three 8 MB files.
      */
     private void startSystemLog() {
+        // The last service's logcat outlives it; a second writer would rotate the files over
+        // each other, losing what came before the restart.
+        if (!run("pgrep", "-f", SYSTEM_LOG).isBlank()) {
+            return;
+        }
         try {
             systemLog = new ProcessBuilder("logcat", "-b", "main,system,crash", "-v", "time",
-                    "-f", SYSTEM_LOG, "-r", "4096", "-n", "1", "*:I").start();
+                    "-f", SYSTEM_LOG, "-r", "8192", "-n", "2", "*:I").start();
         } catch (java.io.IOException e) {
             Log.w(TAG, "No system log", e);
         }
