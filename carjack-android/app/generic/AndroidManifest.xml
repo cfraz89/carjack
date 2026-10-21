@@ -100,6 +100,13 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <!-- Log bundles, readable only by the app each is shared with. -->
+        <provider
+            android:name=".LogsProvider"
+            android:authorities="io.github.cfraz89.slipstream.logs"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
         <!-- Shizuku's handshake: how its server hands Slipstream a binder. -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"

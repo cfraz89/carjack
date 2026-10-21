@@ -52,19 +52,44 @@ public final class DisplayService extends IDisplayService.Stub {
 
     private Process systemLog;
 
+    /** What logs info worth keeping: Slipstream's own lines, and the parts a session leans on. */
+    private static final String[] SYSTEM_LOG_TAGS = {
+        "carjack", "AndroidRuntime", "ActivityManager", "ActivityTaskManager", "WindowManager",
+        "PowerManagerService", "DisplayManagerService", "DisplayDeviceRepository",
+        "KeyguardViewMediator", "WifiClientModeImpl", "WifiNetworkFactory",
+        "WifiConnectivityManager", "WifiNative", "ConnectivityService", "BluetoothAdapter",
+        "BluetoothManagerService", "AdapterService", "UserServiceManager", "MediaCodec",
+        "CCodec",
+    };
+
+    /** Copies the system log's files into {@code dir}, for the app to send on. */
+    @Override
+    public void copySystemLog(String dir) {
+        for (String suffix : new String[] {"", ".1", ".2", ".3"}) {
+            java.io.File log = new java.io.File(SYSTEM_LOG + suffix);
+            if (log.exists()) {
+                run("cp", log.getPath(), dir);
+            }
+        }
+    }
+
     /**
-     * The phone's own log - WiFi, connectivity, Bluetooth, codecs - which the app's log can't see,
-     * while Slipstream is running. Three 8 MB files.
+     * The phone's own log - WiFi, connectivity, Bluetooth, power, displays - which the app's log
+     * can't see, while Slipstream is running: warnings from everything, the rest only from what
+     * bears on a session, so days of it fit. Four 8 MB files.
      */
     private void startSystemLog() {
-        // The last service's logcat outlives it; a second writer would rotate the files over
-        // each other, losing what came before the restart.
-        if (!run("pgrep", "-f", SYSTEM_LOG).isBlank()) {
-            return;
-        }
+        // The last service's logcat outlives it, and two writers would rotate the files over each
+        // other: it goes first. -T keeps the new one from replaying what the last one wrote.
+        run("pkill", "-f", SYSTEM_LOG);
         try {
-            systemLog = new ProcessBuilder("logcat", "-b", "main,system,crash", "-v", "time",
-                    "-f", SYSTEM_LOG, "-r", "8192", "-n", "2", "*:I").start();
+            java.util.List<String> command = new java.util.ArrayList<>(java.util.List.of(
+                    "logcat", "-b", "main,system,crash", "-v", "time", "-T", "1",
+                    "-f", SYSTEM_LOG, "-r", "8192", "-n", "3", "*:W"));
+            for (String tag : SYSTEM_LOG_TAGS) {
+                command.add(tag + ":I");
+            }
+            systemLog = new ProcessBuilder(command).start();
         } catch (java.io.IOException e) {
             Log.w(TAG, "No system log", e);
         }

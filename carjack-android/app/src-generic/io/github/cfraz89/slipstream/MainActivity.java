@@ -124,6 +124,13 @@ public final class MainActivity extends Activity {
         ui.row(pairing, getDrawable(R.drawable.ic_sl_bluetooth), true, "Bluetooth settings",
                 "Pair or forget units", null, v -> openBluetoothSettings());
 
+        page.addView(ui.heading("Help"));
+        LinearLayout help = ui.card(page, R.color.sl_surface_container);
+        help.setPadding(0, ui.dp(4), 0, ui.dp(4));
+        ((LinearLayout.LayoutParams) help.getLayoutParams()).topMargin = 0;
+        ui.row(help, getDrawable(R.drawable.ic_sl_share), true, "Send logs",
+                "For a report of something going wrong", null, v -> confirmSendLogs());
+
         Shizuku.addRequestPermissionResultListener(shizukuResult);
         Variant.prefs(this).registerOnSharedPreferenceChangeListener(prefsChanged);
     }
@@ -280,6 +287,33 @@ public final class MainActivity extends Activity {
                     showSettings();
                 })
                 .show();
+    }
+
+    /** The logs say more than their name suggests, so the sender knows before they go. */
+    private void confirmSendLogs() {
+        new AlertDialog.Builder(this)
+                .setTitle("Send logs?")
+                .setMessage("They cover the last few days of Slipstream and what the phone did"
+                        + " around it, including unit names, Bluetooth addresses and the unit's"
+                        + " WiFi password. Send them only to whoever's looking into a problem.")
+                .setPositiveButton("Send", (d, w) -> sendLogs())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void sendLogs() {
+        android.widget.Toast.makeText(this, "Gathering logs…", android.widget.Toast.LENGTH_SHORT)
+                .show();
+        new Thread(() -> {
+            try {
+                Intent share = LogBundle.share(this);
+                runOnUiThread(() -> startActivity(share));
+            } catch (java.io.IOException e) {
+                runOnUiThread(() -> android.widget.Toast.makeText(this,
+                        "Couldn't gather the logs: " + e.getMessage(),
+                        android.widget.Toast.LENGTH_LONG).show());
+            }
+        }, "slipstream-logs").start();
     }
 
     private void openBluetoothSettings() {

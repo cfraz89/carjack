@@ -23,14 +23,16 @@ final class Variant {
 
     static final String PREFS = "slipstream";
     static final int NOTIFICATION_ICON = R.drawable.ic_sl_notify;
+    static final String LOG_FILE = "slipstream.log";
     /** The installed app's ID, for Shizuku's service component, which is built statically. */
     static final String APP_ID = "io.github.cfraz89.slipstream";
 
     private static java.lang.Process logcat;
 
     /**
-     * Our own log, kept in files/slipstream.log (and .1-.3) under Android/data, so a session away
-     * from adb can be read afterwards.
+     * Our own log, kept in files/slipstream.log (and .1-.9) under Android/data, so a session away
+     * from adb can be read afterwards - days later: info and up only, the core's chatter trimmed,
+     * 40 MB in all. -T: from now, not the whole ring buffer again after each restart.
      */
     static void prepare(Context context) {
         // Not linked yet: puts back a lock delay a crash left held.
@@ -41,8 +43,8 @@ final class Variant {
             return;
         }
         try {
-            logcat = new ProcessBuilder("logcat", "-v", "time", "-f",
-                    new java.io.File(dir, "slipstream.log").getPath(), "-r", "2048", "-n", "3")
+            logcat = new ProcessBuilder("logcat", "-v", "time", "-T", "1", "-f",
+                    new java.io.File(dir, LOG_FILE).getPath(), "-r", "4096", "-n", "9", "*:I")
                     .start();
         } catch (java.io.IOException e) {
             Log.w(TAG, "No log file", e);

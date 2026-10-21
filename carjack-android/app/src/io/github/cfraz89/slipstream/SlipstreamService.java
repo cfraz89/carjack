@@ -103,6 +103,12 @@ public final class SlipstreamService extends Service {
         }
         handler.post(() -> {
             bluetooth.start();
+            if (!Variant.canPage()) {
+                // A unit already linked when this starts doesn't dial in on that link: the first
+                // try always failed. Starting on a fresh one has it dial straight away.
+                status("Renewing the Bluetooth link");
+                Variant.cycleBluetooth();
+            }
             waitingSince = now();
             handler.post(watch);
         });

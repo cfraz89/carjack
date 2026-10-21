@@ -60,6 +60,9 @@ interface IDisplayService {
      */
     void keepPanel(boolean keep) = 16;
 
+    /** Copies the phone's system log into {@code dir}, which the app can read and the shell write. */
+    void copySystemLog(String dir) = 17;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

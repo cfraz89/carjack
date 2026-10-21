@@ -55,7 +55,16 @@ pub fn init() {
         .with_env_filter(
             EnvFilter::builder()
                 .with_default_directive(LevelFilter::DEBUG.into())
-                .parse_lossy("debug,catplay=info"),
+                // catplay warns once a frame, dumps every RTSP exchange and event payload, and
+                // falls back to plain ChaCha a few times a second: hours of that would rotate a
+                // day's useful lines out of the log.
+                .parse_lossy(
+                    "debug,catplay_carplay=info,\
+                     catplay_carplay::screen::tx::screen_tx_session=error,\
+                     catplay_carplay::rtsp_session::rtsp_transmitter=error,\
+                     catplay_carplay::events::events_server=error,\
+                     catplay_hap::cipher=error",
+                ),
         )
         .with_ansi(false)
         .without_time()

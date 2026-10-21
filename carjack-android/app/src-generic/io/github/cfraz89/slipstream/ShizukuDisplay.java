@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(21);
+            .version(22);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
@@ -213,6 +213,19 @@ final class ShizukuDisplay {
             return true;
         } catch (RemoteException e) {
             return false;
+        }
+    }
+
+    /** The phone's system log into {@code dir}; nothing where Shizuku isn't running. */
+    static void copySystemLog(String dir) {
+        IDisplayService s = available() ? bind() : null;
+        if (s == null) {
+            return;
+        }
+        try {
+            s.copySystemLog(dir);
+        } catch (RemoteException e) {
+            Log.w(TAG, "Shizuku couldn't copy the system log", e);
         }
     }
 
