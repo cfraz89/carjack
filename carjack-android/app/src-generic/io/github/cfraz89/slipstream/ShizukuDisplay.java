@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(15);
+            .version(16);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
@@ -176,6 +176,36 @@ final class ShizukuDisplay {
         } catch (RemoteException | java.io.IOException | RuntimeException e) {
             Log.w(TAG, "No framed wallpaper", e);
             return null;
+        }
+    }
+
+    /**
+     * {@link IDisplayService#secureSetting}; {@code fallback} where Shizuku can't say, which
+     * callers tell from a real answer by identity.
+     */
+    static String secureSetting(String key, String fallback) {
+        IDisplayService s = available() ? bind() : null;
+        if (s == null) {
+            return fallback;
+        }
+        try {
+            return s.secureSetting(key);
+        } catch (RemoteException e) {
+            return fallback;
+        }
+    }
+
+    /** False where Shizuku couldn't set it. */
+    static boolean setSecureSetting(String key, String value) {
+        IDisplayService s = available() ? bind() : null;
+        if (s == null) {
+            return false;
+        }
+        try {
+            s.setSecureSetting(key, value);
+            return true;
+        } catch (RemoteException e) {
+            return false;
         }
     }
 

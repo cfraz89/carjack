@@ -279,6 +279,21 @@ public final class DisplayService extends IDisplayService.Stub {
         }
     }
 
+    @Override
+    public String secureSetting(String key) {
+        String value = run("settings", "get", "secure", key).trim();
+        return value.isEmpty() || value.equals("null") ? null : value;
+    }
+
+    @Override
+    public void setSecureSetting(String key, String value) {
+        if (value == null) {
+            run("settings", "delete", "secure", key);
+        } else {
+            run("settings", "put", "secure", key, value);
+        }
+    }
+
     private android.app.WallpaperManager wallpapers() {
         return android.app.WallpaperManager.getInstance(shellContext());
     }

@@ -226,6 +226,19 @@ public final class MainActivity extends Activity {
 
         ui.row(settings, getDrawable(R.drawable.ic_sl_text_size), true, "Scale",
                 SIZES[densityIndex()], ui.chevron(), v -> chooseSize());
+
+        Switch unlocked = new Switch(this);
+        unlocked.setChecked(Variant.holdsUnlock(this));
+        unlocked.setClickable(false);
+        ui.row(settings, getDrawable(R.drawable.ic_sl_lock_open), true,
+                "Stay unlocked while connected",
+                "The screen going off doesn't lock the phone, so apps keep showing on the unit",
+                unlocked, v -> {
+                    unlocked.setChecked(!unlocked.isChecked());
+                    Variant.prefs(this).edit()
+                            .putBoolean("hold_unlock", unlocked.isChecked()).apply();
+                    Variant.applyLockHold(this);
+                });
     }
 
     private void chooseUnit() {

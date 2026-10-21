@@ -48,6 +48,12 @@ interface IDisplayService {
      */
     int[] wallpaperCrop(int width, int height) = 13;
 
+    /** A Settings.Secure value, or null where unset. */
+    String secureSetting(String key) = 14;
+
+    /** Sets a Settings.Secure value; null deletes it, back to the default. */
+    void setSecureSetting(String key, String value) = 15;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

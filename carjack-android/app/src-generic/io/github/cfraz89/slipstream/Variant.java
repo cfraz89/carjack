@@ -33,6 +33,9 @@ final class Variant {
      * from adb can be read afterwards.
      */
     static void prepare(Context context) {
+        // Not linked yet: puts back a lock delay a crash left held.
+        prefs(context).edit().putBoolean("linked", false).apply();
+        applyLockHold(context);
         java.io.File dir = context.getExternalFilesDir(null);
         if (dir == null || logcat != null) {
             return;
@@ -62,6 +65,55 @@ final class Variant {
     /** Whether a unit's link is up, for {@link MainActivity}'s Bluetooth shortcut. */
     static void onLinked(Context context, boolean linked) {
         prefs(context).edit().putBoolean("linked", linked).apply();
+        applyLockHold(context);
+    }
+
+    private static final String LOCK_AFTER = "lock_screen_lock_after_timeout";
+    /** A day: in effect, no locking on screen-off while the unit is connected. */
+    private static final String HELD_LOCK_AFTER = Integer.toString(24 * 60 * 60 * 1000);
+
+    /** Whether to keep the phone unlocked while a unit's connected; the user's choice. */
+    static boolean holdsUnlock(Context context) {
+        return prefs(context).getBoolean("hold_unlock", true);
+    }
+
+    /**
+     * While a unit's connected (and the user wants it), the screen going off doesn't lock the
+     * phone: the lock screen would hide the apps on the unit's display, which shares its display
+     * group. Done as Smart Lock's trusted devices do, by holding off the lock after screen-off;
+     * the power button still locks if it's set to lock instantly. Off the caller's thread.
+     */
+    static void applyLockHold(Context context) {
+        Context app = context.getApplicationContext();
+        boolean hold = prefs(app).getBoolean("linked", false) && holdsUnlock(app)
+                && BootReceiver.isOn(app);
+        AccessoryWifi.afterShell(() -> holdLock(app, hold));
+    }
+
+    /** Swaps the lock delay for {@link #HELD_LOCK_AFTER}, keeping the user's to put back. */
+    private static synchronized void holdLock(Context context, boolean hold) {
+        SharedPreferences prefs = prefs(context);
+        if (hold == prefs.getBoolean("lock_held", false)) {
+            return;
+        }
+        if (hold) {
+            String unknown = new String("?");
+            String original = ShizukuDisplay.secureSetting(LOCK_AFTER, unknown);
+            if (original == unknown || !ShizukuDisplay.setSecureSetting(LOCK_AFTER, HELD_LOCK_AFTER)) {
+                return;
+            }
+            // Unset is kept as absent, and put back as unset.
+            prefs.edit().putBoolean("lock_held", true).putString("lock_after_saved", original)
+                    .commit();
+            Log.i(TAG, "Holding off the lock while the unit's connected (was " + original + ")");
+        } else {
+            if (!ShizukuDisplay.setSecureSetting(LOCK_AFTER,
+                    prefs.getString("lock_after_saved", null))) {
+                return;
+            }
+            prefs.edit().putBoolean("lock_held", false).remove("lock_after_saved").commit();
+            Log.i(TAG, "Lock delay put back");
+        }
     }
 
     /** The notification's Stop is the app's Turn off. */
@@ -78,7 +130,9 @@ final class Variant {
      * is up, which would look like a crash. Shizuku goes only once the WiFi is handed back.
      */
     static void onServiceDestroyed(Service service) {
+        Context app = service.getApplicationContext();
         AccessoryWifi.afterShell(() -> {
+            holdLock(app, false);
             ShizukuDisplay.unbind();
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
                 android.app.ActivityManager.RunningAppProcessInfo state =
