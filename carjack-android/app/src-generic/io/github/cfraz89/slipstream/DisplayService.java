@@ -33,6 +33,8 @@ public final class DisplayService extends IDisplayService.Stub {
     private VirtualDisplay display;
     /** The phone kept awake while the display is up. */
     private StayAwake awake;
+    /** The phone's screen dark but the phone awake, so the unit's touches still land. */
+    private PanelKeeper panel;
     private Fingers fingers = new Fingers();
 
     public DisplayService() {
@@ -42,6 +44,7 @@ public final class DisplayService extends IDisplayService.Stub {
     public DisplayService(Context context) {
         this.context = context;
         startSystemLog();
+        PanelKeeper.restoreLeftovers();
     }
 
     /** Where the system log goes: Downloads, so it can be sent on without adb or a shell app. */
@@ -94,6 +97,13 @@ public final class DisplayService extends IDisplayService.Stub {
             Log.i(TAG, "Display " + id + " at " + width + "x" + height + ", " + density + "dpi");
             awake = new StayAwake(shellContext());
             awake.start();
+            try {
+                panel = new PanelKeeper(shellContext());
+                panel.start();
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                Log.w(TAG, "No panel keeping; the phone sleeps as usual", e);
+                panel = null;
+            }
             return id;
         } catch (ReflectiveOperationException | RuntimeException e) {
             Log.e(TAG, "Could not create a display", e);
@@ -314,6 +324,10 @@ public final class DisplayService extends IDisplayService.Stub {
 
     @Override
     public synchronized void release() {
+        if (panel != null) {
+            panel.stop();
+            panel = null;
+        }
         if (awake != null) {
             awake.stop();
             awake = null;
