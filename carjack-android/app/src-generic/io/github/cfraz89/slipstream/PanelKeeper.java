@@ -111,10 +111,29 @@ final class PanelKeeper {
         if (keys != null) {
             put(GLOBAL, POWER_PRESS, POWER_PRESS_NOTHING);
         }
+        wakeForSession();
         ticker = new Thread(this::tick, "slipstream-panel");
         ticker.start();
         Log.i(TAG, "Keeping the phone awake; its panel goes off after " + idleMs
                 + "ms idle or at the power button");
+    }
+
+    /**
+     * A session started with the phone asleep (in a pocket, as it would be) gets no touches
+     * through, so the phone wakes - dark, as it was. Also the lock screen goes where it can: it
+     * hides every app on the unit's display but the launcher, which may show over it. That's only
+     * where it isn't secured, or Smart Lock trusts the unit; elsewhere this just asks for unlock.
+     */
+    private synchronized void wakeForSession() {
+        boolean asleep = !power.isInteractive();
+        if (asleep) {
+            run("input", "keyevent", "KEYCODE_WAKEUP");
+        }
+        run("wm", "dismiss-keyguard");
+        if (asleep) {
+            dark();
+            Log.i(TAG, "Woke the phone for the session, dark");
+        }
     }
 
     synchronized void stop() {
