@@ -171,6 +171,17 @@ public final class DisplayService extends IDisplayService.Stub {
         }
     }
 
+    /** From the trust service's dump: the current user's line reads trustState=TRUSTED. */
+    @Override
+    public boolean trusted() {
+        for (String line : run("dumpsys", "trust").split("\n")) {
+            if (line.contains("(current)") && line.contains("trustState=")) {
+                return line.contains("trustState=TRUSTED");
+            }
+        }
+        return false;
+    }
+
     /** A key going down or up on the display, for its focused window (or, media keys, the player). */
     @Override
     public synchronized void key(int code, boolean down) {

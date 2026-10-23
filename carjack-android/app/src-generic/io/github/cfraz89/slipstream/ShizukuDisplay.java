@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(25);
+            .version(26);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
@@ -213,6 +213,19 @@ final class ShizukuDisplay {
             return true;
         } catch (RemoteException e) {
             return false;
+        }
+    }
+
+    /** {@link IDisplayService#trusted}; null where Shizuku can't say. */
+    static Boolean trusted() {
+        IDisplayService s = available() ? bind() : null;
+        if (s == null) {
+            return null;
+        }
+        try {
+            return s.trusted();
+        } catch (RemoteException e) {
+            return null;
         }
     }
 

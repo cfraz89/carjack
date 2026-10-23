@@ -148,6 +148,8 @@ public final class MainActivity extends Activity {
                 if ("status".equals(key) || "on".equals(key) || "retryable".equals(key)
                         || "linked".equals(key)) {
                     runOnUiThread(this::showPower);
+                } else if ("trust_seen".equals(key)) {
+                    runOnUiThread(this::showSetup);
                 }
             };
 
@@ -364,6 +366,15 @@ public final class MainActivity extends Activity {
         // Pairing has a card of its own, once there's Bluetooth to pair with.
         pairCard.setVisibility(permissionsGranted() && bluetoothOn() && unitAddresses.size() <= 1
                 ? View.VISIBLE : View.GONE);
+        // Locked, the phone hides every app on the unit but the launcher; a trusted unit keeps it
+        // unlocked while connected. Gone once that's been seen working.
+        if (unitAddresses.size() > 1 && !Variant.prefs(this).getBoolean("trust_seen", false)
+                && getSystemService(android.app.KeyguardManager.class).isDeviceSecure()) {
+            step("Make the unit a trusted device, so the phone stays unlocked while it's"
+                    + " connected: Security & privacy → More security & privacy → Extend Unlock"
+                    + " → Trusted devices", "Settings", v -> startActivity(
+                            new Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)));
+        }
         // An app inside a VPN can't reach the unit's Wi-Fi: the stream times out.
         if (inVpn()) {
             // Excluding an app is the VPN app's own setting; Android's VPN page only has on/off.

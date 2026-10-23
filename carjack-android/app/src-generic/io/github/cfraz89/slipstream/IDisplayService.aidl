@@ -66,6 +66,9 @@ interface IDisplayService {
     /** An Android key code going down or up on the display. */
     void key(int code, boolean down) = 18;
 
+    /** Whether a trust agent (Smart Lock's trusted devices, say) has the phone unlocked. */
+    boolean trusted() = 19;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

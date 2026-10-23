@@ -68,6 +68,29 @@ final class Variant {
     static void onLinked(Context context, boolean linked) {
         prefs(context).edit().putBoolean("linked", linked).apply();
         applyLockHold(context);
+        if (linked) {
+            checkTrustSoon(context.getApplicationContext());
+        }
+    }
+
+    /** Smart Lock takes a moment to trust a device that's just connected. */
+    private static final long TRUST_CHECK_DELAY_MS = 15_000;
+
+    /**
+     * Whether the unit keeps the phone unlocked (a trusted device), noted once seen so the
+     * reminder to set it up can go. Seen only, never unset: trust also lapses for other reasons.
+     */
+    private static void checkTrustSoon(Context app) {
+        new Handler(Looper.getMainLooper()).postDelayed(() -> AccessoryWifi.afterShell(() -> {
+            if (!prefs(app).getBoolean("linked", false)) {
+                return;
+            }
+            Boolean trusted = ShizukuDisplay.trusted();
+            Log.i(TAG, "Phone trusted while the unit's connected: " + trusted);
+            if (Boolean.TRUE.equals(trusted)) {
+                prefs(app).edit().putBoolean("trust_seen", true).apply();
+            }
+        }), TRUST_CHECK_DELAY_MS);
     }
 
     private static final String LOCK_AFTER = "lock_screen_lock_after_timeout";
