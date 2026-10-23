@@ -243,6 +243,11 @@ public final class MainActivity extends Activity {
         ui.row(settings, Choices.icon(this, app), glyph, "On connect", Choices.name(this, app),
                 ui.chevron(), v -> startActivity(new Intent(this, OnConnectActivity.class)));
 
+        ui.row(settings, getDrawable(R.drawable.ic_sl_home), true, "Preview the launcher",
+                "Open it here on the phone, to try it or arrange it", ui.chevron(),
+                v -> startActivity(new Intent().setClassName(this,
+                        "io.github.cfraz89.slipstream.LauncherOnPhone")));
+
         ui.row(settings, getDrawable(R.drawable.ic_sl_text_size), true, "Scale",
                 SIZES[densityIndex()], ui.chevron(), v -> chooseSize());
 

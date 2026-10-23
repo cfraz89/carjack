@@ -60,10 +60,13 @@ class HomeActivity : Activity() {
 
         pendingSlot = savedInstanceState?.getInt(STATE_PENDING_SLOT, -1) ?: -1
 
-        onBackInvokedDispatcher.registerOnBackInvokedCallback(
-            OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-            swallowBack,
-        )
+        // On the phone, back leaves it like any app.
+        if (!SystemBars.onPhone(this)) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                swallowBack,
+            )
+        }
         WallpaperManager.getInstance(this)
             .addOnColorsChangedListener(wallpaperChanged, Handler(mainLooper))
         // Both need the laid-out size, which onResume may come before.

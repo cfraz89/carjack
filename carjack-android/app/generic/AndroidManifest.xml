@@ -86,6 +86,19 @@
             android:clearTaskOnLaunch="true"
             android:showWhenLocked="true"
             android:configChanges="keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode" />
+        <!-- The same launcher from the phone's own app drawer, to try it out or set it up
+             away from the unit. -->
+        <activity-alias
+            android:name="io.github.cfraz89.slipstream.LauncherOnPhone"
+            android:targetActivity="io.github.cfraz89.slipstream.launcher.HomeActivity"
+            android:label="Slipstream Launcher"
+            android:icon="@mipmap/ic_sl_launcher"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
         <activity
             android:name="io.github.cfraz89.slipstream.launcher.AllAppsActivity"
             android:exported="false"
