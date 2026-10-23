@@ -82,7 +82,6 @@ public final class MainActivity extends Activity {
                 ui.color(R.color.sl_tertiary), ui.color(R.color.sl_primary),
                 android.graphics.Shader.TileMode.CLAMP));
         names.addView(title);
-        names.addView(ui.text("Your phone on CarPlay-compatible head units", 15, R.color.sl_on_surface_variant));
         header.addView(names);
         page.addView(header);
 
