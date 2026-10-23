@@ -171,6 +171,11 @@ public final class DisplayService extends IDisplayService.Stub {
         }
     }
 
+    @Override
+    public void allowNotificationListener(String component) {
+        run("cmd", "notification", "allow_listener", component);
+    }
+
     /** From the trust service's dump: the current user's line reads trustState=TRUSTED. */
     @Override
     public boolean trusted() {

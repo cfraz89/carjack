@@ -426,7 +426,12 @@ public final class MainActivity extends Activity {
     private void autoSetUp() {
         boolean grant = !permissionsGranted();
         // Tried once a visit: refresh() follows, and one refused mustn't loop.
-        boolean optional = !optionalTried && !granted(OPTIONAL_PERMISSIONS);
+        // The launcher's now-playing panel needs a notification listener to see media sessions.
+        android.content.ComponentName media = new android.content.ComponentName(this,
+                "io.github.cfraz89.slipstream.launcher.MediaListener");
+        boolean listener = !getSystemService(android.app.NotificationManager.class)
+                .isNotificationListenerAccessGranted(media);
+        boolean optional = !optionalTried && (!granted(OPTIONAL_PERMISSIONS) || listener);
         boolean bluetooth = !bluetoothOn();
         if (settingUp || !(grant || optional || bluetooth) || !ShizukuDisplay.available()) {
             return;
@@ -438,7 +443,8 @@ public final class MainActivity extends Activity {
         System.arraycopy(OPTIONAL_PERMISSIONS, 0, all, PERMISSIONS.length,
                 OPTIONAL_PERMISSIONS.length);
         new Thread(() -> {
-            ShizukuDisplay.setUp(getPackageName(), all, bluetooth);
+            ShizukuDisplay.setUp(getPackageName(), all, bluetooth,
+                    listener ? media.flattenToString() : null);
             runOnUiThread(() -> {
                 settingUp = false;
                 refresh();

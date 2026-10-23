@@ -65,4 +65,10 @@
     <dimen name="status_clock_size">44sp</dimen>
     <dimen name="status_detail_size">16sp</dimen>
     <dimen name="status_line_gap">4dp</dimen>
+    <dimen name="status_icon_size">40dp</dimen>
+    <dimen name="status_icon_gap">10dp</dimen>
+    <dimen name="playing_art_size">56dp</dimen>
+    <dimen name="playing_button_size">56dp</dimen>
+    <dimen name="playing_button_padding">14dp</dimen>
+    <dimen name="playing_title_size">17sp</dimen>
 </resources>

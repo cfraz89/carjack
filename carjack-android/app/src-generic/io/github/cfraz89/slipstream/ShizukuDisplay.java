@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(26);
+            .version(27);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
@@ -260,7 +260,8 @@ final class ShizukuDisplay {
      * What the user would otherwise be asked for: the app's runtime permissions, and Bluetooth
      * on. Blocks while Shizuku starts the service, so not on the main thread.
      */
-    static void setUp(String pkg, String[] permissions, boolean enableBluetooth) {
+    static void setUp(String pkg, String[] permissions, boolean enableBluetooth,
+            String notificationListener) {
         IDisplayService s = available() ? bind() : null;
         if (s == null) {
             return;
@@ -269,6 +270,9 @@ final class ShizukuDisplay {
             s.grant(pkg, permissions);
             if (enableBluetooth) {
                 s.enableBluetooth();
+            }
+            if (notificationListener != null) {
+                s.allowNotificationListener(notificationListener);
             }
         } catch (RemoteException e) {
             Log.w(TAG, "Shizuku couldn't set Slipstream up", e);

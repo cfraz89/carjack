@@ -6,7 +6,8 @@
     android:gravity="center"
     android:padding="@dimen/shortcut_padding"
     android:focusable="true"
-    android:clickable="true">
+    android:clickable="true"
+    android:stateListAnimator="@animator/press">
 
     <!-- Weighted, so the label keeps its line and the icon gives up the space on a short cell. -->
     <ImageView

@@ -50,8 +50,13 @@ class HomeActivity : Activity() {
         taskbar.onSettings = { startActivity(Intent(this, SettingsActivity::class.java)) }
         status = findViewById(R.id.status)
         temperature = findViewById(R.id.status_temperature)
+        weather = findViewById(R.id.status_weather)
+        weatherIcon = findViewById(R.id.status_weather_icon)
         statusDetail = findViewById(R.id.status_detail)
         Blur.apply(status)
+        val playingPanel = findViewById<View>(R.id.playing)
+        Blur.apply(playingPanel)
+        nowPlaying = NowPlaying(this, playingPanel)
 
         pendingSlot = savedInstanceState?.getInt(STATE_PENDING_SLOT, -1) ?: -1
 
@@ -85,16 +90,21 @@ class HomeActivity : Activity() {
         taskbar.refresh()
         registerReceiver(battery, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         refreshWeather.run()
+        nowPlaying.start()
     }
 
     override fun onPause() {
+        nowPlaying.stop()
         unregisterReceiver(battery)
         statusHandler.removeCallbacks(refreshWeather)
         super.onPause()
     }
 
     private lateinit var status: View
+    private lateinit var nowPlaying: NowPlaying
     private lateinit var temperature: TextView
+    private lateinit var weather: View
+    private lateinit var weatherIcon: ImageView
     private lateinit var statusDetail: TextView
     private var sky = ""
     private var batteryLine = ""
@@ -120,8 +130,11 @@ class HomeActivity : Activity() {
                 val now = Weather.now(this@HomeActivity)
                 runOnUiThread {
                     if (isDestroyed) return@runOnUiThread
-                    temperature.visibility = if (now == null) View.GONE else View.VISIBLE
-                    if (now != null) temperature.text = getString(R.string.status_temperature, now.temperature)
+                    weather.visibility = if (now == null) View.GONE else View.VISIBLE
+                    if (now != null) {
+                        temperature.text = getString(R.string.status_temperature, now.temperature)
+                        weatherIcon.setImageResource(now.icon)
+                    }
                     sky = now?.sky ?: ""
                     showStatusDetail()
                 }

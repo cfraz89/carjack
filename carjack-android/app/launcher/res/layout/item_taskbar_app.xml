@@ -6,4 +6,5 @@
     android:layout_marginEnd="@dimen/taskbar_item_spacing"
     android:padding="@dimen/taskbar_icon_padding"
     android:background="@drawable/ripple_transparent"
+    android:stateListAnimator="@animator/press"
     android:scaleType="fitCenter" />

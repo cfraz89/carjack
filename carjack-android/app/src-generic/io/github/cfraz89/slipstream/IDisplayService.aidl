@@ -69,6 +69,9 @@ interface IDisplayService {
     /** Whether a trust agent (Smart Lock's trusted devices, say) has the phone unlocked. */
     boolean trusted() = 19;
 
+    /** Enables a notification listener ("pkg/class"), as its settings switch would. */
+    void allowNotificationListener(String component) = 20;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

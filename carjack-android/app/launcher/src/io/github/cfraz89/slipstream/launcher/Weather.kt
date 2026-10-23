@@ -27,7 +27,7 @@ object Weather {
     private const val LOCATION_STALE_MS = 2 * 60 * 60 * 1000L
     private const val TIMEOUT_MS = 10_000
 
-    data class Now(val temperature: Int, val unit: String, val sky: String)
+    data class Now(val temperature: Int, val unit: String, val sky: String, val icon: Int)
 
     private var cached: Now? = null
     private var fetchedAt = 0L
@@ -97,14 +97,26 @@ object Weather {
             connection.readTimeout = TIMEOUT_MS
             val body = connection.inputStream.bufferedReader().use { it.readText() }
             val current = JSONObject(body).getJSONObject("current")
+            val code = current.getInt("weather_code")
             return Now(
                 temperature = current.getDouble("temperature_2m").roundToInt(),
                 unit = if (fahrenheit) "°F" else "°C",
-                sky = sky(current.getInt("weather_code")),
+                sky = sky(code),
+                icon = icon(code),
             )
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun icon(code: Int): Int = when (code) {
+        0, 1 -> R.drawable.ic_weather_sun
+        2 -> R.drawable.ic_weather_partly
+        45, 48 -> R.drawable.ic_weather_fog
+        in 51..67, in 80..82 -> R.drawable.ic_weather_rain
+        in 71..77, 85, 86 -> R.drawable.ic_weather_snow
+        in 95..99 -> R.drawable.ic_weather_storm
+        else -> R.drawable.ic_weather_cloud
     }
 
     /** WMO weather interpretation codes, as Open-Meteo gives them. */

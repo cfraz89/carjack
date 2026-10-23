@@ -65,15 +65,31 @@
                 android:orientation="vertical"
                 android:gravity="end">
 
-                <TextView
-                    android:id="@+id/status_temperature"
+                <LinearLayout
+                    android:id="@+id/status_weather"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:fontFamily="sans-serif-light"
-                    android:includeFontPadding="false"
-                    android:textColor="@color/text_primary"
-                    android:textSize="@dimen/status_clock_size"
-                    android:visibility="gone" />
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:visibility="gone">
+
+                    <ImageView
+                        android:id="@+id/status_weather_icon"
+                        android:layout_width="@dimen/status_icon_size"
+                        android:layout_height="@dimen/status_icon_size"
+                        android:layout_marginEnd="@dimen/status_icon_gap"
+                        android:tint="@color/accent"
+                        android:importantForAccessibility="no" />
+
+                    <TextView
+                        android:id="@+id/status_temperature"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="sans-serif-light"
+                        android:includeFontPadding="false"
+                        android:textColor="@color/text_primary"
+                        android:textSize="@dimen/status_clock_size" />
+                </LinearLayout>
 
                 <TextView
                     android:id="@+id/status_detail"
@@ -83,6 +99,89 @@
                     android:textColor="@color/text_secondary"
                     android:textSize="@dimen/status_detail_size" />
             </LinearLayout>
+        </LinearLayout>
+
+        <!-- What's playing, from whichever app: shown only while there is something. -->
+        <LinearLayout
+            android:id="@+id/playing"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="@dimen/taskbar_margin"
+            android:layout_marginEnd="@dimen/taskbar_margin"
+            android:layout_marginTop="@dimen/taskbar_margin"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="@dimen/status_padding_vertical"
+            android:background="@drawable/status_background"
+            android:visibility="gone">
+
+            <ImageView
+                android:id="@+id/playing_art"
+                android:layout_width="@dimen/playing_art_size"
+                android:layout_height="@dimen/playing_art_size"
+                android:scaleType="centerCrop"
+                android:background="@drawable/card_background"
+                android:importantForAccessibility="no" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="@dimen/status_padding_vertical"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/playing_title"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:maxLines="1"
+                    android:ellipsize="end"
+                    android:fontFamily="sans-serif-medium"
+                    android:textColor="@color/text_primary"
+                    android:textSize="@dimen/playing_title_size" />
+
+                <TextView
+                    android:id="@+id/playing_artist"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:maxLines="1"
+                    android:ellipsize="end"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="@dimen/status_detail_size" />
+            </LinearLayout>
+
+            <ImageView
+                android:id="@+id/playing_previous"
+                android:layout_width="@dimen/playing_button_size"
+                android:layout_height="@dimen/playing_button_size"
+                android:padding="@dimen/playing_button_padding"
+                android:src="@drawable/ic_skip_previous"
+                android:tint="@color/text_primary"
+                android:background="@drawable/ripple_circle"
+                android:stateListAnimator="@animator/press"
+                android:contentDescription="@string/playing_previous" />
+
+            <ImageView
+                android:id="@+id/playing_toggle"
+                android:layout_width="@dimen/playing_button_size"
+                android:layout_height="@dimen/playing_button_size"
+                android:padding="@dimen/playing_button_padding"
+                android:src="@drawable/ic_play"
+                android:tint="@color/text_primary"
+                android:background="@drawable/ripple_circle"
+                android:stateListAnimator="@animator/press"
+                android:contentDescription="@string/playing_toggle" />
+
+            <ImageView
+                android:id="@+id/playing_next"
+                android:layout_width="@dimen/playing_button_size"
+                android:layout_height="@dimen/playing_button_size"
+                android:padding="@dimen/playing_button_padding"
+                android:src="@drawable/ic_skip_next"
+                android:tint="@color/text_primary"
+                android:background="@drawable/ripple_circle"
+                android:stateListAnimator="@animator/press"
+                android:contentDescription="@string/playing_next" />
         </LinearLayout>
 
         <GridLayout
