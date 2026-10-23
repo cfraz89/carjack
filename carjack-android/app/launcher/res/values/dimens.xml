@@ -58,4 +58,11 @@
     <dimen name="stepper_button_size">64dp</dimen>
     <dimen name="setting_row_padding">20dp</dimen>
     <dimen name="setting_row_gap">12dp</dimen>
+
+    <!-- The status panel: clock and temperature big enough to read at a glance on the move. -->
+    <dimen name="status_padding">24dp</dimen>
+    <dimen name="status_padding_vertical">14dp</dimen>
+    <dimen name="status_clock_size">44sp</dimen>
+    <dimen name="status_detail_size">16sp</dimen>
+    <dimen name="status_line_gap">4dp</dimen>
 </resources>

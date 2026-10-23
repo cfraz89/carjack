@@ -24,6 +24,8 @@
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
     <!-- What the wallpaper service asks of an app reading the phone's wallpaper. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <!-- Roughly where the phone is, for the launcher's weather. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <!-- The apps the unit can be given, for the picker and the launcher; and the home app. -->
     <queries>

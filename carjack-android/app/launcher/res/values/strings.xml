@@ -13,6 +13,9 @@
     <string name="setting_rows">Rows</string>
     <string name="setting_recents">Recent apps in taskbar</string>
     <string name="setting_wallpaper">Wallpaper</string>
+    <string name="status_temperature">%1$d°</string>
+    <string name="status_battery">Phone %1$d%%</string>
+    <string name="status_charging">, charging</string>
     <string name="wallpaper_phone">The phone\'s wallpaper</string>
     <string name="wallpaper_builtin">Built-in</string>
     <string name="wallpaper_photo">A photo</string>

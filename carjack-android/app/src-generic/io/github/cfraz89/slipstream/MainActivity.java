@@ -42,6 +42,11 @@ public final class MainActivity extends Activity {
         Manifest.permission.READ_MEDIA_IMAGES,
     };
 
+    /** Granted with the rest through Shizuku, but nothing waits on them: the weather, here. */
+    private static final String[] OPTIONAL_PERMISSIONS = {
+        Manifest.permission.ACCESS_COARSE_LOCATION,
+    };
+
     /** Display densities offered, by name; 0 is automatic. */
     private static final String[] SIZES = {"Default", "Smaller", "Larger", "Largest"};
     private static final int[] DENSITIES = {0, 160, 240, 280};
@@ -58,6 +63,7 @@ public final class MainActivity extends Activity {
     private final List<String> unitNames = new ArrayList<>();
     private final List<String> unitAddresses = new ArrayList<>();
     private boolean settingUp;
+    private boolean optionalTried;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -419,13 +425,20 @@ public final class MainActivity extends Activity {
     /** With Shizuku: grant what's missing and switch Bluetooth on, unasked. */
     private void autoSetUp() {
         boolean grant = !permissionsGranted();
+        // Tried once a visit: refresh() follows, and one refused mustn't loop.
+        boolean optional = !optionalTried && !granted(OPTIONAL_PERMISSIONS);
         boolean bluetooth = !bluetoothOn();
-        if (settingUp || !(grant || bluetooth) || !ShizukuDisplay.available()) {
+        if (settingUp || !(grant || optional || bluetooth) || !ShizukuDisplay.available()) {
             return;
         }
         settingUp = true;
+        optionalTried = true;
+        String[] all = new String[PERMISSIONS.length + OPTIONAL_PERMISSIONS.length];
+        System.arraycopy(PERMISSIONS, 0, all, 0, PERMISSIONS.length);
+        System.arraycopy(OPTIONAL_PERMISSIONS, 0, all, PERMISSIONS.length,
+                OPTIONAL_PERMISSIONS.length);
         new Thread(() -> {
-            ShizukuDisplay.setUp(getPackageName(), PERMISSIONS, bluetooth);
+            ShizukuDisplay.setUp(getPackageName(), all, bluetooth);
             runOnUiThread(() -> {
                 settingUp = false;
                 refresh();
@@ -488,7 +501,11 @@ public final class MainActivity extends Activity {
     }
 
     private boolean permissionsGranted() {
-        for (String permission : PERMISSIONS) {
+        return granted(PERMISSIONS);
+    }
+
+    private boolean granted(String[] permissions) {
+        for (String permission : permissions) {
             if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
                 return false;
             }

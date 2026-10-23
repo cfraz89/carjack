@@ -3,9 +3,13 @@ package io.github.cfraz89.slipstream.launcher
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.WallpaperManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.Configuration
+import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
 import android.view.LayoutInflater
@@ -22,6 +26,7 @@ class HomeActivity : Activity() {
     private companion object {
         const val REQUEST_PICK = 1
         const val STATE_PENDING_SLOT = "pending_slot"
+        const val WEATHER_REFRESH_MS = 15 * 60 * 1000L
     }
 
     private lateinit var grid: GridLayout
@@ -43,6 +48,10 @@ class HomeActivity : Activity() {
         wallpaper = findViewById(R.id.wallpaper)
         taskbar.onAllApps = { startActivity(Intent(this, AllAppsActivity::class.java)) }
         taskbar.onSettings = { startActivity(Intent(this, SettingsActivity::class.java)) }
+        status = findViewById(R.id.status)
+        temperature = findViewById(R.id.status_temperature)
+        statusDetail = findViewById(R.id.status_detail)
+        Blur.apply(status)
 
         pendingSlot = savedInstanceState?.getInt(STATE_PENDING_SLOT, -1) ?: -1
 
@@ -74,6 +83,55 @@ class HomeActivity : Activity() {
         loadWallpaper()
         buildGrid()
         taskbar.refresh()
+        registerReceiver(battery, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        refreshWeather.run()
+    }
+
+    override fun onPause() {
+        unregisterReceiver(battery)
+        statusHandler.removeCallbacks(refreshWeather)
+        super.onPause()
+    }
+
+    private lateinit var status: View
+    private lateinit var temperature: TextView
+    private lateinit var statusDetail: TextView
+    private var sky = ""
+    private var batteryLine = ""
+    private val statusHandler = Handler(android.os.Looper.getMainLooper())
+
+    /** The phone's charge, under the weather: it's in a pocket, out of sight. */
+    private val battery = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+            val charging = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
+            batteryLine = if (level < 0) "" else
+                getString(R.string.status_battery, level * 100 / scale) +
+                    if (charging) getString(R.string.status_charging) else ""
+            showStatusDetail()
+        }
+    }
+
+    /** Off the main thread, and again every quarter hour while home is showing. */
+    private val refreshWeather = object : Runnable {
+        override fun run() {
+            Thread({
+                val now = Weather.now(this@HomeActivity)
+                runOnUiThread {
+                    if (isDestroyed) return@runOnUiThread
+                    temperature.visibility = if (now == null) View.GONE else View.VISIBLE
+                    if (now != null) temperature.text = getString(R.string.status_temperature, now.temperature)
+                    sky = now?.sky ?: ""
+                    showStatusDetail()
+                }
+            }, "slipstream-weather").start()
+            statusHandler.postDelayed(this, WEATHER_REFRESH_MS)
+        }
+    }
+
+    private fun showStatusDetail() {
+        statusDetail.text = listOf(sky, batteryLine).filter { it.isNotEmpty() }.joinToString("  ·  ")
     }
 
     /**
@@ -165,17 +223,17 @@ class HomeActivity : Activity() {
         val stored = ShortcutStore.get(this, index)
         val entry = stored?.let { AppRepository.entryFor(this, it) }
 
+        // Every slot sits on a blurred plate, filled or not; an empty one is dimmer.
+        cell.setBackgroundResource(R.drawable.slot_background)
+        cell.clipToOutline = true
+        Blur.apply(cell)
         if (entry == null) {
             // Drop a shortcut whose app has gone, so the slot returns to being addable.
             if (stored != null) ShortcutStore.clear(this, index)
             icon.setImageResource(R.drawable.ic_add_slot)
             icon.contentDescription = getString(R.string.empty_slot)
             label.setText(R.string.empty_slot)
-            // Only an empty slot gets a plate; a filled one sits straight on the wallpaper.
-            cell.setBackgroundResource(R.drawable.slot_background)
-            cell.clipToOutline = true
-            Blur.apply(cell)
-            cell.alpha = 0.7f
+            cell.alpha = 0.6f
             cell.isLongClickable = false
             cell.setOnLongClickListener(null)
             cell.setOnClickListener { pickFor(index) }
@@ -183,9 +241,6 @@ class HomeActivity : Activity() {
             icon.setImageDrawable(entry.icon)
             icon.contentDescription = entry.label
             label.text = entry.label
-            cell.setBackgroundResource(R.drawable.ripple_transparent)
-            cell.clipToOutline = false
-            Blur.clear(cell)
             cell.alpha = 1f
             cell.setOnClickListener { AppRepository.launch(this, entry.component) }
             cell.setOnLongClickListener {
