@@ -35,6 +35,8 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.HOME" />
         </intent>
+        <!-- Play services, for its Extend Unlock entry point. -->
+        <package android:name="com.google.android.gms" />
     </queries>
 
     <application

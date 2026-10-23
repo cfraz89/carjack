@@ -334,6 +334,20 @@ public final class MainActivity extends Activity {
         }, "slipstream-logs").start();
     }
 
+    /**
+     * Extend Unlock (Smart Lock), straight in: Play services' own entry point, which Settings
+     * search opens. Its trusted devices can't be set from outside; this is as close as it gets.
+     * Security settings where there's no Play services.
+     */
+    private void openExtendUnlock() {
+        try {
+            startActivity(new Intent(Intent.ACTION_MAIN).setClassName("com.google.android.gms",
+                    "com.google.android.gms.trustagent.TrustAgentSearchEntryPointActivity"));
+        } catch (android.content.ActivityNotFoundException | SecurityException e) {
+            startActivity(new Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS));
+        }
+    }
+
     private void openBluetoothSettings() {
         startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS));
     }
@@ -371,9 +385,8 @@ public final class MainActivity extends Activity {
         if (unitAddresses.size() > 1 && !Variant.prefs(this).getBoolean("trust_seen", false)
                 && getSystemService(android.app.KeyguardManager.class).isDeviceSecure()) {
             step("Make the unit a trusted device, so the phone stays unlocked while it's"
-                    + " connected: Security & privacy → More security & privacy → Extend Unlock"
-                    + " → Trusted devices", "Settings", v -> startActivity(
-                            new Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)));
+                    + " connected: Extend Unlock → Trusted devices", "Set up",
+                    v -> openExtendUnlock());
         }
         // An app inside a VPN can't reach the unit's Wi-Fi: the stream times out.
         if (inVpn()) {
