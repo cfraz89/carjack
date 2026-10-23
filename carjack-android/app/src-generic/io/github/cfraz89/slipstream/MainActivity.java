@@ -248,6 +248,18 @@ public final class MainActivity extends Activity {
                             .putBoolean("keep_panel", dark.isChecked()).apply();
                 });
 
+        Switch navBar = new Switch(this);
+        navBar.setChecked(Boolean.parseBoolean(Variant.setting(this, "nav_bar", "false")));
+        navBar.setClickable(false);
+        ui.row(settings, getDrawable(R.drawable.ic_sl_home), true, "Back and home bar",
+                "A slim bar along the bottom of the unit, for when its switchgear can't go back"
+                        + " or home. Takes effect next session",
+                navBar, v -> {
+                    navBar.setChecked(!navBar.isChecked());
+                    Variant.prefs(this).edit()
+                            .putString("nav_bar", Boolean.toString(navBar.isChecked())).apply();
+                });
+
         Switch unlocked = new Switch(this);
         unlocked.setChecked(Variant.holdsUnlock(this));
         unlocked.setClickable(false);

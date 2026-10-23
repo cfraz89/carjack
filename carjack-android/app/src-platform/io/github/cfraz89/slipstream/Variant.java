@@ -172,5 +172,31 @@ final class Variant {
         return new TouchInjector(viewX, viewY, viewWidth, viewHeight);
     }
 
+    /** A key onto the board's own display, which is what the unit mirrors; Home included. */
+    static void key(Context context, int code, boolean down) {
+        long now = android.os.SystemClock.uptimeMillis();
+        android.view.KeyEvent event = new android.view.KeyEvent(now, now,
+                down ? android.view.KeyEvent.ACTION_DOWN : android.view.KeyEvent.ACTION_UP, code, 0,
+                0, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
+                android.view.InputDevice.SOURCE_KEYBOARD);
+        try {
+            Class<?> global = Class.forName("android.hardware.input.InputManagerGlobal");
+            Object input = global.getMethod("getInstance").invoke(null);
+            global.getMethod("injectInputEvent", android.view.InputEvent.class, int.class)
+                    .invoke(input, event, 0 /* INJECT_INPUT_EVENT_MODE_ASYNC */);
+        } catch (ReflectiveOperationException e) {
+            Log.w(TAG, "Could not inject key " + code, e);
+        }
+    }
+
+    static void key(Context context, int code) {
+        key(context, code, true);
+        key(context, code, false);
+    }
+
+    static void goHome(Context context) {
+        key(context, 3 /* KEYCODE_HOME */);
+    }
+
     private Variant() {}
 }

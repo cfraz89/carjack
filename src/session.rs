@@ -390,6 +390,7 @@ impl AppStream {
             backend.codec(),
             video_rx,
             touch_tx,
+            None,
             keyframe_tx,
             handover,
         ));
@@ -444,6 +445,7 @@ impl DesktopStream {
             codec,
             video_rx,
             touch_tx,
+            None,
             keyframe_tx,
             handover,
         ));

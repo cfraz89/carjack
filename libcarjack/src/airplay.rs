@@ -229,6 +229,7 @@ pub async fn run_video_stream(
     codec: VideoCodec,
     mut video_rx: mpsc::Receiver<EncodedFrame>,
     touch_tx: mpsc::Sender<TouchEvent>,
+    key_tx: Option<mpsc::Sender<crate::hid::KeyEvent>>,
     keyframe_tx: mpsc::Sender<()>,
     handover: CancellationToken,
 ) -> Result<()> {
@@ -268,6 +269,7 @@ pub async fn run_video_stream(
         tx.clone(),
         modes,
         touch_tx,
+        key_tx,
         keyframe_tx.clone(),
         tunnel,
         handover,
@@ -474,11 +476,22 @@ async fn handle_accessory_commands(
     tx: AirPlayTransmitterProxyRef,
     mut modes: ResourceController,
     touch_tx: mpsc::Sender<TouchEvent>,
+    key_tx: Option<mpsc::Sender<crate::hid::KeyEvent>>,
     keyframe_tx: mpsc::Sender<()>,
     tunnel: crate::iap2_tunnel::Tunnel,
     handover: CancellationToken,
 ) {
     let mut touching = [false; 2];
+    // The switchgear, by the uuid its reports carry; the touchscreen isn't among them.
+    let mut switchgear = crate::hid::devices(
+        tx.info_cached()
+            .hid_devices
+            .iter()
+            .map(|d| (d.uuid.as_str(), d.name.as_str(), d.hid_descriptor.as_ref())),
+    );
+    for (uuid, device) in &switchgear {
+        tracing::info!(uuid, name = %device.name, "Accessory switchgear");
+    }
     while let Some(mut cmd) = tx.pop_command().await {
         tracing::debug!("Accessory command: {:?}", cmd.command().get_type());
         match cmd.command() {
@@ -493,6 +506,18 @@ async fn handle_accessory_commands(
                 // dropped enough packets that its decoder can no longer follow the deltas.
                 tracing::debug!("Accessory requested a keyframe");
                 let _ = keyframe_tx.try_send(());
+                cmd.respond_ok();
+            }
+            Command::HidSendReport(r) if switchgear.contains_key(&r.uuid) => {
+                let report = r.hid_report.as_ref();
+                let device = switchgear.get_mut(&r.uuid).expect("checked above");
+                let keys = device.decode(report);
+                tracing::info!(name = %device.name, report = ?report, ?keys, "Switchgear");
+                if let Some(key_tx) = &key_tx {
+                    for key in keys {
+                        let _ = key_tx.try_send(key);
+                    }
+                }
                 cmd.respond_ok();
             }
             Command::HidSendReport(r) => {

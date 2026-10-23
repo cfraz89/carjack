@@ -100,10 +100,17 @@ final class Session implements Native.Callbacks {
         streamed = true;
         status.accept("Streaming at " + width + "x" + height);
         handler.post(() -> {
-            touch = Variant.touch(context, viewX, viewY, viewWidth, viewHeight);
+            // The back and home bar, where wanted, takes the bottom of the view from the display.
+            int bar = NavBar.height(context, viewHeight);
+            int displayHeight = viewHeight - bar;
+            Touch display = Variant.touch(context, viewX, viewY, viewWidth, displayHeight);
+            touch = bar == 0 ? display : NavBar.touch(display, viewX, viewY + displayHeight,
+                    viewWidth, bar, () -> Variant.key(context, NavBar.KEYCODE_BACK),
+                    () -> Variant.goHome(context));
             stream = new ScreenStream(context, handle, this::stop);
             try {
-                stream.start(width, height, fps, viewX, viewY, viewWidth, viewHeight, hevc);
+                stream.start(width, height, fps, viewX, viewY, viewWidth, displayHeight, bar,
+                        hevc);
             } catch (IOException | RuntimeException e) {
                 Log.e(TAG, "Could not start the screen stream", e);
                 stop();
@@ -125,6 +132,11 @@ final class Session implements Native.Callbacks {
         if (t != null) {
             t.touch(action, pointer, x, y);
         }
+    }
+
+    @Override
+    public void key(int code, boolean down) {
+        Variant.key(context, code, down);
     }
 
     @Override

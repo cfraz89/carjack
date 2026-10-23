@@ -29,6 +29,8 @@ pub trait Platform: Send + Sync + 'static {
     fn start_video(&self, video: &VideoConfig);
     fn request_keyframe(&self);
     fn touch(&self, event: &TouchEvent);
+    /// A key from the accessory's switchgear, as an Android key code going down or up.
+    fn key(&self, event: libcarjack::hid::KeyEvent);
 }
 
 /// The stream the accessory wants, and where on it the app's picture goes.
@@ -297,6 +299,7 @@ pub async fn run(
     let (video_tx, video_rx) = mpsc::channel::<EncodedFrame>(4);
     let (keyframe_tx, mut keyframe_rx) = mpsc::channel::<()>(1);
     let (touch_tx, mut touch_rx) = mpsc::channel::<TouchEvent>(64);
+    let (key_tx, mut key_rx) = mpsc::channel::<libcarjack::hid::KeyEvent>(64);
     let answer_with_config = Arc::new(AtomicBool::new(true));
     *ctl.video.lock().unwrap() = Some(FrameSink {
         tx: video_tx,
@@ -331,12 +334,21 @@ pub async fn run(
             }
         }
     }));
+    let _keys = AbortOnDropHandle::new(tokio::spawn({
+        let platform = platform.clone();
+        async move {
+            while let Some(event) = key_rx.recv().await {
+                platform.key(event);
+            }
+        }
+    }));
 
     let stream = libcarjack::airplay::run_video_stream(
         conn,
         codec,
         video_rx,
         touch_tx,
+        Some(key_tx),
         keyframe_tx,
         handover,
     );

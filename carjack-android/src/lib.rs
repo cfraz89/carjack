@@ -127,6 +127,14 @@ impl Platform for JavaPlatform {
             ],
         );
     }
+
+    fn key(&self, event: libcarjack::hid::KeyEvent) {
+        self.call(
+            "key",
+            "(IZ)V",
+            &[JValue::Int(event.code as jint), JValue::Bool(event.down as jboolean)],
+        );
+    }
 }
 
 fn string(env: &mut JNIEnv, s: &JString) -> Option<String> {

@@ -63,6 +63,9 @@ interface IDisplayService {
     /** Copies the phone's system log into {@code dir}, which the app can read and the shell write. */
     void copySystemLog(String dir) = 17;
 
+    /** An Android key code going down or up on the display. */
+    void key(int code, boolean down) = 18;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

@@ -48,9 +48,12 @@ final class ScreenStream {
         this.onError = onError;
     }
 
-    /** The panel is {@code width}x{@code height}; the display shows in the view rectangle. */
+    /**
+     * The panel is {@code width}x{@code height}; the display shows in the view rectangle, with
+     * {@link NavBar} {@code barHeight} high under it (0 for none).
+     */
     void start(int width, int height, int fps, int viewX, int viewY, int viewWidth,
-            int viewHeight, boolean hevc) throws IOException {
+            int viewHeight, int barHeight, boolean hevc) throws IOException {
         int density = intSetting("density",
                 Math.max(120, Math.min(viewWidth, viewHeight) * 160 / SMALLEST_WIDTH_DP));
 
@@ -82,7 +85,8 @@ final class ScreenStream {
         codec.start();
 
         // Always through the relay: besides placing the view, it keeps a still screen sending.
-        relay = new Relay(input, width, height, viewX, viewY, viewWidth, viewHeight);
+        relay = new Relay(input, width, height, viewX, viewY, viewWidth, viewHeight,
+                barHeight == 0 ? null : NavBar.render(viewWidth, barHeight));
         Surface target = relay.start();
         closeDisplay = Variant.openDisplay(context, viewWidth, viewHeight, density, target);
         lastOutput = android.os.SystemClock.uptimeMillis();

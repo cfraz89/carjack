@@ -152,6 +152,29 @@ public final class DisplayService extends IDisplayService.Stub {
         }
     }
 
+    /** A key going down or up on the display, for its focused window (or, media keys, the player). */
+    @Override
+    public synchronized void key(int code, boolean down) {
+        if (display == null) {
+            return;
+        }
+        long now = android.os.SystemClock.uptimeMillis();
+        android.view.KeyEvent event = new android.view.KeyEvent(now, now,
+                down ? android.view.KeyEvent.ACTION_DOWN : android.view.KeyEvent.ACTION_UP, code, 0,
+                0, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
+                android.view.InputDevice.SOURCE_KEYBOARD);
+        try {
+            InputEvent.class.getMethod("setDisplayId", int.class)
+                    .invoke(event, display.getDisplay().getDisplayId());
+            Class<?> global = Class.forName("android.hardware.input.InputManagerGlobal");
+            Object input = global.getMethod("getInstance").invoke(null);
+            global.getMethod("injectInputEvent", InputEvent.class, int.class)
+                    .invoke(input, event, 0 /* INJECT_INPUT_EVENT_MODE_ASYNC */);
+        } catch (ReflectiveOperationException e) {
+            Log.w(TAG, "Could not inject key " + code, e);
+        }
+    }
+
     @Override
     public synchronized void launch(String component) {
         if (display == null) {

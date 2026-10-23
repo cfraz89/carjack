@@ -40,6 +40,19 @@ final class Relay {
             + "varying vec2 uv;\n"
             + "void main() { gl_FragColor = texture2D(frame, uv); }\n";
     private static final float[] QUAD = {-1, -1, 1, -1, -1, 1, 1, 1};
+    /** The {@link NavBar}: a plain bitmap texture, rows top down as a Bitmap has them. */
+    private static final String BAR_VERTEX = ""
+            + "attribute vec2 pos;\n"
+            + "varying vec2 uv;\n"
+            + "void main() {\n"
+            + "  uv = vec2(pos.x * 0.5 + 0.5, 0.5 - pos.y * 0.5);\n"
+            + "  gl_Position = vec4(pos, 0.0, 1.0);\n"
+            + "}\n";
+    private static final String BAR_FRAGMENT = ""
+            + "precision mediump float;\n"
+            + "uniform sampler2D bar;\n"
+            + "varying vec2 uv;\n"
+            + "void main() { gl_FragColor = texture2D(bar, uv); }\n";
 
     private final Surface output;
     private final int width;
@@ -66,8 +79,12 @@ final class Relay {
     private static final int CAPTURE_WIDTH = 480;
     private java.util.function.Consumer<android.graphics.Bitmap> pendingCapture;
 
+    /** Under the view, where wanted; null for none. */
+    private final android.graphics.Bitmap bar;
+    private int barProgram;
+
     Relay(Surface output, int width, int height, int viewX, int viewY, int viewWidth,
-            int viewHeight) {
+            int viewHeight, android.graphics.Bitmap bar) {
         this.output = output;
         this.width = width;
         this.height = height;
@@ -75,6 +92,7 @@ final class Relay {
         this.viewY = viewY;
         this.viewWidth = viewWidth;
         this.viewHeight = viewHeight;
+        this.bar = bar;
     }
 
     /** Returns the surface the display should render into. */
@@ -132,6 +150,26 @@ final class Relay {
         int pos = GLES20.glGetAttribLocation(program, "pos");
         GLES20.glEnableVertexAttribArray(pos);
         GLES20.glVertexAttribPointer(pos, 2, GLES20.GL_FLOAT, false, 0, quad);
+
+        if (bar != null) {
+            // On texture unit 1, so the display's frame keeps unit 0 to itself.
+            barProgram = link(BAR_VERTEX, BAR_FRAGMENT);
+            int[] barTexture = new int[1];
+            GLES20.glGenTextures(1, barTexture, 0);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, barTexture[0]);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER,
+                    GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER,
+                    GLES20.GL_LINEAR);
+            android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bar, 0);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glUseProgram(barProgram);
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(barProgram, "bar"), 1);
+            int barPos = GLES20.glGetAttribLocation(barProgram, "pos");
+            GLES20.glEnableVertexAttribArray(barPos);
+            GLES20.glVertexAttribPointer(barPos, 2, GLES20.GL_FLOAT, false, 0, quad);
+        }
         GLES20.glUseProgram(program);
     }
 
@@ -207,6 +245,14 @@ final class Relay {
             GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "tex"), 1, false,
                     matrix, 0);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        }
+        if (bar != null) {
+            GLES20.glViewport(viewX, height - viewY - viewHeight - bar.getHeight(), viewWidth,
+                    bar.getHeight());
+            GLES20.glUseProgram(barProgram);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+            GLES20.glUseProgram(program);
+            GLES20.glViewport(viewX, height - viewY - viewHeight, viewWidth, viewHeight);
         }
         if (pendingCapture != null) {
             pendingCapture.accept(readView());

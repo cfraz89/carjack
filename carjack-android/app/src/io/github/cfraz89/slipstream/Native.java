@@ -20,6 +20,9 @@ final class Native {
         /** {@code action}: 0 down, 1 up, 2 move, of finger {@code pointer}; in panel pixels. */
         void touch(int action, int pointer, float x, float y);
 
+        /** A key from the accessory's switchgear: an Android key code, going down or up. */
+        void key(int code, boolean down);
+
         /** {@code error} is null for a clean end. */
         void ended(String error);
     }

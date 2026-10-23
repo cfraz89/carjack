@@ -295,5 +295,49 @@ final class Variant {
         };
     }
 
+    /**
+     * A key from the switchgear or the bar onto the display. Home isn't sent as a key: on a
+     * display without system decorations that's the phone's own home; it reopens what the unit
+     * opens on connect instead.
+     */
+    static void key(Context context, int code, boolean down) {
+        if (code == KEYCODE_HOME) {
+            if (down) {
+                goHome(context);
+            }
+            return;
+        }
+        IDisplayService display = ShizukuDisplay.active;
+        if (display == null) {
+            return;
+        }
+        try {
+            display.key(code, down);
+        } catch (android.os.RemoteException e) {
+            Log.w(TAG, "Key " + code + " lost", e);
+        }
+    }
+
+    /** A press and release. */
+    static void key(Context context, int code) {
+        key(context, code, true);
+        key(context, code, false);
+    }
+
+    private static final int KEYCODE_HOME = 3;
+
+    /** What the unit opens on connect, brought back to the front. */
+    static void goHome(Context context) {
+        IDisplayService display = ShizukuDisplay.active;
+        if (display == null) {
+            return;
+        }
+        try {
+            display.launch(appFor(context));
+        } catch (android.os.RemoteException e) {
+            Log.w(TAG, "Home lost", e);
+        }
+    }
+
     private Variant() {}
 }
