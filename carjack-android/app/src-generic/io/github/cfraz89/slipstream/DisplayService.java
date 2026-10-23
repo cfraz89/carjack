@@ -122,6 +122,7 @@ public final class DisplayService extends IDisplayService.Stub {
             Log.i(TAG, "Display " + id + " at " + width + "x" + height + ", " + density + "dpi");
             awake = new StayAwake(shellContext());
             awake.start();
+            keyboardHere(id);
             return id;
         } catch (ReflectiveOperationException | RuntimeException e) {
             Log.e(TAG, "Could not create a display", e);
@@ -149,6 +150,24 @@ public final class DisplayService extends IDisplayService.Stub {
             Log.w(TAG, "Could not inject a touch", e);
         } finally {
             event.recycle();
+        }
+    }
+
+    /**
+     * The keyboard on this display, for what's typed into here: by default Android shows it on
+     * the phone's (DISPLAY_IME_POLICY_FALLBACK_DISPLAY). Needs INTERNAL_SYSTEM_WINDOW, which the
+     * shell has, and a trusted display, which this is.
+     */
+    private static void keyboardHere(int displayId) {
+        try {
+            android.os.IBinder binder = (android.os.IBinder) Class.forName("android.os.ServiceManager")
+                    .getMethod("getService", String.class).invoke(null, "window");
+            Object windows = Class.forName("android.view.IWindowManager$Stub")
+                    .getMethod("asInterface", android.os.IBinder.class).invoke(null, binder);
+            windows.getClass().getMethod("setDisplayImePolicy", int.class, int.class)
+                    .invoke(windows, displayId, 0 /* DISPLAY_IME_POLICY_LOCAL */);
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            Log.w(TAG, "The keyboard stays on the phone", e);
         }
     }
 

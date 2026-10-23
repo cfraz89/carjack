@@ -74,8 +74,13 @@ public final class MainActivity extends Activity {
         LinearLayout names = new LinearLayout(this);
         names.setOrientation(LinearLayout.VERTICAL);
         names.setPadding(ui.dp(16), 0, 0, 0);
-        TextView title = ui.text("Slipstream", 32, R.color.sl_tertiary);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        // Yellowtail (Apache 2.0, res/font): a fast script, shaded pink into blue like a trail.
+        TextView title = ui.text("Slipstream", 40, R.color.sl_tertiary);
+        title.setTypeface(getResources().getFont(R.font.yellowtail));
+        float titleWidth = title.getPaint().measureText("Slipstream");
+        title.getPaint().setShader(new android.graphics.LinearGradient(0, 0, titleWidth, 0,
+                ui.color(R.color.sl_tertiary), ui.color(R.color.sl_primary),
+                android.graphics.Shader.TileMode.CLAMP));
         names.addView(title);
         names.addView(ui.text("Your phone on CarPlay-compatible head units", 15, R.color.sl_on_surface_variant));
         header.addView(names);
