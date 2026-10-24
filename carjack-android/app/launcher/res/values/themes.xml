@@ -13,13 +13,7 @@
         <item name="android:fontFamily">@font/hud</item>
     </style>
 
-    <!-- On the unit no window animations: they're frames the stream has to carry for nothing. -->
-    <style name="SlipstreamTheme.Home">
-        <item name="android:windowAnimationStyle">@null</item>
-    </style>
-
-    <!-- Opened on the phone itself, where it animates like any app. -->
-    <style name="SlipstreamTheme.HomeOnPhone" />
+    <style name="SlipstreamTheme.Home" />
 
     <!-- Drawer and settings: translucent over home. They draw the blurred wallpaper behind
          themselves (Blur), which is there at once; SurfaceFlinger's cross-window blur arrives

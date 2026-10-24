@@ -40,8 +40,6 @@ class HomeActivity : Activity() {
     private val swallowBack = OnBackInvokedCallback { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // The manifest's theme is the unit's, without window animations; on the phone it has them.
-        if (SystemBars.onPhone(this)) setTheme(R.style.SlipstreamTheme_HomeOnPhone)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_home)
 
