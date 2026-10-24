@@ -155,7 +155,7 @@
              Empty leaves reports off. Started by Reports, so the switch can stop it. -->
         <meta-data
             android:name="io.sentry.dsn"
-            android:value="" />
+            android:value="https://REDACTED" />
         <meta-data
             android:name="io.sentry.auto-init"
             android:value="false" />
