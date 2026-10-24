@@ -100,7 +100,7 @@ public final class SlipstreamService extends Service {
                 waitingSince = now();
                 offerWait = OFFER_WAIT_MS;
                 if (session == null) {
-                    status(name(unit) + " connected; waiting for it to start a session");
+                    status(name(unit) + " connected");
                 }
                 handler.postDelayed(() -> {
                     if (session == null) {
@@ -229,7 +229,7 @@ public final class SlipstreamService extends Service {
         }
         waitingSince = now();
         if (cyclesLeft > 0) {
-            status("Nothing from " + name(unit) + " yet; renewing the Bluetooth link");
+            status("Renewing the link to " + name(unit));
         }
         if (cyclesLeft > 0 && Variant.cycleBluetooth()) {
             cyclesLeft--;
@@ -260,7 +260,7 @@ public final class SlipstreamService extends Service {
         sessionStarted = now();
         offerWait = OFFER_WAIT_MS;
         BluetoothDevice unit = socket.getRemoteDevice();
-        status("Setting up a session with " + name(unit) + " over Bluetooth");
+        status("Connecting to " + name(unit));
         session = new Session(this, handler, socket, wifi, this::status, ended -> {
             if (session == ended) {
                 session = null;
@@ -278,8 +278,7 @@ public final class SlipstreamService extends Service {
                     bluetooth.relink(unit);
                 } else {
                     gaveUpOn = unit;
-                    status("Sessions keep failing with " + name(unit)
-                            + "; waiting for it to reconnect", true);
+                    status("Sessions keep failing with " + name(unit), true);
                 }
             }
         });

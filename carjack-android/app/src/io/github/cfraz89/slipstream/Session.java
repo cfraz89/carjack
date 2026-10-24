@@ -82,7 +82,7 @@ final class Session implements Native.Callbacks {
         handler.post(() -> wifi.join(ssid, passphrase, bssid, new AccessoryWifi.Result() {
             @Override
             public void joined(String iface, String mac) {
-                status.accept("On " + ssid + "; starting the stream");
+                status.accept("Starting the stream");
                 Native.wifiJoined(handle, iface, mac);
             }
 

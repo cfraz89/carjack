@@ -122,31 +122,18 @@ public final class MainActivity extends Activity {
         settings.setPadding(0, ui.dp(4), 0, ui.dp(4));
         ((LinearLayout.LayoutParams) settings.getLayoutParams()).topMargin = 0;
 
-        page.addView(ui.heading("Pairing"));
-        LinearLayout pairing = ui.card(page, R.color.sl_surface_container);
-        pairing.setPadding(0, ui.dp(4), 0, ui.dp(4));
-        ((LinearLayout.LayoutParams) pairing.getLayoutParams()).topMargin = 0;
-        ui.row(pairing, getDrawable(R.drawable.ic_sl_visibility), true,
-                "Make this phone visible", "So a unit can find it to pair", null,
-                v -> startActivity(new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
-                        .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION,
-                                DISCOVERABLE_SECONDS)));
-        ui.row(pairing, getDrawable(R.drawable.ic_sl_bluetooth), true, "Bluetooth settings",
-                "Pair or forget units", null, v -> openBluetoothSettings());
-
         page.addView(ui.heading("Help"));
         LinearLayout help = ui.card(page, R.color.sl_surface_container);
         help.setPadding(0, ui.dp(4), 0, ui.dp(4));
         ((LinearLayout.LayoutParams) help.getLayoutParams()).topMargin = 0;
         ui.row(help, getDrawable(R.drawable.ic_sl_share), true, "Send logs",
-                "For a report of something going wrong", null, v -> confirmSendLogs());
+                "Report a problem", null, v -> confirmSendLogs());
         if (Reports.configured(this)) {
             Switch reports = new Switch(this);
             reports.setChecked(Variant.prefs(this).getBoolean(Reports.PREF, true));
             reports.setClickable(false);
             ui.row(help, getDrawable(R.drawable.ic_sl_shield), true, "Send crash reports",
-                    "Crashes and errors, with Slipstream's log lines before them, go to its"
-                            + " developer through Sentry",
+                    "Automatically, through Sentry",
                     reports, v -> {
                         reports.setChecked(!reports.isChecked());
                         Variant.prefs(this).edit()
@@ -209,9 +196,9 @@ public final class MainActivity extends Activity {
         heading.addView(words);
         pairCard.addView(heading);
         String[] steps = {
-            "On the unit, open its phone or Bluetooth menu and add a device",
-            "Make this phone visible, so the unit can find it",
-            "Pick this phone on the unit, and confirm the code on both",
+            "On the unit, add a phone",
+            "Make this phone visible",
+            "Pick it on the unit, and confirm the code",
         };
         for (int i = 0; i < steps.length; i++) {
             LinearLayout line = new LinearLayout(this);
@@ -238,10 +225,7 @@ public final class MainActivity extends Activity {
     private void showPower() {
         boolean on = BootReceiver.isOn(this);
         power.setChecked(on);
-        String waiting = Variant.prefs(this).getBoolean("linked", false) ? "Waiting for the unit"
-                : "Waiting for the unit: turn it on, and it connects by itself";
-        String current = Variant.setting(this, "status", "Waiting for the unit");
-        status.setText(!on ? "Off" : current.equals("Waiting for the unit") ? waiting : current);
+        status.setText(on ? Variant.setting(this, "status", SlipstreamService.WAITING) : "Off");
         powerCard.setBackground(ui.shape(on ? R.color.sl_primary_container
                 : R.color.sl_surface_container_high, 28));
         boolean showRetry = on && Variant.prefs(this).getBoolean("retryable", false);
@@ -262,7 +246,7 @@ public final class MainActivity extends Activity {
                 ui.chevron(), v -> startActivity(new Intent(this, OnConnectActivity.class)));
 
         ui.row(settings, getDrawable(R.drawable.ic_sl_home), true, "Preview the launcher",
-                "Open it here on the phone, to try it or arrange it", ui.chevron(),
+                "Try or arrange it here", ui.chevron(),
                 v -> startActivity(new Intent().setClassName(this,
                         "io.github.cfraz89.slipstream.LauncherOnPhone")));
 
@@ -273,10 +257,9 @@ public final class MainActivity extends Activity {
         dark.setChecked(Variant.keepsPanel(this));
         dark.setClickable(false);
         ui.row(settings, getDrawable(R.drawable.ic_sl_cast), true,
-                "Dark screen keeps the unit going (experimental)",
-                "During a session the phone's screen goes dark instead of the phone sleeping, so"
-                        + " the unit stays usable. Power button or a touch brings it back."
-                        + " Takes effect next session",
+                "Dark screen (experimental)",
+                "The phone's screen goes dark instead of sleeping, so the unit keeps"
+                        + " working. From next session",
                 dark, v -> {
                     dark.setChecked(!dark.isChecked());
                     Variant.prefs(this).edit()
@@ -287,8 +270,7 @@ public final class MainActivity extends Activity {
         navBar.setChecked(Boolean.parseBoolean(Variant.setting(this, "nav_bar", "false")));
         navBar.setClickable(false);
         ui.row(settings, getDrawable(R.drawable.ic_sl_home), true, "Back and home bar",
-                "A slim bar along the bottom of the unit, for when its switchgear can't go back"
-                        + " or home. Takes effect next session",
+                "Along the bottom of the unit. From next session",
                 navBar, v -> {
                     navBar.setChecked(!navBar.isChecked());
                     Variant.prefs(this).edit()
@@ -300,9 +282,7 @@ public final class MainActivity extends Activity {
         unlocked.setClickable(false);
         ui.row(settings, getDrawable(R.drawable.ic_sl_lock_open), true,
                 "Stay unlocked while connected",
-                "The screen can go off without locking, so the unit carries on. For the power"
-                        + " button too, turn off \"Power button instantly locks\" in the screen"
-                        + " lock's settings",
+                "Also turn off \"Power button instantly locks\"",
                 unlocked, v -> {
                     unlocked.setChecked(!unlocked.isChecked());
                     Variant.prefs(this).edit()
@@ -340,17 +320,15 @@ public final class MainActivity extends Activity {
     private void confirmSendLogs() {
         boolean upload = Reports.on();
         android.widget.EditText description = new android.widget.EditText(this);
-        description.setHint("What happened, and roughly when");
+        description.setHint("What happened, and when?");
         LinearLayout box = new LinearLayout(this);
         box.setPadding(ui.dp(20), 0, ui.dp(20), 0);
         box.addView(description, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         AlertDialog.Builder dialog = new AlertDialog.Builder(this)
                 .setTitle("Send logs?")
-                .setMessage("They cover the last few days of Slipstream and what the phone did"
-                        + " around it, including unit names and Bluetooth addresses."
-                        + (upload ? " They go to Slipstream's developer." : " Send them only to"
-                                + " whoever's looking into a problem."))
+                .setMessage("A few days of logs, with unit names and Bluetooth addresses."
+                        + (upload ? "" : " Send only to whoever's looking into it."))
                 .setNegativeButton("Cancel", null);
         if (upload) {
             dialog.setView(box)
@@ -408,20 +386,20 @@ public final class MainActivity extends Activity {
     private void showSetup() {
         setup.removeAllViews();
         if (!pingShizuku()) {
-            step("Start Shizuku, through Wireless debugging", "Open", v -> {
+            step("Start Shizuku", "Open", v -> {
                 Intent open = getPackageManager().getLaunchIntentForPackage(SHIZUKU_PACKAGE);
                 if (open != null) {
                     startActivity(open);
                 }
             });
         } else if (!ShizukuDisplay.available()) {
-            step("Let Slipstream use Shizuku", "Allow",
+            step("Slipstream needs Shizuku", "Allow",
                     v -> Shizuku.requestPermission(REQUEST_SHIZUKU));
         }
         // With Shizuku, autoSetUp sees to these.
         if (!ShizukuDisplay.available()) {
             if (!permissionsGranted()) {
-                step("Bluetooth, Wi-Fi, notification and photo permissions", "Allow",
+                step("Slipstream needs permissions", "Allow",
                         v -> requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS));
             }
             if (!bluetoothOn()) {
@@ -436,8 +414,7 @@ public final class MainActivity extends Activity {
         // unlocked while connected. Gone once that's been seen working.
         if (unitAddresses.size() > 1 && !Variant.prefs(this).getBoolean("trust_seen", false)
                 && getSystemService(android.app.KeyguardManager.class).isDeviceSecure()) {
-            step("Make the unit a trusted device, so the phone stays unlocked while it's"
-                    + " connected: Extend Unlock → Trusted devices", "Set up",
+            step("Make the unit a trusted device, to stay unlocked", "Set up",
                     v -> openExtendUnlock());
         }
         // An app inside a VPN can't reach the unit's Wi-Fi: the stream times out.
@@ -445,25 +422,13 @@ public final class MainActivity extends Activity {
             // Excluding an app is the VPN app's own setting; Android's VPN page only has on/off.
             Intent tailscale = getPackageManager().getLaunchIntentForPackage(TAILSCALE_PACKAGE);
             if (tailscale != null) {
-                step("Tailscale blocks the unit's Wi-Fi. In Tailscale's settings, exclude"
-                        + " Slipstream under split tunneling, or turn Tailscale off",
+                step("Tailscale blocks the unit: exclude Slipstream in split tunneling",
                         "Tailscale", v -> startActivity(tailscale));
             } else {
-                step("A VPN is on, which blocks the unit's Wi-Fi. Exclude Slipstream in the VPN"
-                        + " app's settings, or turn it off", "VPN", v -> startActivity(
+                step("A VPN blocks the unit: exclude Slipstream, or turn it off", "VPN",
+                        v -> startActivity(
                                 new Intent(android.provider.Settings.ACTION_VPN_SETTINGS)));
             }
-        }
-        if (setup.getChildCount() > 0) {
-            LinearLayout heading = new LinearLayout(this);
-            heading.setGravity(Gravity.CENTER_VERTICAL);
-            heading.addView(ui.icon(R.drawable.ic_sl_shield, R.color.sl_on_tertiary_container,
-                    20));
-            TextView words = ui.text("Finish setting up", 16, R.color.sl_on_tertiary_container);
-            words.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-            words.setPadding(ui.dp(10), 0, 0, 0);
-            heading.addView(words);
-            setup.addView(heading, 0);
         }
         setup.setVisibility(setup.getChildCount() == 0 ? View.GONE : View.VISIBLE);
     }
@@ -518,7 +483,7 @@ public final class MainActivity extends Activity {
     private void findUnits() {
         unitNames.clear();
         unitAddresses.clear();
-        unitNames.add("Whichever connects");
+        unitNames.add("Any");
         unitAddresses.add("");
         BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
         if (bluetoothOn() && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
@@ -594,7 +559,7 @@ public final class MainActivity extends Activity {
     private void step(String what, String action, View.OnClickListener onClick) {
         LinearLayout line = new LinearLayout(this);
         line.setGravity(Gravity.CENTER_VERTICAL);
-        line.setPadding(0, ui.dp(12), 0, 0);
+        line.setPadding(0, setup.getChildCount() == 0 ? 0 : ui.dp(12), 0, 0);
         TextView label = ui.text(what, 15, R.color.sl_on_tertiary_container);
         label.setPadding(0, 0, ui.dp(12), 0);
         line.addView(label, new LinearLayout.LayoutParams(0,
