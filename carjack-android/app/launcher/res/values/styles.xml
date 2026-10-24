@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Text straight on the wallpaper: a soft shadow keeps it legible on a light one. -->
+    <style name="HudText">
+        <item name="android:fontFamily">@font/hud</item>
+        <item name="android:textColor">@color/text_primary</item>
+        <item name="android:shadowColor">#99000000</item>
+        <item name="android:shadowRadius">6</item>
+        <item name="android:shadowDy">1</item>
+        <item name="android:includeFontPadding">false</item>
+    </style>
+
+    <!-- The clock and temperature: big, instrument-cluster figures. -->
+    <style name="HudText.Big">
+        <item name="android:textFontWeight">600</item>
+        <item name="android:textSize">@dimen/status_clock_max</item>
+    </style>
+
+    <!-- Date, weather and such: small, spaced capitals. -->
+    <style name="HudText.Caption">
+        <item name="android:textFontWeight">500</item>
+        <item name="android:textColor">@color/text_secondary</item>
+        <item name="android:textSize">@dimen/status_detail_size</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.12</item>
+    </style>
+
+    <style name="PlayingButton">
+        <item name="android:layout_width">@dimen/playing_button_size</item>
+        <item name="android:layout_height">@dimen/playing_button_size</item>
+        <item name="android:padding">@dimen/playing_button_padding</item>
+        <item name="android:tint">@color/text_primary</item>
+        <item name="android:background">@drawable/ripple_circle</item>
+        <item name="android:stateListAnimator">@animator/press</item>
+    </style>
+</resources>

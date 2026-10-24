@@ -30,9 +30,6 @@ class TaskbarView @JvmOverloads constructor(
         divider = findViewById(R.id.taskbar_divider)
         findViewById<View>(R.id.taskbar_all_apps).setOnClickListener { onAllApps?.invoke() }
         findViewById<View>(R.id.taskbar_settings).setOnClickListener { onSettings?.invoke() }
-        // Clipped, so the blur follows the pill rather than filling the bounding box.
-        clipToOutline = true
-        Blur.apply(this)
     }
 
     fun refresh() {

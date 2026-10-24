@@ -28,9 +28,8 @@
         android:gravity="center"
         android:maxLines="1"
         android:ellipsize="end"
-        android:shadowColor="#CC000000"
-        android:shadowRadius="4"
-        android:shadowDy="1"
-        android:textColor="@color/text_primary"
+        style="@style/HudText"
+        android:textFontWeight="500"
+        android:letterSpacing="0.04"
         android:textSize="@dimen/shortcut_label_size" />
 </LinearLayout>

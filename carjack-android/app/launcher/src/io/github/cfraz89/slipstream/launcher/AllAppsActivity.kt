@@ -46,7 +46,10 @@ class AllAppsActivity : Activity() {
         apps = AppRepository.launchableApps(this)
 
         val grid = findViewById<GridView>(R.id.all_apps_grid)
-        fitSheetToBars(findViewById(R.id.all_apps_sheet), grid)
+        val sheet = findViewById<View>(R.id.all_apps_sheet)
+        // The blurred wallpaper under the sheet, drawn with it rather than waited on.
+        Blur.apply(sheet)
+        fitSheetToBars(sheet, grid)
         grid.adapter = AppAdapter()
         grid.setOnItemClickListener { _, _, position, _ -> choose(apps[position]) }
     }

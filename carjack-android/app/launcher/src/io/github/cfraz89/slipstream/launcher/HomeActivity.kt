@@ -40,6 +40,8 @@ class HomeActivity : Activity() {
     private val swallowBack = OnBackInvokedCallback { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // The manifest's theme is the unit's, without window animations; on the phone it has them.
+        if (SystemBars.onPhone(this)) setTheme(R.style.SlipstreamTheme_HomeOnPhone)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_home)
 
@@ -53,10 +55,7 @@ class HomeActivity : Activity() {
         weather = findViewById(R.id.status_weather)
         weatherIcon = findViewById(R.id.status_weather_icon)
         statusDetail = findViewById(R.id.status_detail)
-        Blur.apply(status)
-        val playingPanel = findViewById<View>(R.id.playing)
-        Blur.apply(playingPanel)
-        nowPlaying = NowPlaying(this, playingPanel)
+        nowPlaying = NowPlaying(this, findViewById(R.id.playing))
 
         pendingSlot = savedInstanceState?.getInt(STATE_PENDING_SLOT, -1) ?: -1
 
@@ -69,6 +68,7 @@ class HomeActivity : Activity() {
         }
         WallpaperManager.getInstance(this)
             .addOnColorsChangedListener(wallpaperChanged, Handler(mainLooper))
+        Wallpapers.watch(this)
         // Both need the laid-out size, which onResume may come before.
         wallpaper.addOnLayoutChangeListener { _, left, top, right, bottom,
                                               oldLeft, oldTop, oldRight, oldBottom ->
@@ -161,8 +161,15 @@ class HomeActivity : Activity() {
         val key = "${Wallpapers.stamp(this)} ${width}x$height $wallpaperGeneration"
         if (key == loadedWallpaper) return
         loadedWallpaper = key
+        // Kept across launches: fetching it can take a second, through Shizuku.
+        Wallpapers.cached(key)?.let {
+            wallpaper.setImageDrawable(it)
+            blurWallpaper()
+            return
+        }
         Thread({
             val drawable = Wallpapers.load(this, width, height)
+            Wallpapers.keep(key, drawable)
             runOnUiThread {
                 if (isDestroyed || key != loadedWallpaper) return@runOnUiThread
                 wallpaper.setImageDrawable(drawable)
@@ -239,17 +246,16 @@ class HomeActivity : Activity() {
         val stored = ShortcutStore.get(this, index)
         val entry = stored?.let { AppRepository.entryFor(this, it) }
 
-        // Every slot sits on a blurred plate, filled or not; an empty one is dimmer.
-        cell.setBackgroundResource(R.drawable.slot_background)
-        cell.clipToOutline = true
-        Blur.apply(cell)
+        // Straight on the wallpaper: a press ripples, nothing stands behind.
+        cell.setBackgroundResource(R.drawable.ripple_transparent)
         if (entry == null) {
             // Drop a shortcut whose app has gone, so the slot returns to being addable.
             if (stored != null) ShortcutStore.clear(this, index)
             icon.setImageResource(R.drawable.ic_add_slot)
             icon.contentDescription = getString(R.string.empty_slot)
             label.setText(R.string.empty_slot)
-            cell.alpha = 0.6f
+            // Faint: there to tap, not to look at.
+            cell.alpha = 0.35f
             cell.isLongClickable = false
             cell.setOnLongClickListener(null)
             cell.setOnClickListener { pickFor(index) }

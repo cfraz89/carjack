@@ -26,11 +26,14 @@
             android:importantForAccessibility="no" />
 
         <TextView
+            style="@style/HudText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="@dimen/taskbar_button_label_gap"
             android:text="@string/apps"
-            android:textColor="@color/text_primary"
+            android:textFontWeight="600"
+            android:textAllCaps="true"
+            android:letterSpacing="0.12"
             android:textSize="@dimen/taskbar_button_label_size" />
     </LinearLayout>
 

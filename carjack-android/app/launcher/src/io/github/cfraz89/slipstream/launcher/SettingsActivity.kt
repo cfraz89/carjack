@@ -14,6 +14,7 @@ class SettingsActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_settings)
+        Blur.apply(findViewById(R.id.settings_root))
 
         bindStepper(
             rowId = R.id.setting_columns,

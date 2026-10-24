@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Everything sits straight on the wallpaper, a soft fade at top and bottom keeping it legible
+     without boxes behind each part. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <!-- The wallpaper is drawn here rather than by windowShowWallpaper: a backdrop blur only sees
-         this window's own surface, and a wallpaper behind the window is not part of it. -->
+    <!-- The wallpaper is drawn here rather than by windowShowWallpaper: the panels' blur (Blur)
+         is cut from a copy of what this view shows. -->
     <ImageView
         android:id="@+id/wallpaper"
         android:layout_width="match_parent"
@@ -12,28 +14,35 @@
         android:scaleType="centerCrop"
         android:importantForAccessibility="no" />
 
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/scrim_top_height"
+        android:layout_gravity="top"
+        android:background="@drawable/scrim_top" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/scrim_bottom_height"
+        android:layout_gravity="bottom"
+        android:background="@drawable/scrim_bottom" />
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical"
         android:fitsSystemWindows="true">
 
-        <!-- Time, date, the weather where the phone is (the unit shows no air temperature),
-             and the phone's battery. Blurred like the taskbar. -->
+        <!-- Time and date; the weather where the phone is (the unit shows no air temperature)
+             and the phone's battery. -->
         <LinearLayout
             android:id="@+id/status"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="@dimen/taskbar_margin"
-            android:layout_marginEnd="@dimen/taskbar_margin"
-            android:layout_marginTop="@dimen/taskbar_margin"
             android:orientation="horizontal"
             android:gravity="center_vertical"
             android:paddingStart="@dimen/status_padding"
             android:paddingEnd="@dimen/status_padding"
-            android:paddingTop="@dimen/status_padding_vertical"
-            android:paddingBottom="@dimen/status_padding_vertical"
-            android:background="@drawable/status_background">
+            android:paddingTop="@dimen/status_padding_vertical">
 
             <LinearLayout
                 android:layout_width="0dp"
@@ -41,22 +50,25 @@
                 android:layout_weight="1"
                 android:orientation="vertical">
 
+                <!-- One line, scaled to fit rather than wrapped. -->
                 <TextClock
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:fontFamily="sans-serif-light"
-                    android:includeFontPadding="false"
-                    android:textColor="@color/text_primary"
-                    android:textSize="@dimen/status_clock_size" />
+                    style="@style/HudText.Big"
+                    android:layout_width="match_parent"
+                    android:layout_height="@dimen/status_clock_height"
+                    android:maxLines="1"
+                    android:autoSizeTextType="uniform"
+                    android:autoSizeMinTextSize="@dimen/status_clock_min"
+                    android:autoSizeMaxTextSize="@dimen/status_clock_max"
+                    android:gravity="start|center_vertical" />
 
                 <TextClock
-                    android:layout_width="wrap_content"
+                    style="@style/HudText.Caption"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/status_line_gap"
+                    android:maxLines="1"
+                    android:ellipsize="end"
                     android:format12Hour="EEEE d MMMM"
-                    android:format24Hour="EEEE d MMMM"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="@dimen/status_detail_size" />
+                    android:format24Hour="EEEE d MMMM" />
             </LinearLayout>
 
             <LinearLayout
@@ -68,7 +80,7 @@
                 <LinearLayout
                     android:id="@+id/status_weather"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
+                    android:layout_height="@dimen/status_clock_height"
                     android:orientation="horizontal"
                     android:gravity="center_vertical"
                     android:visibility="gone">
@@ -83,21 +95,18 @@
 
                     <TextView
                         android:id="@+id/status_temperature"
+                        style="@style/HudText.Big"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:fontFamily="sans-serif-light"
-                        android:includeFontPadding="false"
-                        android:textColor="@color/text_primary"
-                        android:textSize="@dimen/status_clock_size" />
+                        android:textSize="@dimen/status_temperature_size" />
                 </LinearLayout>
 
                 <TextView
                     android:id="@+id/status_detail"
+                    style="@style/HudText.Caption"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/status_line_gap"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="@dimen/status_detail_size" />
+                    android:maxLines="1" />
             </LinearLayout>
         </LinearLayout>
 
@@ -106,13 +115,11 @@
             android:id="@+id/playing"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="@dimen/taskbar_margin"
-            android:layout_marginEnd="@dimen/taskbar_margin"
-            android:layout_marginTop="@dimen/taskbar_margin"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:padding="@dimen/status_padding_vertical"
-            android:background="@drawable/status_background"
+            android:paddingStart="@dimen/status_padding"
+            android:paddingEnd="@dimen/playing_padding_end"
+            android:paddingTop="@dimen/playing_padding_top"
             android:visibility="gone">
 
             <ImageView
@@ -127,60 +134,44 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginStart="@dimen/status_padding_vertical"
+                android:layout_marginStart="@dimen/playing_text_gap"
                 android:orientation="vertical">
 
                 <TextView
                     android:id="@+id/playing_title"
+                    style="@style/HudText"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:maxLines="1"
                     android:ellipsize="end"
-                    android:fontFamily="sans-serif-medium"
-                    android:textColor="@color/text_primary"
+                    android:textFontWeight="600"
                     android:textSize="@dimen/playing_title_size" />
 
                 <TextView
                     android:id="@+id/playing_artist"
+                    style="@style/HudText.Caption"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:maxLines="1"
-                    android:ellipsize="end"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="@dimen/status_detail_size" />
+                    android:ellipsize="end" />
             </LinearLayout>
 
             <ImageView
                 android:id="@+id/playing_previous"
-                android:layout_width="@dimen/playing_button_size"
-                android:layout_height="@dimen/playing_button_size"
-                android:padding="@dimen/playing_button_padding"
+                style="@style/PlayingButton"
                 android:src="@drawable/ic_skip_previous"
-                android:tint="@color/text_primary"
-                android:background="@drawable/ripple_circle"
-                android:stateListAnimator="@animator/press"
                 android:contentDescription="@string/playing_previous" />
 
             <ImageView
                 android:id="@+id/playing_toggle"
-                android:layout_width="@dimen/playing_button_size"
-                android:layout_height="@dimen/playing_button_size"
-                android:padding="@dimen/playing_button_padding"
+                style="@style/PlayingButton"
                 android:src="@drawable/ic_play"
-                android:tint="@color/text_primary"
-                android:background="@drawable/ripple_circle"
-                android:stateListAnimator="@animator/press"
                 android:contentDescription="@string/playing_toggle" />
 
             <ImageView
                 android:id="@+id/playing_next"
-                android:layout_width="@dimen/playing_button_size"
-                android:layout_height="@dimen/playing_button_size"
-                android:padding="@dimen/playing_button_padding"
+                style="@style/PlayingButton"
                 android:src="@drawable/ic_skip_next"
-                android:tint="@color/text_primary"
-                android:background="@drawable/ripple_circle"
-                android:stateListAnimator="@animator/press"
                 android:contentDescription="@string/playing_next" />
         </LinearLayout>
 
@@ -192,14 +183,12 @@
             android:padding="@dimen/grid_padding"
             android:useDefaultMargins="false" />
 
-        <!-- Floating rather than edge to edge, so the blur has wallpaper on every side. -->
         <io.github.cfraz89.slipstream.launcher.TaskbarView
             android:id="@+id/taskbar"
             android:layout_width="match_parent"
             android:layout_height="@dimen/taskbar_height"
             android:layout_marginStart="@dimen/taskbar_margin"
             android:layout_marginEnd="@dimen/taskbar_margin"
-            android:layout_marginBottom="@dimen/taskbar_margin"
-            android:background="@drawable/taskbar_background" />
+            android:layout_marginBottom="@dimen/taskbar_margin" />
     </LinearLayout>
 </FrameLayout>

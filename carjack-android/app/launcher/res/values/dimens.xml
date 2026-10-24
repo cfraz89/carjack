@@ -59,16 +59,26 @@
     <dimen name="setting_row_padding">20dp</dimen>
     <dimen name="setting_row_gap">12dp</dimen>
 
-    <!-- The status panel: clock and temperature big enough to read at a glance on the move. -->
+    <!-- The status area: clock and temperature big enough to read at a glance on the move. The
+         clock scales between min and max to keep to one line. -->
     <dimen name="status_padding">24dp</dimen>
-    <dimen name="status_padding_vertical">14dp</dimen>
-    <dimen name="status_clock_size">44sp</dimen>
-    <dimen name="status_detail_size">16sp</dimen>
-    <dimen name="status_line_gap">4dp</dimen>
-    <dimen name="status_icon_size">40dp</dimen>
-    <dimen name="status_icon_gap">10dp</dimen>
-    <dimen name="playing_art_size">56dp</dimen>
-    <dimen name="playing_button_size">56dp</dimen>
-    <dimen name="playing_button_padding">14dp</dimen>
-    <dimen name="playing_title_size">17sp</dimen>
+    <dimen name="status_padding_vertical">16dp</dimen>
+    <dimen name="status_clock_height">72dp</dimen>
+    <dimen name="status_clock_min">28sp</dimen>
+    <dimen name="status_clock_max">68sp</dimen>
+    <dimen name="status_temperature_size">48sp</dimen>
+    <dimen name="status_detail_size">15sp</dimen>
+    <dimen name="status_icon_size">36dp</dimen>
+    <dimen name="status_icon_gap">8dp</dimen>
+    <dimen name="playing_art_size">48dp</dimen>
+    <dimen name="playing_button_size">52dp</dimen>
+    <dimen name="playing_button_padding">13dp</dimen>
+    <dimen name="playing_title_size">18sp</dimen>
+    <dimen name="playing_text_gap">14dp</dimen>
+    <dimen name="playing_padding_top">12dp</dimen>
+    <dimen name="playing_padding_end">12dp</dimen>
+
+    <!-- The fades behind the status area and the taskbar. -->
+    <dimen name="scrim_top_height">280dp</dimen>
+    <dimen name="scrim_bottom_height">200dp</dimen>
 </resources>

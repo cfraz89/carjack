@@ -30,6 +30,26 @@ object Wallpapers {
 
     fun choice(context: Context): String = Prefs.get(context).getString(KEY, PHONE) ?: PHONE
 
+    /** The last wallpaper loaded, by what it was loaded for; dropped when the phone's changes. */
+    private var cache: Pair<String, Drawable>? = null
+    private var watching = false
+
+    fun cached(key: String): Drawable? = cache?.takeIf { it.first == key }?.second
+
+    fun keep(key: String, drawable: Drawable) {
+        cache = key to drawable
+    }
+
+    /** Once per process: a new phone wallpaper (or colours) outdates the cache. */
+    fun watch(context: Context) {
+        if (watching) return
+        watching = true
+        WallpaperManager.getInstance(context.applicationContext).addOnColorsChangedListener(
+            { _, _ -> cache = null },
+            android.os.Handler(android.os.Looper.getMainLooper()),
+        )
+    }
+
     /** Changes whenever what [load] gives would: the choice, or a newly picked photo. */
     fun stamp(context: Context): String =
         "${choice(context)} ${File(context.filesDir, PHOTO_FILE).lastModified()}"
