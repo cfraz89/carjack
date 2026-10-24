@@ -32,5 +32,10 @@ went over the wire. No Apple source, SDKs or accessory documentation were used.
   updated.
 - **Linux:** see [`carjack-linux/README.md`](carjack-linux/README.md).
 
+## License
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your
+option.
+
 carjack isn't affiliated with or endorsed by Apple. CarPlay and AirPlay are trademarks of Apple
 Inc.

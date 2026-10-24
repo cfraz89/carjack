@@ -3,7 +3,7 @@ name = "carjack-android"
 version = "0.1.0"
 edition.workspace = true
 description = "carjack's CarPlay core for the Android app, over JNI"
-license = "Proprietary"
+license.workspace = true
 
 [lib]
 name = "carjack_android"

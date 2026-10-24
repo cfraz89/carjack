@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 default-run = "carjack"
 description = "Wireless CarPlay bridge"
-license = "Proprietary"
+license.workspace = true
 
 [dependencies]
 # Defaults off deliberately: `tokio` alone would leave zbus's `async-io` enabled too.

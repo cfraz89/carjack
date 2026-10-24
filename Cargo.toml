@@ -12,3 +12,4 @@ default-members = ["carjack-linux"]
 
 [workspace.package]
 edition = "2024"
+license = "MIT OR Apache-2.0"
