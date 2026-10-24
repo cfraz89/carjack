@@ -81,11 +81,14 @@
             android:exported="true"
             android:theme="@style/SlipstreamTheme.Home"
             android:launchMode="singleTask"
+            android:taskAffinity="io.github.cfraz89.slipstream.launcher"
             android:stateNotNeeded="true"
             android:excludeFromRecents="true"
             android:clearTaskOnLaunch="true"
             android:showWhenLocked="true"
             android:configChanges="keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode" />
+        <!-- The launcher keeps a task of its own (taskAffinity): sharing the app's, the app's
+             icon would bring the launcher forward rather than the app. -->
         <!-- The same launcher from the phone's own app drawer, to try it out or set it up
              away from the unit. -->
         <activity-alias
