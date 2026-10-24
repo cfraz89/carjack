@@ -11,6 +11,9 @@ is a CarPlay head unit: it shows only what an iPhone sends it, and CarPlay shows
 Apple allows on a car screen. carjack puts any app on that screen instead - a proper off-road
 navigation app with GPX routing support, running on an Android phone or a small Linux board.
 
+The Android app, Slipstream, is now where development is focused; the Linux app is maintained but
+moves more slowly.
+
 ## What's here
 
 | | |
