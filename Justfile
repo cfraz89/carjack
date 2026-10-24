@@ -14,12 +14,12 @@ reachable device=env('CARJACK.BLUETOOTH.DEVICE', ''):
     fi
 
 # Hand the hands-free gateway UUID over to carjack, and keep the bluez monitor running on a
-# headless seat - see wireplumber/51-carjack-hfp-ag.conf and wireplumber/52-carjack-bluez-seat.conf.
+# headless seat - see carjack-linux/wireplumber/.
 [script]
 install-hfp-config:
     dir="${XDG_CONFIG_HOME:-$HOME/.config}/wireplumber/wireplumber.conf.d"
     mkdir -p "$dir"
-    for conf in wireplumber/*.conf; do
+    for conf in carjack-linux/wireplumber/*.conf; do
         install -m644 "$conf" "$dir/$(basename "$conf")"
         echo "Installed $dir/$(basename "$conf")"
     done
@@ -70,18 +70,18 @@ build +flags="":
 
 #run cargo install
 install +flags="": (build flags)
-    {{toolbox_build}}cargo install --path . {{cuda_features}} {{flags}}
+    {{toolbox_build}}cargo install --path carjack-linux {{cuda_features}} {{flags}}
 
 # Install locally as a systemd *user* service, running as whoever invokes this.
 [script]
 install-carjack-service: build
     sudo install -Dm755 target/debug/carjack /usr/local/bin/carjack
-    sudo install -Dm644 carjack.service /usr/lib/systemd/user/carjack.service
+    sudo install -Dm644 carjack-linux/carjack.service /usr/lib/systemd/user/carjack.service
     # The shipped unit names the deb's /usr/bin path; repoint it at the one we just wrote.
     printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/carjack\n' \
         | install -Dm644 /dev/stdin "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/carjack.service.d/local-path.conf"
     # The polkit rule names a user; on a dev box that is you, not "carjack".
-    sed "s/\"carjack\"/\"$USER\"/" carjack-polkit.rules \
+    sed "s/\"carjack\"/\"$USER\"/" carjack-linux/carjack-polkit.rules \
         | sudo install -Dm644 /dev/stdin /etc/polkit-1/rules.d/49-carjack.rules
     systemctl --user daemon-reload
     systemctl --user enable --now carjack.service
@@ -89,12 +89,12 @@ install-carjack-service: build
 
 #Build an arm64 deb of carjack
 deb:
-    podman build -t carjack-deb-builder -f Containerfile.deb .
+    podman build -t carjack-deb-builder -f carjack-linux/Containerfile.deb .
     podman run --rm --security-opt label=disable \
         -v {{justfile_directory()}}:/src \
         -v {{home_directory()}}/.cargo/registry:/usr/local/cargo/registry \
         -v {{home_directory()}}/.cargo/git:/usr/local/cargo/git \
-        carjack-deb-builder cargo deb --offline -- {{cuda_features}}
+        carjack-deb-builder cargo deb --offline -p carjack -- {{cuda_features}}
 
 # Run cargo tests
 test +flags="":

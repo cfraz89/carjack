@@ -111,7 +111,7 @@ WARNING: frame looks black - the client probably never painted. Check the client
 ```
 
 The driver is `.claude/skills/run-carjack/screenshot.rs`, registered as a cargo example
-(`[[example]] name = "screenshot"` in `Cargo.toml`) so it builds with the workspace. To run it
+(`[[example]] name = "screenshot"` in `carjack-linux/Cargo.toml`) so it builds with the workspace. To run it
 directly, having already built:
 
 ```bash

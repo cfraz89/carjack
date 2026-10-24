@@ -1,136 +1,14 @@
 [workspace]
 resolver = "3"
 members = [
+    "carjack-linux",
+    "carjack-android",
     "iap2-proto",
     "libcarjack",
     "cuda-dmabuf",
-    "carjack-android",
 ]
+# A bare `cargo build`/`cargo run` is the Linux app; the Android core builds through `just android`.
+default-members = ["carjack-linux"]
 
 [workspace.package]
 edition = "2024"
-
-[package]
-name = "carjack"
-version = "0.1.0"
-edition.workspace = true
-default-run = "carjack"
-description = "Wireless CarPlay bridge"
-license = "Proprietary"
-
-[dependencies]
-# Defaults off deliberately: `tokio` alone would leave zbus's `async-io` enabled too.
-nm-automata = { git = "ssh://git@github.com/cfraz89/nm-automata.git", branch="disable-modes-patch", default-features = false, features = ["tokio"] }
-async-trait = "0.1"
-enclose = "1.2"
-rtnetlink = "0.21.0"
-netlink-packet-route = "0.30"
-backon = "1.6.0"
-# git, not 0.17.4: that release omits Channel entirely when it is None, where bluez wants 0.
-bluer = { git = "https://github.com/bluez/bluer.git", rev = "57ec704503417a6476bca5d3bb01122686583709", features = ["full", "rfcomm"] }
-color-eyre = "0.6.5"
-deku = "0.20.3"
-uuid = { version = "1.23.3", features = ["v5"] }
-eyre = "0.6.12"
-futures = "0.3.32"
-
-iap2-proto = { version = "0.1.0", path = "iap2-proto" }
-libcarjack = { path = "libcarjack" }
-tokio = { version = "1.52.3", features = ["full"] }
-tokio-stream = "0.1.18"
-tokio-util = { version = "0.7", features = ["rt"] }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "tracing-log"] }
-usb-gadget = "1.2.0"
-tap = "1.0.1"
-ring = "0.17"
-# Fork `cfraz89/catplay`, branch `master` - upstream `catplay-labs/catplay` master plus
-# `feat/hevc-and-view-rect` (the screen config frame's view parameters and `displayPanels` in
-# `/info`, on top of the plumbed-through AirPlay `/setup` device identity - BT MAC as `deviceID`,
-# associated WiFi MAC as `macAddress`) and `fix/aarch64-asm-base-macros` (catplay_hap's asm_base.h
-# stub lacks the aarch64 link-register macros, so its chacha20_poly1305 asm won't assemble for
-# arm64), both up as draft PRs upstream.
-catplay_hap = { git = "https://github.com/cfraz89/catplay.git", branch = "master", default-features=false, features = ["std"] }
-catplay_carplay = { git = "https://github.com/cfraz89/catplay.git", branch = "master", default-features = false, features = ["tx"]}
-catplay_util = { git = "https://github.com/cfraz89/catplay.git", branch = "master" }
-bytes = "1.12.1"
-gstreamer = "0.24"
-gstreamer-app = "0.24"
-smithay = { version = "0.7.0", default-features = false, features = ["backend_egl", "backend_gbm", "renderer_gl", "wayland_frontend", "desktop"] }
-# Wayland *client* (separate from smithay's server side) - used only in desktop mode to read the
-# output scale from whatever compositor is running, for HiDPI touch mapping. `wayland-protocols`
-# (client side, staging) is there for `wp_fractional_scale_v1`, which reports the *exact* scale
-# (wl_output's is rounded to an integer).
-wayland-client = "0.31"
-wayland-protocols = { version = "0.32", default-features = false, features = ["client", "staging"] }
-gstreamer-allocators = "0.24"
-gstreamer-video = { version = "0.24", features = ["v1_24"] }
-# NVIDIA zero-copy encode path. Opt-in via the `cuda` feature (off by default) so the project
-# builds on non-NVIDIA machines without the cuda-dmabuf native libs (libcuda, libgstcuda).
-cuda-dmabuf = { path = "cuda-dmabuf", optional = true }
-serde = { version = "1", features = ["derive"] }
-quick-xml = { version = "0.41", features = ["serialize"] }
-config = { version = "0.15", default-features = false, features = ["toml"] }
-nix = { version = "0.31", features = ["net", "signal", "socket"] }
-mac_address = "1.1.7"
-xdg = "3.0.0"
-clap = { version = "4.6.2", features = ["derive"] }
-serde_json = "1.0.151"
-toml = "1"
-ashpd = { version = "0.13", default-features = false, features = ["remote_desktop", "screencast", "tokio"] }
-zbus = { version = "5.18.0", features = ["tokio"] }
-thiserror = "2.0.19"
-chrono = "0.4"
-reis = { version = "0.7.0", features = ["tokio"] }
-topcoat = "0.8"
-
-[features]
-# NVIDIA zero-copy encode (`nvh264enc` via `cuda-dmabuf`). Off by default so the project builds on
-# non-NVIDIA machines; enable with `--features cuda` (or `just build cuda=true`).
-default = []
-cuda = ["dep:cuda-dmabuf", "cuda-dmabuf/cuda"]
-
-# Agent-facing driver for the `run-carjack` skill: brings the compositor up and writes a frame to
-# PNG. Lives beside the skill it documents rather than in `examples/` so the pair stays together.
-[[example]]
-name = "screenshot"
-path = ".claude/skills/run-carjack/screenshot.rs"
-
-# Injects a synthetic edge swipe into the compositor and reports whether the client reacted -
-# the bottom-row gesture test that needs no head unit. Beside the skill, like `screenshot`.
-[[example]]
-name = "touchtest"
-path = ".claude/skills/run-carjack/touchtest.rs"
-
-# `just deb` (cargo-deb). Mirrors what `just install-carjack-service` does by hand: binaries,
-# systemd units and the polkit rule, wired up via DynamicUser services (no package user to create).
-[package.metadata.deb]
-maintainer = "Christopher Fraser <cfraz89@gmail.com>"
-copyright = "2026, Christopher Fraser <cfraz89@gmail.com>"
-# dnsmasq-base and nftables are what `ipv4.method=shared` needs to serve DHCP and NAT on the setup
-# AP; neither is picked up by $auto, which only reads the linked libraries.
-depends = "$auto, dnsmasq-base, nftables"
-section = "utility"
-priority = "optional"
-extended-description = """\
-Bridges an iPhone's CarPlay session over Bluetooth/WiFi to an in-car head unit: runs the CarPlay \
-UI in its own compositor and streams the encoded screen to the accessory over AirPlay."""
-assets = [
-    ["target/release/carjack", "usr/bin/", "755"],
-    ["config.toml.example", "etc/carjack/config.toml.example", "644"],
-    ["carjack-polkit.rules", "etc/polkit-1/rules.d/49-carjack.rules", "644"],
-    # A user unit, and left disabled - enabling one needs a running user manager, so that is the
-    # installer's job (`just install-carjack-service`, or the image's carjack_session hook).
-    ["carjack.service", "usr/lib/systemd/user/carjack.service", "644"],
-    # Stops PipeWire taking the hands-free gateway UUID src/wireless/hfp.rs registers.
-    ["wireplumber/51-carjack-hfp-ag.conf", "etc/wireplumber/wireplumber.conf.d/51-carjack-hfp-ag.conf", "644"],
-    # Advertises the config portal over DHCP option 114 on the setup AP. System-wide because the
-    # dnsmasq it configures is NetworkManager's, not carjack's.
-    ["dnsmasq-shared-carjack.conf", "etc/NetworkManager/dnsmasq-shared.d/carjack.conf", "644"],
-    # Lets the user service bind port 80 for the portal, which the option 114 URL above names.
-    ["carjack-sysctl.conf", "etc/sysctl.d/60-carjack.conf", "644"],
-]
-
-[dev-dependencies]
-# mmap, to read back the bytes the NV12 conversion wrote (tests/nv12.rs).
-libc = "0.2"

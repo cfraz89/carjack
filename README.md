@@ -1,0 +1,36 @@
+# carjack
+
+Wireless CarPlay for things that aren't iPhones. carjack makes a Linux machine or an Android
+phone look like an iPhone to a CarPlay head unit - a car stereo, a motorcycle dash - and streams
+its own screen to it, with touch and the unit's buttons coming back.
+
+## What's here
+
+| | |
+| --- | --- |
+| [`carjack-linux/`](carjack-linux) | The Linux app: runs an app (Waydroid, say) or your desktop in its own compositor and streams it to the unit. Built for small boards, packaged as a `.deb`. |
+| [`carjack-android/`](carjack-android) | The Android app, **Slipstream**: turns an Android phone into the unit's CarPlay source, showing its apps on the unit's screen. Runs on a stock phone with [Shizuku](https://shizuku.rikka.app/). |
+| [`libcarjack/`](libcarjack) | The shared core: Bluetooth iAP2, the CarPlay session, AirPlay screen streaming. |
+| [`iap2-proto/`](iap2-proto) | iAP2 message encoding and decoding. |
+| [`cuda-dmabuf/`](cuda-dmabuf) | Optional NVIDIA zero-copy encode for the Linux app. |
+| [`docs/`](docs) | Investigation notes: what each capture showed, and where things stand. |
+
+AirPlay pairing and streaming come from [catplay](https://github.com/cfraz89/catplay).
+
+## How it was made
+
+Clean-room. carjack was written by studying packet captures - Bluetooth HCI logs, iAP2 traffic and
+AirPlay sessions between real iPhones and real head units - and working out the protocol from what
+went over the wire. No Apple source, SDKs or accessory documentation were used.
+[`iap2.lua`](iap2.lua) is the Wireshark dissector that came out of it.
+
+## Getting it
+
+- **Android:** install Slipstream from this repo's
+  [releases](https://github.com/cfraz89/carjack/releases), or add
+  `https://github.com/cfraz89/carjack` to [Obtainium](https://obtainium.imranr.dev/) to stay
+  updated.
+- **Linux:** see [`carjack-linux/README.md`](carjack-linux/README.md).
+
+carjack isn't affiliated with or endorsed by Apple. CarPlay and AirPlay are trademarks of Apple
+Inc.
