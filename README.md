@@ -4,6 +4,13 @@ Wireless CarPlay for things that aren't iPhones. carjack makes a Linux machine o
 phone look like an iPhone to a CarPlay head unit - a car stereo, a motorcycle dash - and streams
 its own screen to it, with touch and the unit's buttons coming back.
 
+## Why
+
+carjack started as a way to get better off-road navigation on a CFMOTO 1000MT-X. The bike's dash
+is a CarPlay head unit: it shows only what an iPhone sends it, and CarPlay shows only the apps
+Apple allows on a car screen. carjack puts any app on that screen instead - a proper off-road
+navigation app with offline topo maps, running on an Android phone or a small Linux board.
+
 ## What's here
 
 | | |

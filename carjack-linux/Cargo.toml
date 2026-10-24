@@ -8,7 +8,7 @@ license.workspace = true
 
 [dependencies]
 # Defaults off deliberately: `tokio` alone would leave zbus's `async-io` enabled too.
-nm-automata = { git = "ssh://git@github.com/cfraz89/nm-automata.git", branch="disable-modes-patch", default-features = false, features = ["tokio"] }
+nm-automata = { git = "https://github.com/cfraz89/nm-automata.git", branch="disable-modes-patch", default-features = false, features = ["tokio"] }
 async-trait = "0.1"
 enclose = "1.2"
 rtnetlink = "0.21.0"
