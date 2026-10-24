@@ -3,6 +3,7 @@
 //! `io.github.cfraz89.slipstream.Native`.
 
 mod logcat;
+mod report;
 pub mod session;
 
 use std::collections::HashMap;
@@ -149,7 +150,15 @@ pub extern "system" fn Java_io_github_cfraz89_slipstream_Native_init(
     mut env: JNIEnv,
     _class: JClass,
     homekit_path: JString,
+    reporter: JObject,
 ) {
+    if let Ok(vm) = env.get_java_vm() {
+        let reporter = (!reporter.is_null())
+            .then(|| env.new_global_ref(&reporter).ok())
+            .flatten();
+        report::set(vm, reporter);
+    }
+    report::catch_panics();
     logcat::init();
     if let Some(path) = string(&mut env, &homekit_path) {
         if let Err(e) = libcarjack::airplay::init_homekit_storage(std::path::Path::new(&path)) {

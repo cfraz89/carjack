@@ -56,6 +56,9 @@ final class Variant {
     /** The platform build carries no resources of its own. */
     static final int NOTIFICATION_ICON = android.R.drawable.stat_sys_data_bluetooth;
 
+    /** No crash reporting on the board: logcat has it all. */
+    static final Native.Reporter REPORTER = null;
+
     static int foregroundServiceTypes() {
         return ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE;
     }

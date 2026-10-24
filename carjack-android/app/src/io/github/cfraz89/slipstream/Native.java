@@ -27,11 +27,18 @@ final class Native {
         void ended(String error);
     }
 
+    /** The core's log lines of note, from any of its threads; must not block. */
+    interface Reporter {
+        /** {@code priority} as logcat's: 4 info, 5 warning, 6 error, 7 a panic. */
+        void report(int priority, String target, String message);
+    }
+
     static final int CODEC_AUTO = 0;
     static final int CODEC_H264 = 1;
     static final int CODEC_HEVC = 2;
 
-    static native void init(String homekitPath);
+    /** {@code reporter} may be null. */
+    static native void init(String homekitPath, Reporter reporter);
 
     /** Takes ownership of {@code iapFd}. */
     static native long startSession(Callbacks callbacks, int iapFd, String name,

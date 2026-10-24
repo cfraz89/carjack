@@ -4,6 +4,7 @@ use std::ffi::CString;
 use std::io::{self, Write};
 
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+use tracing_subscriber::prelude::*;
 
 const ANDROID_LOG_INFO: i32 = 4;
 
@@ -41,18 +42,30 @@ impl Write for LogcatWriter {
 
 impl Drop for LogcatWriter {
     fn drop(&mut self) {
-        let text: Vec<u8> = self.0.iter().copied().filter(|&b| b != 0).collect();
-        let Ok(text) = CString::new(text.trim_ascii_end()) else {
-            return;
-        };
-        // SAFETY: both strings are NUL-terminated and outlive the call.
-        unsafe { __android_log_write(ANDROID_LOG_INFO, c"carjack".as_ptr(), text.as_ptr()) };
+        write_bytes(ANDROID_LOG_INFO, &self.0);
     }
 }
 
+/// One record under the `carjack` tag, at logcat priority `priority`.
+pub fn write(priority: i32, text: &str) {
+    write_bytes(priority, text.as_bytes());
+}
+
+fn write_bytes(priority: i32, text: &[u8]) {
+    let text: Vec<u8> = text.iter().copied().filter(|&b| b != 0).collect();
+    let Ok(text) = CString::new(text.trim_ascii_end()) else {
+        return;
+    };
+    // SAFETY: both strings are NUL-terminated and outlive the call.
+    unsafe { __android_log_write(priority, c"carjack".as_ptr(), text.as_ptr()) };
+}
+
 pub fn init() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
+    let logcat = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(|| LogcatWriter(Vec::new()))
+        .with_filter(
             EnvFilter::builder()
                 .with_default_directive(LevelFilter::DEBUG.into())
                 // catplay warns once a frame, dumps every RTSP exchange and event payload, and
@@ -65,9 +78,9 @@ pub fn init() {
                      catplay_carplay::events::events_server=error,\
                      catplay_hap::cipher=error",
                 ),
-        )
-        .with_ansi(false)
-        .without_time()
-        .with_writer(|| LogcatWriter(Vec::new()))
+        );
+    let _ = tracing_subscriber::registry()
+        .with(logcat)
+        .with(crate::report::layer())
         .try_init();
 }

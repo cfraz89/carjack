@@ -140,6 +140,20 @@ public final class MainActivity extends Activity {
         ((LinearLayout.LayoutParams) help.getLayoutParams()).topMargin = 0;
         ui.row(help, getDrawable(R.drawable.ic_sl_share), true, "Send logs",
                 "For a report of something going wrong", null, v -> confirmSendLogs());
+        if (Reports.configured(this)) {
+            Switch reports = new Switch(this);
+            reports.setChecked(Variant.prefs(this).getBoolean(Reports.PREF, true));
+            reports.setClickable(false);
+            ui.row(help, getDrawable(R.drawable.ic_sl_shield), true, "Send crash reports",
+                    "Crashes and errors, with Slipstream's log lines before them, go to its"
+                            + " developer through Sentry",
+                    reports, v -> {
+                        reports.setChecked(!reports.isChecked());
+                        Variant.prefs(this).edit()
+                                .putBoolean(Reports.PREF, reports.isChecked()).apply();
+                        Reports.apply(this);
+                    });
+        }
 
         Shizuku.addRequestPermissionResultListener(shizukuResult);
         Variant.prefs(this).registerOnSharedPreferenceChangeListener(prefsChanged);
@@ -320,23 +334,46 @@ public final class MainActivity extends Activity {
 
     /** The logs say more than their name suggests, so the sender knows before they go. */
     private void confirmSendLogs() {
-        new AlertDialog.Builder(this)
+        boolean upload = Reports.on();
+        android.widget.EditText description = new android.widget.EditText(this);
+        description.setHint("What happened, and roughly when");
+        LinearLayout box = new LinearLayout(this);
+        box.setPadding(ui.dp(20), 0, ui.dp(20), 0);
+        box.addView(description, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        AlertDialog.Builder dialog = new AlertDialog.Builder(this)
                 .setTitle("Send logs?")
                 .setMessage("They cover the last few days of Slipstream and what the phone did"
-                        + " around it, including unit names, Bluetooth addresses and the unit's"
-                        + " WiFi password. Send them only to whoever's looking into a problem.")
-                .setPositiveButton("Send", (d, w) -> sendLogs())
-                .setNegativeButton("Cancel", null)
-                .show();
+                        + " around it, including unit names and Bluetooth addresses."
+                        + (upload ? " They go to Slipstream's developer." : " Send them only to"
+                                + " whoever's looking into a problem."))
+                .setNegativeButton("Cancel", null);
+        if (upload) {
+            dialog.setView(box)
+                    .setPositiveButton("Send", (d, w) ->
+                            sendLogs(description.getText().toString().trim(), false))
+                    .setNeutralButton("Email", (d, w) ->
+                            sendLogs(description.getText().toString().trim(), true));
+        } else {
+            dialog.setPositiveButton("Send", (d, w) -> sendLogs("", true));
+        }
+        dialog.show();
     }
 
-    private void sendLogs() {
+    private void sendLogs(String description, boolean email) {
         android.widget.Toast.makeText(this, "Gathering logs…", android.widget.Toast.LENGTH_SHORT)
                 .show();
         new Thread(() -> {
             try {
-                Intent share = LogBundle.share(this);
-                runOnUiThread(() -> startActivity(share));
+                Intent share = LogBundle.send(this, description, email);
+                runOnUiThread(() -> {
+                    if (share != null) {
+                        startActivity(share);
+                    } else {
+                        android.widget.Toast.makeText(this, "Logs sent. Thanks!",
+                                android.widget.Toast.LENGTH_SHORT).show();
+                    }
+                });
             } catch (java.io.IOException e) {
                 runOnUiThread(() -> android.widget.Toast.makeText(this,
                         "Couldn't gather the logs: " + e.getMessage(),

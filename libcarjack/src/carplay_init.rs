@@ -454,7 +454,8 @@ impl<S: Stream> CarplayInit<S> {
                 if let Some(creds) = creds {
                     tracing::info!("Accessory WiFi: ssid={}", creds.ssid);
                     if let Some(ref pw) = creds.passphrase {
-                        tracing::info!("Accessory WiFi: passphrase={}", pw);
+                        // Logs get sent off-phone: the length only.
+                        tracing::info!("Accessory WiFi: passphrase of {} chars", pw.chars().count());
                     }
                     if let Some(ref b) = creds.bssid {
                         tracing::info!("Accessory WiFi: bssid={}", b);

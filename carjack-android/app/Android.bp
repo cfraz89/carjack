@@ -71,6 +71,50 @@ android_library_import {
     static_libs: ["carjack-shizuku-api"],
 }
 
+// Sentry's Android SDK (MIT), 8.61.1 from Maven Central (sentry-native 0.17.4, epitaph 0.1.1),
+// for the generic build's crash and error reports.
+java_import {
+    name: "carjack-sentry",
+    jars: ["libs/sentry/sentry.jar"],
+    sdk_version: "current",
+}
+
+java_import {
+    name: "carjack-sentry-epitaph",
+    jars: ["libs/sentry/epitaph.jar"],
+    sdk_version: "current",
+}
+
+android_library_import {
+    name: "carjack-sentry-android",
+    aars: ["libs/sentry/android-core.aar"],
+    sdk_version: "current",
+    static_libs: [
+        "carjack-sentry",
+        "carjack-sentry-epitaph",
+        "androidx.core_core",
+        "androidx.lifecycle_lifecycle-common-java8",
+        "androidx.lifecycle_lifecycle-process",
+    ],
+}
+
+android_library_import {
+    name: "carjack-sentry-native",
+    aars: ["libs/sentry/native-ndk.aar"],
+    sdk_version: "current",
+    extract_jni: true,
+}
+
+android_library_import {
+    name: "carjack-sentry-ndk",
+    aars: ["libs/sentry/android-ndk.aar"],
+    sdk_version: "current",
+    static_libs: [
+        "carjack-sentry-android",
+        "carjack-sentry-native",
+    ],
+}
+
 // The home screen the generic build gives the head unit's display, from carjack-yocto's launcher.
 android_library {
     name: "carjack-launcher",
@@ -95,6 +139,9 @@ android_app {
     static_libs: [
         "carjack-shizuku-provider",
         "carjack-launcher",
+        "carjack-sentry-ndk",
+        // Direct, too: an app takes JNI only from the AARs it lists itself.
+        "carjack-sentry-native",
     ],
     manifest: "generic/AndroidManifest.xml",
     resource_dirs: ["generic/res"],

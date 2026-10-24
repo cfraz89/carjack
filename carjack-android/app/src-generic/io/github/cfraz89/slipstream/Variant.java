@@ -24,6 +24,7 @@ final class Variant {
     static final String PREFS = "slipstream";
     static final int NOTIFICATION_ICON = R.drawable.ic_sl_notify;
     static final String LOG_FILE = "slipstream.log";
+    static final Native.Reporter REPORTER = Reports.CORE;
     /** The installed app's ID, for Shizuku's service component, which is built statically. */
     static final String APP_ID = "io.github.cfraz89.slipstream";
 

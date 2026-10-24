@@ -391,7 +391,8 @@ public final class DisplayService extends IDisplayService.Stub {
             process.waitFor();
             return out;
         } catch (java.io.IOException e) {
-            Log.w(TAG, "Could not run " + String.join(" ", command), e);
+            // Not the arguments: a WiFi join's include the password.
+            Log.w(TAG, "Could not run " + command[0], e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }

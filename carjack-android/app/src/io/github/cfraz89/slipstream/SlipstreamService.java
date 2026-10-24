@@ -76,7 +76,7 @@ public final class SlipstreamService extends Service {
         startForeground(1, notification.build(), Variant.foregroundServiceTypes());
         Variant.onStatus(this, "Waiting for the unit", false);
 
-        Native.init(new File(getFilesDir(), "homekit.bin").getPath());
+        Native.init(new File(getFilesDir(), "homekit.bin").getPath(), Variant.REPORTER);
         thread.start();
         handler = new Handler(thread.getLooper());
         wifi = new AccessoryWifi(this, handler);

@@ -9,7 +9,6 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.zip.ZipEntry;
@@ -28,15 +27,23 @@ final class LogBundle {
         return new File(context.getCacheDir(), "logs");
     }
 
-    /** Builds a bundle and returns the share sheet to send it with. Blocks: not on the UI thread. */
-    static Intent share(Context context) throws IOException {
+    /**
+     * Builds a bundle and sends it through {@link Reports}, returning null; or, with reports off
+     * or a bundle too big for them, returns the share sheet to send it with. Blocks: not on the
+     * UI thread.
+     */
+    static Intent send(Context context, String description, boolean email) throws IOException {
         File out = build(context);
+        if (!email && Reports.on() && out.length() <= Reports.MAX_ATTACHMENT) {
+            Reports.sendLogs(out, description);
+            return null;
+        }
         Intent send = new Intent(Intent.ACTION_SEND)
                 .setType("application/zip")
                 .putExtra(Intent.EXTRA_STREAM, LogsProvider.uriFor(out))
                 .putExtra(Intent.EXTRA_EMAIL, new String[] {REPORT_EMAIL})
                 .putExtra(Intent.EXTRA_SUBJECT, "Slipstream logs")
-                .putExtra(Intent.EXTRA_TEXT, "What happened, and roughly when:\n\n")
+                .putExtra(Intent.EXTRA_TEXT, "What happened, and roughly when:\n\n" + description)
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         return Intent.createChooser(send, "Send logs");
     }
@@ -85,13 +92,28 @@ final class LogBundle {
         if (files == null) {
             return;
         }
+        // Not closed: that would close the zip.
+        java.io.Writer out = new java.io.OutputStreamWriter(zip, StandardCharsets.UTF_8);
         for (File file : files) {
             zip.putNextEntry(new ZipEntry(file.getName()));
-            try (InputStream in = new FileInputStream(file)) {
-                in.transferTo(zip);
+            try (java.io.BufferedReader in = new java.io.BufferedReader(new java.io.InputStreamReader(
+                    new FileInputStream(file), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = in.readLine()) != null) {
+                    if (!secret(line)) {
+                        out.write(line);
+                        out.write('\n');
+                    }
+                }
             }
+            out.flush();
             zip.closeEntry();
         }
+    }
+
+    /** Lines that may carry the unit's WiFi password. */
+    private static boolean secret(String line) {
+        return line.contains("passphrase=") || line.contains("connect-network");
     }
 
     private static void add(ZipOutputStream zip, String name, byte[] bytes) throws IOException {
