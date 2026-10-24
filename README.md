@@ -36,11 +36,27 @@ went over the wire. No Apple source, SDKs or accessory documentation were used.
 
 ## Getting it
 
-- **Android:** install Slipstream from this repo's
-  [releases](https://github.com/cfraz89/carjack/releases), or add
-  `https://github.com/cfraz89/carjack` to [Obtainium](https://obtainium.imranr.dev/) to stay
-  updated.
-- **Linux:** see [`carjack-linux/README.md`](carjack-linux/README.md).
+### Android (Slipstream)
+
+So far Slipstream has only been tested with a Pixel 8 and a CFMOTO 1000MT-X. Other phones and
+head units may well work, but haven't been tried.
+
+It needs [Shizuku](https://shizuku.rikka.app/) installed and running; Slipstream walks you through
+the rest when it opens.
+
+The easiest way to install it and keep it updated is [Obtainium](https://obtainium.imranr.dev/),
+which installs apps straight from GitHub releases:
+
+1. Install Obtainium from its [releases page](https://github.com/ImranR98/Obtainium/releases).
+2. In Obtainium, tap **Add app** and enter `https://github.com/cfraz89/carjack` as the source URL.
+3. Tap **Add**, then **Install**.
+
+Obtainium then checks for new releases and offers each update. To install by hand instead,
+download the APK from the [releases](https://github.com/cfraz89/carjack/releases).
+
+### Linux
+
+See [`carjack-linux/README.md`](carjack-linux/README.md).
 
 ## License
 
