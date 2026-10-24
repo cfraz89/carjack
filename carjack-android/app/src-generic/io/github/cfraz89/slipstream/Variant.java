@@ -70,8 +70,42 @@ final class Variant {
     static void onLinked(Context context, boolean linked) {
         prefs(context).edit().putBoolean("linked", linked).apply();
         applyLockHold(context);
+        watchScreenOff(context.getApplicationContext(), linked);
         if (linked) {
             checkTrustSoon(context.getApplicationContext());
+        }
+    }
+
+    /** Whether the power button has been seen locking the phone through the lock hold. */
+    static final String POWER_LOCKS = "power_locks";
+    private static final long LOCK_CHECK_DELAY_MS = 2000;
+    private static android.content.BroadcastReceiver screenOff;
+
+    /**
+     * With the lock hold on, a screen timeout can't lock the phone, so locking at screen-off is
+     * the power button's "instantly locks"; the shell can't read that setting itself.
+     */
+    private static void watchScreenOff(Context app, boolean linked) {
+        if (linked && screenOff == null) {
+            screenOff = new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, android.content.Intent intent) {
+                    new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                        if (!prefs(app).getBoolean("linked", false) || !holdsUnlock(app)) {
+                            return;
+                        }
+                        boolean locked = app.getSystemService(android.app.KeyguardManager.class)
+                                .isDeviceLocked();
+                        Log.i(TAG, "Locked at screen-off while held: " + locked);
+                        prefs(app).edit().putBoolean(POWER_LOCKS, locked).apply();
+                    }, LOCK_CHECK_DELAY_MS);
+                }
+            };
+            app.registerReceiver(screenOff,
+                    new android.content.IntentFilter(android.content.Intent.ACTION_SCREEN_OFF));
+        } else if (!linked && screenOff != null) {
+            app.unregisterReceiver(screenOff);
+            screenOff = null;
         }
     }
 

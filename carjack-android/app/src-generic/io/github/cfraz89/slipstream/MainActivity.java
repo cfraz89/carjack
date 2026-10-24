@@ -155,7 +155,7 @@ public final class MainActivity extends Activity {
                 if ("status".equals(key) || "on".equals(key) || "retryable".equals(key)
                         || "linked".equals(key)) {
                     runOnUiThread(this::showPower);
-                } else if ("trust_seen".equals(key)) {
+                } else if ("trust_seen".equals(key) || Variant.POWER_LOCKS.equals(key)) {
                     runOnUiThread(this::showSetup);
                 }
             };
@@ -257,9 +257,8 @@ public final class MainActivity extends Activity {
         dark.setChecked(Variant.keepsPanel(this));
         dark.setClickable(false);
         ui.row(settings, getDrawable(R.drawable.ic_sl_cast), true,
-                "Dark screen (experimental)",
-                "The phone's screen goes dark instead of sleeping, so the unit keeps"
-                        + " working. From next session",
+                "Dark screen",
+                "The phone's screen goes dark instead of sleeping",
                 dark, v -> {
                     dark.setChecked(!dark.isChecked());
                     Variant.prefs(this).edit()
@@ -281,13 +280,13 @@ public final class MainActivity extends Activity {
         unlocked.setChecked(Variant.holdsUnlock(this));
         unlocked.setClickable(false);
         ui.row(settings, getDrawable(R.drawable.ic_sl_lock_open), true,
-                "Stay unlocked while connected",
-                "Also turn off \"Power button instantly locks\"",
+                "Stay unlocked while connected", null,
                 unlocked, v -> {
                     unlocked.setChecked(!unlocked.isChecked());
                     Variant.prefs(this).edit()
                             .putBoolean("hold_unlock", unlocked.isChecked()).apply();
                     Variant.applyLockHold(this);
+                    showSetup();
                 });
     }
 
@@ -364,17 +363,9 @@ public final class MainActivity extends Activity {
         }, "slipstream-logs").start();
     }
 
-    /**
-     * Settings search, where Trusted devices is found: no menu leads there, and its page takes a
-     * permission only system apps hold. Security settings where there's no search.
-     */
-    private void openTrustedDevices() {
-        try {
-            startActivity(new Intent("com.android.settings.action.SETTINGS_SEARCH"));
-        } catch (android.content.ActivityNotFoundException | SecurityException e) {
-            android.util.Log.w("carjack", "No Settings search", e);
-            startActivity(new Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS));
-        }
+    /** Trusted devices and the power button's lock are both reached from here. */
+    private void openSecuritySettings() {
+        startActivity(new Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS));
     }
 
     private void openBluetoothSettings() {
@@ -411,10 +402,17 @@ public final class MainActivity extends Activity {
                 ? View.VISIBLE : View.GONE);
         // Locked, the phone hides every app on the unit but the launcher; a trusted unit keeps it
         // unlocked while connected. Gone once that's been seen working.
+        boolean secure = getSystemService(android.app.KeyguardManager.class).isDeviceSecure();
         if (unitAddresses.size() > 1 && !Variant.prefs(this).getBoolean("trust_seen", false)
-                && getSystemService(android.app.KeyguardManager.class).isDeviceSecure()) {
-            step("Make the unit a trusted device, to stay unlocked: search Settings for"
-                    + " \"Trusted devices\"", "Search", v -> openTrustedDevices());
+                && secure) {
+            step("Make the unit a trusted device, to stay unlocked", "Settings",
+                    v -> openSecuritySettings());
+        }
+        // The lock hold keeps a screen timeout from locking, but not the power button.
+        if (secure && Variant.holdsUnlock(this)
+                && Variant.prefs(this).getBoolean(Variant.POWER_LOCKS, false)) {
+            step("The power button locks the phone, hiding the unit's apps: turn off \"Power"
+                    + " button instantly locks\"", "Settings", v -> openSecuritySettings());
         }
         // An app inside a VPN can't reach the unit's Wi-Fi: the stream times out.
         if (inVpn()) {
