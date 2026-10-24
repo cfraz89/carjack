@@ -53,6 +53,8 @@ class HomeActivity : Activity() {
         weather = findViewById(R.id.status_weather)
         weatherIcon = findViewById(R.id.status_weather_icon)
         statusDetail = findViewById(R.id.status_detail)
+        batteryIcon = findViewById(R.id.status_battery_icon)
+        batteryText = findViewById(R.id.status_battery)
         nowPlaying = NowPlaying(this, findViewById(R.id.playing))
 
         pendingSlot = savedInstanceState?.getInt(STATE_PENDING_SLOT, -1) ?: -1
@@ -108,7 +110,8 @@ class HomeActivity : Activity() {
     private lateinit var weatherIcon: ImageView
     private lateinit var statusDetail: TextView
     private var sky = ""
-    private var batteryLine = ""
+    private lateinit var batteryIcon: ImageView
+    private lateinit var batteryText: TextView
     private val statusHandler = Handler(android.os.Looper.getMainLooper())
 
     /** The phone's charge, under the weather: it's in a pocket, out of sight. */
@@ -117,10 +120,19 @@ class HomeActivity : Activity() {
             val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
             val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
             val charging = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
-            batteryLine = if (level < 0) "" else
-                getString(R.string.status_battery, level * 100 / scale) +
-                    if (charging) getString(R.string.status_charging) else ""
-            showStatusDetail()
+            if (level < 0) {
+                batteryIcon.visibility = View.GONE
+                batteryText.text = ""
+                return
+            }
+            val percent = level * 100 / scale
+            batteryIcon.visibility = View.VISIBLE
+            // The fill spans x 4.25-18.25 of the icon's 24; the clip runs across all 24.
+            batteryIcon.setImageLevel(((4.25f + percent * 0.14f) / 24f * 10000).toInt())
+            batteryIcon.imageTintList = getColorStateList(
+                if (charging) R.color.accent else R.color.text_secondary,
+            )
+            batteryText.text = getString(R.string.status_battery, percent)
         }
     }
 
@@ -145,7 +157,8 @@ class HomeActivity : Activity() {
     }
 
     private fun showStatusDetail() {
-        statusDetail.text = listOf(sky, batteryLine).filter { it.isNotEmpty() }.joinToString("  ·  ")
+        statusDetail.text = sky
+        statusDetail.visibility = if (sky.isEmpty()) View.GONE else View.VISIBLE
     }
 
     /**
@@ -249,18 +262,21 @@ class HomeActivity : Activity() {
         if (entry == null) {
             // Drop a shortcut whose app has gone, so the slot returns to being addable.
             if (stored != null) ShortcutStore.clear(this, index)
+            // Just the ringed plus, in the middle of the cell: it reads as "add" without a word.
             icon.setImageResource(R.drawable.ic_add_slot)
             icon.contentDescription = getString(R.string.empty_slot)
-            label.setText(R.string.empty_slot)
-            // Faint: there to tap, not to look at.
-            cell.alpha = 0.35f
+            icon.maxHeight = resources.getDimensionPixelSize(R.dimen.add_slot_size)
+            label.visibility = View.GONE
+            cell.alpha = 0.75f
             cell.isLongClickable = false
             cell.setOnLongClickListener(null)
             cell.setOnClickListener { pickFor(index) }
         } else {
             icon.setImageDrawable(entry.icon)
             icon.contentDescription = entry.label
+            icon.maxHeight = resources.getDimensionPixelSize(R.dimen.shortcut_icon_size)
             label.text = entry.label
+            label.visibility = View.VISIBLE
             cell.alpha = 1f
             cell.setOnClickListener { AppRepository.launch(this, entry.component) }
             cell.setOnLongClickListener {

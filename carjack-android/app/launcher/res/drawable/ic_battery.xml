@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The phone's battery, lying down: an outline, and a fill clipped to the charge by the image
+     view's level (0-10000). -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <vector android:width="24dp" android:height="24dp"
+            android:viewportWidth="24" android:viewportHeight="24">
+            <path android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5"
+                android:pathData="M3.5,7.25h15a1,1 0,0 1,1 1v7.5a1,1 0,0 1,-1 1h-15a1,1 0,0 1,-1 -1v-7.5a1,1 0,0 1,1 -1z" />
+            <path android:fillColor="#FFFFFFFF"
+                android:pathData="M20.5,10h1.25a0.75,0.75 0,0 1,0.75 0.75v2.5a0.75,0.75 0,0 1,-0.75 0.75h-1.25z" />
+        </vector>
+    </item>
+    <item>
+        <clip android:clipOrientation="horizontal" android:gravity="left">
+            <vector android:width="24dp" android:height="24dp"
+                android:viewportWidth="24" android:viewportHeight="24">
+                <path android:fillColor="#FFFFFFFF"
+                    android:pathData="M4.25,9h14v6h-14z" />
+            </vector>
+        </clip>
+    </item>
+</layer-list>

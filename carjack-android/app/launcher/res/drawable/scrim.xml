@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Over the whole wallpaper: enough everywhere to set the icons and text apart from it, most at
+     the bottom, under the taskbar. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <gradient android:angle="270" android:startColor="#66000000"
+        android:centerColor="#73000000" android:endColor="#BF000000" />
+</shape>

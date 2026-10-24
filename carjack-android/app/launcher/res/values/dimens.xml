@@ -75,10 +75,13 @@
     <dimen name="playing_button_padding">13dp</dimen>
     <dimen name="playing_title_size">18sp</dimen>
     <dimen name="playing_text_gap">14dp</dimen>
-    <dimen name="playing_padding_top">12dp</dimen>
+    <!-- Room between the clock and the player, and the player and the tiles. -->
+    <dimen name="playing_padding_top">28dp</dimen>
+    <dimen name="playing_padding_bottom">8dp</dimen>
     <dimen name="playing_padding_end">12dp</dimen>
-
-    <!-- The fades behind the status area and the taskbar. -->
-    <dimen name="scrim_top_height">280dp</dimen>
-    <dimen name="scrim_bottom_height">200dp</dimen>
+    <dimen name="status_battery_size">22dp</dimen>
+    <dimen name="status_battery_gap">14dp</dimen>
+    <dimen name="status_battery_text_gap">4dp</dimen>
+    <!-- An empty slot's plus, which keeps to the middle of its cell. -->
+    <dimen name="add_slot_size">48dp</dimen>
 </resources>
