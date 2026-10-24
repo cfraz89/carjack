@@ -373,15 +373,24 @@ public final class MainActivity extends Activity {
     }
 
     /** One row per thing still missing; the card goes when nothing is. */
+    /** Shizuku's Play Store page, or its download page where there's no store. */
+    private void installShizuku() {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW,
+                    android.net.Uri.parse("market://details?id=" + SHIZUKU_PACKAGE)));
+        } catch (android.content.ActivityNotFoundException e) {
+            startActivity(new Intent(Intent.ACTION_VIEW,
+                    android.net.Uri.parse("https://shizuku.rikka.app/download/")));
+        }
+    }
+
     private void showSetup() {
         setup.removeAllViews();
-        if (!pingShizuku()) {
-            step("Start Shizuku", "Open", v -> {
-                Intent open = getPackageManager().getLaunchIntentForPackage(SHIZUKU_PACKAGE);
-                if (open != null) {
-                    startActivity(open);
-                }
-            });
+        Intent shizuku = getPackageManager().getLaunchIntentForPackage(SHIZUKU_PACKAGE);
+        if (shizuku == null) {
+            step("Slipstream needs Shizuku", "Install", v -> installShizuku());
+        } else if (!pingShizuku()) {
+            step("Start Shizuku", "Open", v -> startActivity(shizuku));
         } else if (!ShizukuDisplay.available()) {
             step("Slipstream needs Shizuku", "Allow",
                     v -> Shizuku.requestPermission(REQUEST_SHIZUKU));
