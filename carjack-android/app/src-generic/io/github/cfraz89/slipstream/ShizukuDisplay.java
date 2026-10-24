@@ -26,7 +26,7 @@ final class ShizukuDisplay {
             .daemon(false)
             .processNameSuffix("display")
             .debuggable(false)
-            .version(28);
+            .version(29);
 
     private static volatile IDisplayService service;
     private static CountDownLatch bound = new CountDownLatch(1);
@@ -229,16 +229,17 @@ final class ShizukuDisplay {
         }
     }
 
-    /** The phone's system log into {@code dir}; nothing where Shizuku isn't running. */
-    static void copySystemLog(String dir) {
+    /** Part {@code part} of the phone's system log; null if none, or without Shizuku. */
+    static android.os.ParcelFileDescriptor systemLog(int part) {
         IDisplayService s = available() ? bind() : null;
         if (s == null) {
-            return;
+            return null;
         }
         try {
-            s.copySystemLog(dir);
+            return s.systemLog(part);
         } catch (RemoteException e) {
-            Log.w(TAG, "Shizuku couldn't copy the system log", e);
+            Log.w(TAG, "Shizuku couldn't open the system log", e);
+            return null;
         }
     }
 

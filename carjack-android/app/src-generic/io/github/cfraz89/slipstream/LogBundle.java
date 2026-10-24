@@ -3,12 +3,14 @@ package io.github.cfraz89.slipstream;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
+import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.zip.ZipEntry;
@@ -59,56 +61,53 @@ final class LogBundle {
             }
         }
         File external = context.getExternalFilesDir(null);
-        File system = external == null ? null : new File(external, "system");
-        if (system != null) {
-            system.mkdirs();
-            File[] stale = system.listFiles();
-            if (stale != null) {
-                for (File f : stale) {
-                    f.delete();
-                }
-            }
-            ShizukuDisplay.copySystemLog(system.getPath());
-        }
-
         String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.ROOT)
                 .format(new java.util.Date());
         File out = new File(dir, "slipstream-logs-" + stamp + ".zip");
         try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(out))) {
             add(zip, "info.txt", info(context).getBytes(StandardCharsets.UTF_8));
             if (external != null) {
-                addLogs(zip, external, Variant.LOG_FILE);
+                File[] files = external.listFiles(
+                        (d, name) -> name.startsWith(Variant.LOG_FILE));
+                for (File file : files == null ? new File[0] : files) {
+                    try (InputStream in = new FileInputStream(file)) {
+                        addLog(zip, file.getName(), in);
+                    }
+                }
             }
-            if (system != null) {
-                addLogs(zip, system, "slipstream-system.log");
+            // Read over Shizuku, not copied here by its shell: MediaProvider aborts on that.
+            for (int part = 0; part < SYSTEM_LOG_PARTS.length; part++) {
+                ParcelFileDescriptor log = ShizukuDisplay.systemLog(part);
+                if (log != null) {
+                    try (InputStream in = new ParcelFileDescriptor.AutoCloseInputStream(log)) {
+                        addLog(zip, "slipstream-system.log" + SYSTEM_LOG_PARTS[part], in);
+                    }
+                }
             }
         }
         Log.i(TAG, "Log bundle of " + out.length() + " bytes");
         return out;
     }
 
-    private static void addLogs(ZipOutputStream zip, File dir, String base) throws IOException {
-        File[] files = dir.listFiles((d, name) -> name.startsWith(base));
-        if (files == null) {
-            return;
-        }
+    /** The system log's file suffixes, by {@link ShizukuDisplay#systemLog} part. */
+    private static final String[] SYSTEM_LOG_PARTS = {"", ".1", ".2", ".3"};
+
+    private static void addLog(ZipOutputStream zip, String name, InputStream log)
+            throws IOException {
+        zip.putNextEntry(new ZipEntry(name));
         // Not closed: that would close the zip.
         java.io.Writer out = new java.io.OutputStreamWriter(zip, StandardCharsets.UTF_8);
-        for (File file : files) {
-            zip.putNextEntry(new ZipEntry(file.getName()));
-            try (java.io.BufferedReader in = new java.io.BufferedReader(new java.io.InputStreamReader(
-                    new FileInputStream(file), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = in.readLine()) != null) {
-                    if (!secret(line)) {
-                        out.write(line);
-                        out.write('\n');
-                    }
-                }
+        java.io.BufferedReader in = new java.io.BufferedReader(
+                new java.io.InputStreamReader(log, StandardCharsets.UTF_8));
+        String line;
+        while ((line = in.readLine()) != null) {
+            if (!secret(line)) {
+                out.write(line);
+                out.write('\n');
             }
-            out.flush();
-            zip.closeEntry();
         }
+        out.flush();
+        zip.closeEntry();
     }
 
     /** Lines that may carry the unit's WiFi password. */

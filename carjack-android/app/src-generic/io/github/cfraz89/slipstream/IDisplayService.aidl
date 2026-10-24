@@ -60,8 +60,8 @@ interface IDisplayService {
      */
     void keepPanel(boolean keep) = 16;
 
-    /** Copies the phone's system log into {@code dir}, which the app can read and the shell write. */
-    void copySystemLog(String dir) = 17;
+    /** Part {@code part} (0 newest) of the phone's system log, open to read; null if none. */
+    ParcelFileDescriptor systemLog(int part) = 17;
 
     /** An Android key code going down or up on the display. */
     void key(int code, boolean down) = 18;

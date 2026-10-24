@@ -62,14 +62,18 @@ public final class DisplayService extends IDisplayService.Stub {
         "CCodec",
     };
 
-    /** Copies the system log's files into {@code dir}, for the app to send on. */
+    /** The system log's files, for the app to send on. */
     @Override
-    public void copySystemLog(String dir) {
-        for (String suffix : new String[] {"", ".1", ".2", ".3"}) {
-            java.io.File log = new java.io.File(SYSTEM_LOG + suffix);
-            if (log.exists()) {
-                run("cp", log.getPath(), dir);
-            }
+    public android.os.ParcelFileDescriptor systemLog(int part) {
+        String[] suffixes = {"", ".1", ".2", ".3"};
+        if (part < 0 || part >= suffixes.length) {
+            return null;
+        }
+        try {
+            return android.os.ParcelFileDescriptor.open(new java.io.File(SYSTEM_LOG
+                    + suffixes[part]), android.os.ParcelFileDescriptor.MODE_READ_ONLY);
+        } catch (java.io.FileNotFoundException e) {
+            return null;
         }
     }
 

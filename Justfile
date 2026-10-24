@@ -126,6 +126,11 @@ android tree=env('ANDROID_TREE', home_directory() + '/Projects/motopod/out/andro
         CMAKE_TOOLCHAIN_FILE_aarch64_linux_android={{justfile_directory()}}/carjack-android/toolchain/android.cmake
     cargo build --release --target aarch64-linux-android -p carjack-android
     ls -l target/aarch64-linux-android/release/libcarjack_android.so
+    # Symbols for Sentry's native crash reports, where sentry-cli is set up (~/.sentryclirc).
+    if command -v sentry-cli >/dev/null && [ -f ~/.sentryclirc ]; then
+        sentry-cli debug-files upload target/aarch64-linux-android/release/libcarjack_android.so \
+            || echo "Symbols not uploaded to Sentry" >&2
+    fi
 
 install-cuda-dmabuf-deps:
     {{toolbox_build}}sudo dnf install -y libEGL-devel libgbm-devel gstreamer1-plugins-bad-free-devel
