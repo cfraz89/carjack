@@ -22,11 +22,17 @@ import java.io.IOException;
  */
 public final class SlipstreamService extends Service {
     private static final String TAG = "carjack";
-    private static final String CHANNEL = "carjack";
-    /** The notification's Stop. */
+    static final String CHANNEL = "carjack";
+    static final int NOTIFICATION_ID = 1;
+    /** The notification's Turn off. */
     static final String ACTION_STOP = "io.github.cfraz89.slipstream.STOP";
+    /** Turn on, from outside the app's screens. */
+    static final String ACTION_START = "io.github.cfraz89.slipstream.START";
     /** Try again after giving up on a unit. */
     static final String ACTION_RETRY = "io.github.cfraz89.slipstream.RETRY";
+    /** The notification swiped away: it comes back while the service runs. */
+    private static final String ACTION_SHOW = "io.github.cfraz89.slipstream.SHOW";
+    static final String WAITING = "Waiting for the unit";
 
     /** How often to page an absent unit, and how long to wait before cycling a link that is up. */
     private static final long OFFER_WAIT_MS = 20_000;
@@ -62,19 +68,22 @@ public final class SlipstreamService extends Service {
     public void onCreate() {
         super.onCreate();
         Variant.prepare(this);
-        NotificationManager nm = getSystemService(NotificationManager.class);
-        nm.createNotificationChannel(
-                new NotificationChannel(CHANNEL, "Connection", NotificationManager.IMPORTANCE_LOW));
-        stopAction = action("Stop", ACTION_STOP, 0);
+        createChannel(this);
+        stopAction = action("Turn off", ACTION_STOP, 0);
         retryAction = action("Retry", ACTION_RETRY, 1);
         notification = new Notification.Builder(this, CHANNEL)
                 .setContentTitle(getApplicationInfo().loadLabel(getPackageManager()))
-                .setContentText("Waiting for the unit")
+                .setContentText(WAITING)
                 .setSmallIcon(Variant.NOTIFICATION_ICON)
                 .setOnlyAlertOnce(true)
+                .setOngoing(true)
+                .setContentIntent(Variant.openApp(this))
+                .setDeleteIntent(PendingIntent.getService(this, 2,
+                        new Intent(this, SlipstreamService.class).setAction(ACTION_SHOW),
+                        PendingIntent.FLAG_IMMUTABLE))
                 .setActions(stopAction);
-        startForeground(1, notification.build(), Variant.foregroundServiceTypes());
-        Variant.onStatus(this, "Waiting for the unit", false);
+        startForeground(NOTIFICATION_ID, notification.build(), Variant.foregroundServiceTypes());
+        Variant.onStatus(this, WAITING, false);
 
         Native.init(new File(getFilesDir(), "homekit.bin").getPath(), Variant.REPORTER);
         thread.start();
@@ -103,15 +112,14 @@ public final class SlipstreamService extends Service {
         }
         handler.post(() -> {
             bluetooth.start();
-            if (!Variant.canPage()) {
-                // A unit already linked when this starts doesn't dial in on that link: the first
-                // try always failed. Starting on a fresh one has it dial straight away.
-                status("Renewing the Bluetooth link");
-                Variant.cycleBluetooth();
-            }
             waitingSince = now();
             handler.post(watch);
         });
+    }
+
+    static void createChannel(android.content.Context context) {
+        context.getSystemService(NotificationManager.class).createNotificationChannel(
+                new NotificationChannel(CHANNEL, "Connection", NotificationManager.IMPORTANCE_LOW));
     }
 
     private Notification.Action action(String title, String intentAction, int requestCode) {
@@ -137,7 +145,8 @@ public final class SlipstreamService extends Service {
             } else {
                 notification.setActions(stopAction);
             }
-            getSystemService(NotificationManager.class).notify(1, notification.build());
+            getSystemService(NotificationManager.class)
+                    .notify(NOTIFICATION_ID, notification.build());
         }
     }
 
@@ -148,7 +157,7 @@ public final class SlipstreamService extends Service {
         BluetoothDevice unit = gaveUpOn != null ? gaveUpOn : bluetooth.headUnit();
         gaveUpOn = null;
         if (session != null || unit == null) {
-            status(session != null ? "Already in a session" : "Waiting for the unit");
+            status(session != null ? "Already in a session" : WAITING);
             return;
         }
         status("Trying " + name(unit) + " again");
@@ -224,6 +233,7 @@ public final class SlipstreamService extends Service {
         }
         if (cyclesLeft > 0 && Variant.cycleBluetooth()) {
             cyclesLeft--;
+            status(WAITING);
         } else {
             status("Calling " + name(unit));
             bluetooth.dial(unit);
@@ -303,12 +313,21 @@ public final class SlipstreamService extends Service {
         if (intent != null && ACTION_RETRY.equals(intent.getAction())) {
             handler.post(this::retry);
         }
+        if (intent != null && ACTION_START.equals(intent.getAction())) {
+            Variant.onStartRequested(this);
+        }
+        if (intent != null && ACTION_SHOW.equals(intent.getAction())) {
+            synchronized (notification) {
+                getSystemService(NotificationManager.class)
+                        .notify(NOTIFICATION_ID, notification.build());
+            }
+        }
         return Variant.onStartCommand(this, intent);
     }
 
     /** Re-declare the foreground service with more types, once their consent is in hand. */
     void promote(int foregroundServiceTypes) {
-        startForeground(1, notification.build(), foregroundServiceTypes);
+        startForeground(NOTIFICATION_ID, notification.build(), foregroundServiceTypes);
     }
 
     @Override

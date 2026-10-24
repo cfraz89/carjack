@@ -88,6 +88,13 @@ final class Variant {
     /** Stopped until the next boot. */
     static void onStopRequested(Context context) {}
 
+    static void onStartRequested(Context context) {}
+
+    /** No app screen to open. */
+    static android.app.PendingIntent openApp(Context context) {
+        return null;
+    }
+
     static void onServiceDestroyed(Service service) {}
 
     /** {@code persist.carjack.<key>}. */

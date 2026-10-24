@@ -36,6 +36,7 @@ final class Variant {
      * 40 MB in all. -T: from now, not the whole ring buffer again after each restart.
      */
     static void prepare(Context context) {
+        OffNotice.hide(context);
         // Not linked yet: puts back a lock delay a crash left held.
         prefs(context).edit().putBoolean("linked", false).apply();
         applyLockHold(context);
@@ -147,9 +148,19 @@ final class Variant {
         }
     }
 
-    /** The notification's Stop is the app's Turn off. */
+    /** The notification's Turn off and Turn on flip the app's own switch. */
     static void onStopRequested(Context context) {
         BootReceiver.setOn(context, false);
+    }
+
+    static void onStartRequested(Context context) {
+        BootReceiver.setOn(context, true);
+    }
+
+    static android.app.PendingIntent openApp(Context context) {
+        return android.app.PendingIntent.getActivity(context, 0,
+                new android.content.Intent(context, MainActivity.class),
+                android.app.PendingIntent.FLAG_IMMUTABLE);
     }
 
     /** How long the service's own teardown gets before the process goes. */
@@ -162,6 +173,7 @@ final class Variant {
      */
     static void onServiceDestroyed(Service service) {
         Context app = service.getApplicationContext();
+        OffNotice.show(app);
         AccessoryWifi.afterShell(() -> {
             holdLock(app, false);
             ShizukuDisplay.unbind();
