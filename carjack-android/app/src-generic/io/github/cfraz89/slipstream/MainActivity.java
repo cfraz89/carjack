@@ -365,15 +365,14 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Extend Unlock (Smart Lock), straight in: Play services' own entry point, which Settings
-     * search opens. Its trusted devices can't be set from outside; this is as close as it gets.
-     * Security settings where there's no Play services.
+     * Settings search, where Trusted devices is found: no menu leads there, and its page takes a
+     * permission only system apps hold. Security settings where there's no search.
      */
-    private void openExtendUnlock() {
+    private void openTrustedDevices() {
         try {
-            startActivity(new Intent(Intent.ACTION_MAIN).setClassName("com.google.android.gms",
-                    "com.google.android.gms.trustagent.TrustAgentSearchEntryPointActivity"));
+            startActivity(new Intent("com.android.settings.action.SETTINGS_SEARCH"));
         } catch (android.content.ActivityNotFoundException | SecurityException e) {
+            android.util.Log.w("carjack", "No Settings search", e);
             startActivity(new Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS));
         }
     }
@@ -414,8 +413,8 @@ public final class MainActivity extends Activity {
         // unlocked while connected. Gone once that's been seen working.
         if (unitAddresses.size() > 1 && !Variant.prefs(this).getBoolean("trust_seen", false)
                 && getSystemService(android.app.KeyguardManager.class).isDeviceSecure()) {
-            step("Make the unit a trusted device, to stay unlocked", "Set up",
-                    v -> openExtendUnlock());
+            step("Make the unit a trusted device, to stay unlocked: search Settings for"
+                    + " \"Trusted devices\"", "Search", v -> openTrustedDevices());
         }
         // An app inside a VPN can't reach the unit's Wi-Fi: the stream times out.
         if (inVpn()) {
