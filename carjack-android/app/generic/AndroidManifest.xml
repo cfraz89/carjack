@@ -2,7 +2,9 @@
 <!-- The generic build: an ordinary app for any phone running Shizuku. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
-    package="io.github.cfraz89.slipstream">
+    package="io.github.cfraz89.slipstream"
+    android:versionCode="1"
+    android:versionName="0.1.0">
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
@@ -149,11 +151,8 @@
             android:name="moe.shizuku.client.V3_SUPPORT"
             android:value="true" />
 
-        <!-- Sentry, for crash reports (Reports): the project's DSN, from its Client Keys page.
-             Empty leaves reports off. Started by Reports, so the switch can stop it. -->
-        <meta-data
-            android:name="io.sentry.dsn"
-            android:value="https://REDACTED" />
+        <!-- Sentry, for crash reports: started by Reports, with the DSN in res/values/sentry.xml,
+             so the switch can stop it. -->
         <meta-data
             android:name="io.sentry.auto-init"
             android:value="false" />

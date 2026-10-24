@@ -1,8 +1,6 @@
 package io.github.cfraz89.slipstream;
 
 import android.content.Context;
-import android.content.pm.PackageManager;
-import android.os.Bundle;
 import android.util.Log;
 
 import java.io.File;
@@ -20,12 +18,11 @@ import io.sentry.protocol.Feedback;
 
 /**
  * Crash and error reports, and sent logs, through Sentry: on unless turned off, and only with a
- * DSN in the manifest.
+ * DSN built in (res/values/sentry.xml).
  */
 final class Reports {
     private static final String TAG = "carjack";
     static final String PREF = "crash_reports";
-    private static final String DSN_KEY = "io.sentry.dsn";
     /** Above any log bundle seen; a bigger one goes by email. */
     static final long MAX_ATTACHMENT = 40L << 20;
     /** Of Slipstream's log, with each error: enough for the minutes before it. */
@@ -40,6 +37,7 @@ final class Reports {
             return;
         }
         SentryAndroid.init(app, options -> {
+            options.setDsn(app.getString(R.string.sentry_dsn));
             options.setSendDefaultPii(false);
             options.setMaxBreadcrumbs(200);
             options.setMaxAttachmentSize(MAX_ATTACHMENT);
@@ -56,14 +54,7 @@ final class Reports {
 
     /** Whether this build has somewhere to send reports. */
     static boolean configured(Context context) {
-        try {
-            Bundle meta = context.getPackageManager().getApplicationInfo(
-                    context.getPackageName(), PackageManager.GET_META_DATA).metaData;
-            String dsn = meta == null ? null : meta.getString(DSN_KEY);
-            return dsn != null && !dsn.isEmpty();
-        } catch (PackageManager.NameNotFoundException e) {
-            return false;
-        }
+        return !context.getString(R.string.sentry_dsn).isEmpty();
     }
 
     static boolean on() {
