@@ -2,14 +2,21 @@ package io.github.cfraz89.slipstream.launcher
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.ColorFilter
-import android.graphics.Outline
-import android.graphics.Paint
-import android.graphics.PixelFormat
 import android.graphics.drawable.Drawable
-import android.graphics.drawable.LayerDrawable
-import android.view.View
-import java.lang.ref.WeakReference
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.scale
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -25,14 +32,15 @@ object Blur {
     private const val SCALE = 4
     private const val PASSES = 3
 
-    private var blurred: Bitmap? = null
-    private val origin = IntArray(2)
-    private val panels = mutableListOf<WeakReference<View>>()
+    /** Snapshot state, so every panel showing - in any of the launcher's windows - redraws. */
+    private var blurred by mutableStateOf<ImageBitmap?>(null)
+    private var origin = Offset.Zero
 
-    /** The wallpaper as [wallpaper] shows it, centre-cropped, blurred to [radius] px. */
-    fun setWallpaper(drawable: Drawable?, wallpaper: View, radius: Float) {
-        val width = wallpaper.width
-        val height = wallpaper.height
+    /**
+     * The wallpaper as home shows it - [width] by [height] at [at] in the window, centre-cropped
+     * - blurred to [radius] px.
+     */
+    fun setWallpaper(drawable: Drawable?, width: Int, height: Int, at: Offset, radius: Float) {
         if (drawable == null || width == 0 || height == 0) return
         val small = Bitmap.createBitmap(
             max(1, width / SCALE), max(1, height / SCALE), Bitmap.Config.ARGB_8888,
@@ -51,64 +59,23 @@ object Blur {
 
         // Three box passes come close to a Gaussian of the same reach.
         boxBlur(small, max(1, (radius / SCALE / 2).roundToInt()))
-        blurred = small
-        wallpaper.getLocationInWindow(origin)
-        panels.removeAll { it.get() == null }
-        panels.forEach { it.get()?.background?.invalidateSelf() }
+        origin = at
+        blurred = small.asImageBitmap()
     }
 
-    /** Puts the blurred wallpaper under [view]'s own background, clipped to its outline. */
-    fun apply(view: View) {
-        val background = view.background ?: return
-        if (background is LayerDrawable && background.getDrawable(0) is Backdrop) return
-        view.background = LayerDrawable(arrayOf(Backdrop(view), background))
-        view.clipToOutline = true
-        panels.removeAll { it.get() == null || it.get() === view }
-        panels += WeakReference(view)
-    }
-
-    fun clear(view: View) {
-        panels.removeAll { it.get() == null || it.get() === view }
-    }
-
-    /** Draws the slice of the blurred wallpaper that lies behind its view. */
-    private class Backdrop(view: View) : Drawable() {
-        private val view = WeakReference(view)
-        private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-        private val drawnAt = IntArray(2)
-
-        init {
-            // A panel moved by a layout would otherwise carry its old slice with it.
-            view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> invalidateSelf() }
-        }
-
-        override fun draw(canvas: Canvas) {
-            val bitmap = blurred ?: return
-            val v = view.get() ?: return
-            v.getLocationInWindow(drawnAt)
-            canvas.save()
-            canvas.translate(
-                (origin[0] - drawnAt[0]).toFloat(),
-                (origin[1] - drawnAt[1]).toFloat(),
-            )
-            canvas.scale(SCALE.toFloat(), SCALE.toFloat())
-            canvas.drawBitmap(bitmap, 0f, 0f, paint)
-            canvas.restore()
-        }
-
-        /** None of its own, so the panel's shape gives the outline it is clipped to. */
-        override fun getOutline(outline: Outline) = outline.setEmpty()
-
-        override fun setAlpha(alpha: Int) {
-            paint.alpha = alpha
-        }
-
-        override fun setColorFilter(colorFilter: ColorFilter?) {
-            paint.colorFilter = colorFilter
-        }
-
-        @Deprecated("Deprecated in Java")
-        override fun getOpacity() = PixelFormat.TRANSLUCENT
+    /**
+     * Draws the slice of the blurred wallpaper that lies behind this panel; clip the panel to its
+     * shape before this.
+     */
+    fun Modifier.backdrop(): Modifier = composed {
+        var at by remember { mutableStateOf(Offset.Zero) }
+        onGloballyPositioned { at = it.positionInWindow() }
+            .drawBehind {
+                val image = blurred ?: return@drawBehind
+                translate(origin.x - at.x, origin.y - at.y) {
+                    scale(SCALE.toFloat(), pivot = Offset.Zero) { drawImage(image) }
+                }
+            }
     }
 
     private fun boxBlur(bitmap: Bitmap, radius: Int) {

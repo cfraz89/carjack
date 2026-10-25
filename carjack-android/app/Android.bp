@@ -115,14 +115,25 @@ android_library_import {
     ],
 }
 
+// Jetpack Compose, from the tree's androidx prebuilts. Listing the runtime is what turns Soong's
+// Compose compiler plugin on, so each Kotlin module with composables names it itself.
+compose_libs = [
+    "androidx.compose.runtime_runtime",
+    "androidx.compose.ui_ui",
+    "androidx.compose.foundation_foundation",
+    "androidx.compose.material3_material3",
+    "androidx.activity_activity-compose",
+    "androidx.lifecycle_lifecycle-runtime-compose",
+]
+
 // The home screen the generic build gives the head unit's display, from carjack-yocto's launcher.
 android_library {
     name: "carjack-launcher",
     srcs: ["launcher/src/**/*.kt"],
     resource_dirs: ["launcher/res"],
     manifest: "launcher/AndroidManifest.xml",
+    static_libs: compose_libs,
     sdk_version: "current",
-    // OnBackInvokedCallback, which HomeActivity holds.
     min_sdk_version: "33",
 }
 
@@ -131,12 +142,13 @@ android_app {
     srcs: [
         "src/**/*.java",
         "src-generic/**/*.java",
+        "src-generic/**/*.kt",
         "src-generic/**/*.aidl",
     ],
     aidl: {
         local_include_dirs: ["src-generic"],
     },
-    static_libs: [
+    static_libs: compose_libs + [
         "carjack-shizuku-provider",
         "carjack-launcher",
         "carjack-sentry-ndk",

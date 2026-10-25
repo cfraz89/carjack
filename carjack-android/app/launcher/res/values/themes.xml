@@ -25,10 +25,4 @@
     </style>
 
     <style name="SlipstreamTheme.Panel.Full" />
-
-    <!-- DeviceDefault here on purpose: its dialogs follow Material You. -->
-    <style name="SlipstreamDialog" parent="@android:style/Theme.DeviceDefault.Dialog.Alert">
-        <item name="android:windowBlurBehindEnabled">true</item>
-        <item name="android:windowBlurBehindRadius">@dimen/blur_radius</item>
-    </style>
 </resources>
