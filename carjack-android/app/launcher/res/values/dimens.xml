@@ -84,4 +84,5 @@
     <dimen name="status_battery_text_gap">4dp</dimen>
     <!-- An empty slot's plus, which keeps to the middle of its cell. -->
     <dimen name="add_slot_size">48dp</dimen>
+    <dimen name="focus_ring_width">3dp</dimen>
 </resources>

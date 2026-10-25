@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- An accent outline on whatever the unit's d-pad has focused; nothing otherwise. The ripple's
+     own focus tint is too faint to find on a wallpaper at a glance. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <stroke android:width="@dimen/focus_ring_width" android:color="@color/accent" />
+            <corners android:radius="@dimen/corner_radius" />
+        </shape>
+    </item>
+</selector>

@@ -6,4 +6,5 @@
             <solid android:color="@color/tonal" />
         </shape>
     </item>
+    <item android:drawable="@drawable/focus_ring_circle" />
 </ripple>

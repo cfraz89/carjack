@@ -7,4 +7,5 @@
             <corners android:radius="@dimen/corner_radius" />
         </shape>
     </item>
+    <item android:drawable="@drawable/focus_ring" />
 </ripple>
