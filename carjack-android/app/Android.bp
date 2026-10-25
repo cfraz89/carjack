@@ -26,8 +26,8 @@ cc_prebuilt_library_shared {
 android_app {
     name: "Carjack",
     srcs: [
-        "src/**/*.java",
-        "src-platform/**/*.java",
+        "src/**/*.kt",
+        "src-platform/**/*.kt",
     ],
     platform_apis: true,
     certificate: "platform",
@@ -140,8 +140,7 @@ android_library {
 android_app {
     name: "Slipstream",
     srcs: [
-        "src/**/*.java",
-        "src-generic/**/*.java",
+        "src/**/*.kt",
         "src-generic/**/*.kt",
         "src-generic/**/*.aidl",
     ],
