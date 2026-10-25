@@ -15,7 +15,7 @@ use catplay_carplay::carplay_tx::{AirPlayTransmitter, AirPlayTransmitterProxyRef
 use catplay_carplay::msg::{Command, CommandIApSendMessage};
 use deku::prelude::*;
 use iap2_proto::iap2::Iap2;
-use iap2_proto::ops::control::ControlMessage;
+use iap2_proto::ops::control::{ControlMessage, ControlMessageId};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -152,10 +152,13 @@ where
                         Ok((_, msg)) => tracing::info!(
                             id = ?msg.message_id,
                             params = msg.parameters.len(),
+                            payload = %loggable(msg.message_id, &packet.payload),
                             "iAP2 tunnel: control message"
                         ),
-                        Err(_) => tracing::debug!(
+                        // Session data other than control - HID, say - goes nowhere else.
+                        Err(_) => tracing::info!(
                             bytes = packet.payload.len(),
+                            payload = %hex(&packet.payload),
                             "iAP2 tunnel: non-control session data"
                         ),
                     }
@@ -173,4 +176,17 @@ where
             return;
         }
     }
+}
+
+/// A message's bytes for the log, except those that carry the unit's WiFi password.
+fn loggable(id: ControlMessageId, payload: &[u8]) -> String {
+    match id {
+        ControlMessageId::AccessoryWiFiConfigurationInformation
+        | ControlMessageId::CarPlayStartSession => String::from("(withheld)"),
+        _ => hex(payload),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

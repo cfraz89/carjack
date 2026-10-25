@@ -489,8 +489,15 @@ async fn handle_accessory_commands(
             .iter()
             .map(|d| (d.uuid.as_str(), d.name.as_str(), d.hid_descriptor.as_ref())),
     );
-    for (uuid, device) in &switchgear {
-        tracing::info!(uuid, name = %device.name, "Accessory switchgear");
+    // Every declared device, descriptor and all, so a control the parser skips can be worked out.
+    for d in &tx.info_cached().hid_devices {
+        tracing::info!(
+            uuid = %d.uuid,
+            name = %d.name,
+            switchgear = switchgear.contains_key(&d.uuid),
+            descriptor = %hex(d.hid_descriptor.as_ref()),
+            "Accessory HID device"
+        );
     }
     while let Some(mut cmd) = tx.pop_command().await {
         tracing::debug!("Accessory command: {:?}", cmd.command().get_type());
@@ -546,6 +553,9 @@ async fn handle_accessory_commands(
                     // A no-contact report while no contact is held: normal between gestures, but
                     // it is also what a missed Down looks like, so keep it visible at trace level.
                     tracing::trace!("touch idle report={report:02x?}");
+                } else if events.is_empty() {
+                    // Not a touch shape: a control the switchgear parser didn't take.
+                    tracing::info!(uuid = %r.uuid, report = %hex(report), "Unrecognised HID report");
                 }
                 cmd.respond_ok();
             }
@@ -603,6 +613,10 @@ struct LongTouchReport {
 /// matching neither is ignored. The compositor renders at the accessory's resolution, so
 /// coordinates pass through unscaled. `touching` tracks each slot across reports, to emit
 /// Down/Motion/Up.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn parse_touch_report(bytes: &[u8], touching: &mut [bool; 2]) -> Vec<TouchEvent> {
     let contacts: Vec<(u8, u16, u16)> = match bytes.len() {
         5 => match ShortTouchReport::from_bytes((bytes, 0)) {

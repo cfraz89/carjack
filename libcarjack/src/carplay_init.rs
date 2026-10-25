@@ -544,7 +544,11 @@ impl<S: Stream> CarplayInit<S> {
                 tracing::debug!("Received device info update: {:?}", msg.message_id);
             }
             _ => {
-                tracing::debug!("Unhandled control message: {:?}", msg.message_id);
+                tracing::info!(
+                    "Unhandled control message: {:?} {:?}",
+                    msg.message_id,
+                    msg.parameters
+                );
             }
         }
         Ok(())
