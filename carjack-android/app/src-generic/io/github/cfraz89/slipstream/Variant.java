@@ -11,6 +11,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.Surface;
 
 /**
@@ -377,14 +378,53 @@ final class Variant {
             }
             return;
         }
+        if (code == KeyEvent.KEYCODE_VOICE_ASSIST) {
+            if (down) {
+                voice();
+            }
+            return;
+        }
+        // Up and down as Shift+Tab and Tab: focus then visits everything on the screen in reading
+        // order, wrapping round, where the arrows only reach what lies above or below.
+        int meta = 0;
+        if (code == KeyEvent.KEYCODE_DPAD_DOWN) {
+            code = KeyEvent.KEYCODE_TAB;
+        } else if (code == KeyEvent.KEYCODE_DPAD_UP) {
+            code = KeyEvent.KEYCODE_TAB;
+            meta = KeyEvent.META_SHIFT_ON | KeyEvent.META_SHIFT_LEFT_ON;
+        }
+        // The unit lets go of select within a few ms; held a moment, the press shows.
+        if (code == KeyEvent.KEYCODE_DPAD_CENTER && !down) {
+            new Handler(Looper.getMainLooper()).postDelayed(
+                    () -> inject(KeyEvent.KEYCODE_DPAD_CENTER, false, 0), SELECT_HOLD_MS);
+            return;
+        }
+        inject(code, down, meta);
+    }
+
+    private static final long SELECT_HOLD_MS = 150;
+
+    private static void inject(int code, boolean down, int meta) {
         IDisplayService display = ShizukuDisplay.active;
         if (display == null) {
             return;
         }
         try {
-            display.key(code, down);
+            display.key(code, down, meta);
         } catch (android.os.RemoteException e) {
             Log.w(TAG, "Key " + code + " lost", e);
+        }
+    }
+
+    private static void voice() {
+        IDisplayService display = ShizukuDisplay.active;
+        if (display == null) {
+            return;
+        }
+        try {
+            display.voice();
+        } catch (android.os.RemoteException e) {
+            Log.w(TAG, "Voice lost", e);
         }
     }
 

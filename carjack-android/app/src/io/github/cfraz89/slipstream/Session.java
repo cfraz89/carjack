@@ -136,8 +136,15 @@ final class Session implements Native.Callbacks {
 
     @Override
     public void key(int code, boolean down) {
+        ScreenStream s = stream;
+        if (down && s != null && (code == KEYCODE_BACK || code == KEYCODE_DPAD_CENTER)) {
+            s.cue(code == KEYCODE_BACK);
+        }
         Variant.key(context, code, down);
     }
+
+    private static final int KEYCODE_BACK = 4;
+    private static final int KEYCODE_DPAD_CENTER = 23;
 
     @Override
     public void ended(String error) {

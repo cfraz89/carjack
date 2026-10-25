@@ -53,6 +53,15 @@ final class Relay {
             + "uniform sampler2D bar;\n"
             + "varying vec2 uv;\n"
             + "void main() { gl_FragColor = texture2D(bar, uv); }\n";
+    /** A {@link Cues} badge, faded by alpha; the bitmap uploads premultiplied. */
+    private static final String CUE_FRAGMENT = ""
+            + "precision mediump float;\n"
+            + "uniform sampler2D cue;\n"
+            + "uniform float alpha;\n"
+            + "varying vec2 uv;\n"
+            + "void main() { gl_FragColor = texture2D(cue, uv) * alpha; }\n";
+    private static final long CUE_MS = 450;
+    private static final long CUE_FRAME_MS = 33;
 
     private final Surface output;
     private final int width;
@@ -82,6 +91,12 @@ final class Relay {
     /** Under the view, where wanted; null for none. */
     private final android.graphics.Bitmap bar;
     private int barProgram;
+
+    private int cueProgram;
+    private int cueTexture;
+    private int cueSize;
+    /** When the showing cue started; 0 for none. */
+    private long cueStartMs;
 
     Relay(Surface output, int width, int height, int viewX, int viewY, int viewWidth,
             int viewHeight, android.graphics.Bitmap bar) {
@@ -170,8 +185,59 @@ final class Relay {
             GLES20.glEnableVertexAttribArray(barPos);
             GLES20.glVertexAttribPointer(barPos, 2, GLES20.GL_FLOAT, false, 0, quad);
         }
+
+        // Texture unit 2, beside the bar's.
+        cueProgram = link(BAR_VERTEX, CUE_FRAGMENT);
+        int[] cueTextures = new int[1];
+        GLES20.glGenTextures(1, cueTextures, 0);
+        cueTexture = cueTextures[0];
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, cueTexture);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER,
+                GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER,
+                GLES20.GL_LINEAR);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glUseProgram(cueProgram);
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(cueProgram, "cue"), 2);
+        int cuePos = GLES20.glGetAttribLocation(cueProgram, "pos");
+        GLES20.glEnableVertexAttribArray(cuePos);
+        GLES20.glVertexAttribPointer(cuePos, 2, GLES20.GL_FLOAT, false, 0, quad);
         GLES20.glUseProgram(program);
     }
+
+    /** Flashes {@code badge} low in the middle of the view, fading out. */
+    void cue(android.graphics.Bitmap badge) {
+        handler.post(() -> {
+            if (texture == null) {
+                return;
+            }
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, cueTexture);
+            android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, badge, 0);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            cueSize = badge.getWidth();
+            boolean showing = cueStartMs != 0;
+            cueStartMs = SystemClock.uptimeMillis();
+            if (!showing) {
+                handler.post(cueFrame);
+            }
+        });
+    }
+
+    /** A still screen sends no frames, so the fade draws its own. */
+    private final Runnable cueFrame = new Runnable() {
+        @Override
+        public void run() {
+            if (texture == null || cueStartMs == 0) {
+                return;
+            }
+            render(System.nanoTime());
+            if (cueStartMs != 0) {
+                handler.postDelayed(this, CUE_FRAME_MS);
+            }
+        }
+    };
 
     private void draw() {
         if (texture == null) {
@@ -253,6 +319,25 @@ final class Relay {
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
             GLES20.glUseProgram(program);
             GLES20.glViewport(viewX, height - viewY - viewHeight, viewWidth, viewHeight);
+        }
+        if (cueStartMs != 0) {
+            long elapsed = SystemClock.uptimeMillis() - cueStartMs;
+            if (elapsed >= CUE_MS) {
+                cueStartMs = 0;
+            } else {
+                int x = viewX + (viewWidth - cueSize) / 2;
+                int top = viewY + viewHeight * 3 / 4 - cueSize / 2;
+                GLES20.glViewport(x, height - top - cueSize, cueSize, cueSize);
+                GLES20.glEnable(GLES20.GL_BLEND);
+                GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+                GLES20.glUseProgram(cueProgram);
+                GLES20.glUniform1f(GLES20.glGetUniformLocation(cueProgram, "alpha"),
+                        1f - (float) elapsed / CUE_MS);
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+                GLES20.glUseProgram(program);
+                GLES20.glDisable(GLES20.GL_BLEND);
+                GLES20.glViewport(viewX, height - viewY - viewHeight, viewWidth, viewHeight);
+            }
         }
         if (pendingCapture != null) {
             pendingCapture.accept(readView());

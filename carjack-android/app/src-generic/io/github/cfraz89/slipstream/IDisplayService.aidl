@@ -63,14 +63,17 @@ interface IDisplayService {
     /** Part {@code part} (0 newest) of the phone's system log, open to read; null if none. */
     ParcelFileDescriptor systemLog(int part) = 17;
 
-    /** An Android key code going down or up on the display. */
-    void key(int code, boolean down) = 18;
+    /** An Android key code going down or up on the display, with KeyEvent meta state. */
+    void key(int code, boolean down, int meta) = 18;
 
     /** Whether a trust agent (Smart Lock's trusted devices, say) has the phone unlocked. */
     boolean trusted() = 19;
 
     /** Enables a notification listener ("pkg/class"), as its settings switch would. */
     void allowNotificationListener(String component) = 20;
+
+    /** The phone's voice assistant, opened on the display rather than over the phone's screen. */
+    void voice() = 21;
 
     /** Shizuku's teardown call. */
     void destroy() = 16777114;

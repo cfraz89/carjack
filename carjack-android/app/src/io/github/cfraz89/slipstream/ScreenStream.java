@@ -88,10 +88,26 @@ final class ScreenStream {
         relay = new Relay(input, width, height, viewX, viewY, viewWidth, viewHeight,
                 barHeight == 0 ? null : NavBar.render(viewWidth, barHeight));
         Surface target = relay.start();
+        int cueSize = Math.round(viewHeight * CUE_FRACTION);
+        backCue = Cues.back(cueSize);
+        selectCue = Cues.select(cueSize);
         closeDisplay = Variant.openDisplay(context, viewWidth, viewHeight, density, target);
         lastOutput = android.os.SystemClock.uptimeMillis();
         watchdogHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS);
         watchdogHandler.postDelayed(preview, FIRST_PREVIEW_MS);
+    }
+
+    /** A cue badge's size, as a fraction of the view's height. */
+    private static final float CUE_FRACTION = 0.14f;
+    private android.graphics.Bitmap backCue;
+    private android.graphics.Bitmap selectCue;
+
+    /** Answers the switchgear's back and select on the picture itself; see {@link Cues}. */
+    void cue(boolean back) {
+        Relay r = relay;
+        if (r != null) {
+            r.cue(back ? backCue : selectCue);
+        }
     }
 
     /** What the unit shows, now and then, as the on-connect picker's thumbnail. */
