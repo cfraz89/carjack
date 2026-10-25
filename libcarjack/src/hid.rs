@@ -93,15 +93,16 @@ impl Device {
         })
     }
 
-    /// The key events in one report: a press or release per button that changed, and a press
-    /// and release per detent the dial turned.
+    /// The key events in one report: a press or release per button that changed, and one press
+    /// and release for a dial that moved. One, whatever the amount: the CFMOTO's d-pad sends each
+    /// up or down as a full-scale ±127 turn.
     pub fn decode(&mut self, report: &[u8]) -> Vec<KeyEvent> {
         let mut events = Vec::new();
         for (i, field) in self.fields.iter().enumerate() {
             let value = read(report, field);
             if is_dial(field) {
-                let code = if value > 0 { key::DPAD_DOWN } else { key::DPAD_UP };
-                for _ in 0..value.unsigned_abs().min(16) {
+                if value != 0 {
+                    let code = if value > 0 { key::DPAD_DOWN } else { key::DPAD_UP };
                     events.push(KeyEvent { code, down: true });
                     events.push(KeyEvent { code, down: false });
                 }
@@ -262,14 +263,19 @@ mod tests {
     }
 
     #[test]
-    fn dial_steps_both_ways() {
+    fn dial_steps_once_either_way() {
         let mut knob = Device::new("Knob & Buttons", KNOB).unwrap();
-        let down = knob.decode(&[0, 2]);
-        assert_eq!(down.len(), 4);
-        assert!(down.iter().all(|e| e.code == key::DPAD_DOWN));
-        let up = knob.decode(&[0, 0xff]);
+        // The d-pad's down and up, as the CFMOTO sends them.
         assert_eq!(
-            up,
+            knob.decode(&[0, 127]),
+            vec![
+                KeyEvent { code: key::DPAD_DOWN, down: true },
+                KeyEvent { code: key::DPAD_DOWN, down: false },
+            ]
+        );
+        assert_eq!(knob.decode(&[0, 0]), vec![]);
+        assert_eq!(
+            knob.decode(&[0, 129]),
             vec![
                 KeyEvent { code: key::DPAD_UP, down: true },
                 KeyEvent { code: key::DPAD_UP, down: false },
