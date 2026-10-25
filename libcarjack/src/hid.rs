@@ -29,6 +29,12 @@ mod key {
     pub const MEDIA_PREVIOUS: u32 = 88;
     pub const MEDIA_PLAY: u32 = 126;
     pub const MEDIA_PAUSE: u32 = 127;
+    pub const VOICE_ASSIST: u32 = 231;
+}
+
+/// The accessory's Siri button, which comes as a `requestSiri` command rather than a HID report.
+pub fn voice_assist(down: bool) -> KeyEvent {
+    KeyEvent { code: key::VOICE_ASSIST, down }
 }
 
 /// The key a (usage page, usage) stands for, if any.

@@ -15,7 +15,7 @@ use catplay_carplay::modes::{
     EntityEnum, Resource, ResourceConstraint, ResourceController, ResourceID,
     ResourceTransferPriority,
 };
-use catplay_carplay::msg::Command;
+use catplay_carplay::msg::{Command, SiriAction};
 use catplay_carplay::rtsp_frame::HttpStatus;
 use catplay_carplay::screen::tx::{ScreenTransmitError, ScreenTransmitSink};
 use catplay_carplay::video::{
@@ -573,6 +573,19 @@ async fn handle_accessory_commands(
                 cmd.respond_ok();
                 tunnel.deliver(data);
                 continue;
+            }
+            Command::RequestSiri(siri) => {
+                // Prewarm comes first on some units and needs nothing: the assistant opens on down.
+                let down = match siri.siri_action {
+                    SiriAction::ButtonDown => Some(true),
+                    SiriAction::ButtonUp => Some(false),
+                    SiriAction::Prewarm => None,
+                };
+                tracing::info!(?down, "Accessory voice button");
+                if let (Some(down), Some(key_tx)) = (down, &key_tx) {
+                    let _ = key_tx.try_send(crate::hid::voice_assist(down));
+                }
+                cmd.respond_ok();
             }
             _ => cmd.respond_ok(),
         }
