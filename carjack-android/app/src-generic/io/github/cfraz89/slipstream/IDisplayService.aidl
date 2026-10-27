@@ -78,6 +78,9 @@ interface IDisplayService {
     /** The package of the app showing on the display, or null. */
     String topPackage() = 22;
 
+    /** Wakes the phone and takes away a lock screen that needs no PIN (a trusted device's). */
+    void dismissKeyguard() = 23;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

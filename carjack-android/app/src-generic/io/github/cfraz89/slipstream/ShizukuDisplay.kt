@@ -32,7 +32,7 @@ object ShizukuDisplay {
         .daemon(false)
         .processNameSuffix("display")
         .debuggable(false)
-        .version(34)
+        .version(35)
 
     @Volatile private var service: IDisplayService? = null
     private var bound = CountDownLatch(1)
@@ -109,6 +109,22 @@ object ShizukuDisplay {
         active?.topPackage()
     } catch (e: RemoteException) {
         null
+    }
+
+    /** [IDisplayService.dismissKeyguard], while there's a display. */
+    fun dismissKeyguard() {
+        try {
+            active?.dismissKeyguard()
+        } catch (ignored: RemoteException) {
+        }
+    }
+
+    /** [IDisplayService.launch] onto the unit's display, while there is one. */
+    fun launch(component: String) {
+        try {
+            active?.launch(component)
+        } catch (ignored: RemoteException) {
+        }
     }
 
     /** Bluetooth off and on through Shizuku; false where Shizuku can't. */

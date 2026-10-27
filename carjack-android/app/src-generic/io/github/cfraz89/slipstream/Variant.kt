@@ -305,8 +305,10 @@ object Variant {
             return null
         }
         Switchgear.watch(context)
+        LockWatcher.watch(context)
         return Runnable {
             Switchgear.stop()
+            LockWatcher.stop()
             close.run()
         }
     }

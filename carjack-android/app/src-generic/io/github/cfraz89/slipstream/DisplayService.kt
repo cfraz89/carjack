@@ -279,6 +279,12 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
         }
     }
 
+    /** Asleep, a lock screen can't be dismissed: the phone wakes first, a no-op when it's awake. */
+    override fun dismissKeyguard() {
+        run("input", "keyevent", "KEYCODE_WAKEUP")
+        run("wm", "dismiss-keyguard")
+    }
+
     override fun cycleBluetooth() {
         run("cmd", "bluetooth_manager", "disable")
         run("cmd", "bluetooth_manager", "wait-for-state:STATE_OFF")

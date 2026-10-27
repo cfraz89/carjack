@@ -67,6 +67,16 @@
         <activity
             android:name=".RemoteAppsActivity"
             android:exported="false" />
+        <!-- The unit's screen while the phone is locked (LockWatcher). Exported so the shell can
+             start it on the unit's display; over the lock screen, in a task of its own. -->
+        <activity
+            android:name=".LockedActivity"
+            android:exported="true"
+            android:theme="@style/SlipstreamTheme"
+            android:launchMode="singleTask"
+            android:taskAffinity="io.github.cfraz89.slipstream.locked"
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true" />
 
         <receiver
             android:name=".BootReceiver"
