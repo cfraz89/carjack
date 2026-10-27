@@ -38,8 +38,11 @@ went over the wire. No Apple source, SDKs or accessory documentation were used.
 
 ### Android (Slipstream)
 
-So far Slipstream has only been tested with a Pixel 8 and a CFMOTO 1000MT-X. Other phones and
-head units may well work, but haven't been tried.
+Known to work on:
+- **Phones:** Pixel 8, Pixel 10
+- **Vehicles:** CFMOTO 1000MT-X
+
+Other phones and head units may well work, but haven't been tried.
 
 It needs [Shizuku](https://shizuku.rikka.app/) installed and running; Slipstream walks you through
 the rest when it opens.
