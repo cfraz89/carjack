@@ -41,12 +41,12 @@ import androidx.compose.ui.unit.sp
 import io.github.cfraz89.slipstream.launcher.DrawableImage
 
 /**
- * What the unit opens on connect, picked like a wallpaper: a large thumbnail per choice, the last
- * picture that choice put on the unit, or its icon until it has been shown there.
+ * What the head unit opens on connect, picked like a wallpaper: a large thumbnail per choice, the last
+ * picture that choice put on the head unit, or its icon until it has been shown there.
  */
 class OnConnectActivity : ComponentActivity() {
     private companion object {
-        /** The unit's picture, which the thumbnails keep the shape of. */
+        /** The head unit's picture, which the thumbnails keep the shape of. */
         const val ASPECT = 800f / 1056f
     }
 
@@ -76,7 +76,7 @@ class OnConnectActivity : ComponentActivity() {
         Page {
             TopBar("On connect") { finish() }
             Text(
-                "What the unit shows when a session starts",
+                "What the head unit shows when a session starts",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 14.sp,
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),

@@ -18,7 +18,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * A display of the unit's own size with apps running on it, made by [DisplayService] through
+ * A display of the head unit's own size with apps running on it, made by [DisplayService] through
  * Shizuku. Used in place of the screen mirror where Shizuku is running and has let Slipstream in.
  */
 object ShizukuDisplay {
@@ -104,7 +104,7 @@ object ShizukuDisplay {
         }
     }
 
-    /** The app showing on the unit's display, while there is one. */
+    /** The app showing on the head unit's display, while there is one. */
     fun topPackage(): String? = try {
         active?.topPackage()
     } catch (e: RemoteException) {
@@ -119,7 +119,7 @@ object ShizukuDisplay {
         }
     }
 
-    /** [IDisplayService.launch] onto the unit's display, while there is one. */
+    /** [IDisplayService.launch] onto the head unit's display, while there is one. */
     fun launch(component: String) {
         try {
             active?.launch(component)

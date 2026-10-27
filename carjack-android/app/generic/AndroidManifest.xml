@@ -30,7 +30,7 @@
     <!-- Roughly where the phone is, for the launcher's weather. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- The apps the unit can be given, for the picker and the launcher; and the home app. -->
+    <!-- The apps the head unit can be given, for the picker and the launcher; and the home app. -->
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -67,8 +67,8 @@
         <activity
             android:name=".RemoteAppsActivity"
             android:exported="false" />
-        <!-- The unit's screen while the phone is locked (LockWatcher). Exported so the shell can
-             start it on the unit's display; over the lock screen, in a task of its own. -->
+        <!-- The head unit's screen while the phone is locked (LockWatcher). Exported so the shell can
+             start it on the head unit's display; over the lock screen, in a task of its own. -->
         <activity
             android:name=".LockedActivity"
             android:exported="true"
@@ -88,7 +88,7 @@
         </receiver>
 
         <!-- The launcher (launcher/), which Slipstream opens on the head unit's display by
-             component: not a home app on the phone. Shown when locked: the unit's display sits
+             component: not a home app on the phone. Shown when locked: the head unit's display sits
              in the phone's display group, which the lock screen would otherwise hide. -->
         <activity
             android:name="io.github.cfraz89.slipstream.launcher.HomeActivity"
@@ -104,7 +104,7 @@
         <!-- The launcher keeps a task of its own (taskAffinity): sharing the app's, the app's
              icon would bring the launcher forward rather than the app. -->
         <!-- The same launcher from the phone's own app drawer, to try it out or set it up
-             away from the unit. -->
+             away from the head unit. -->
         <activity-alias
             android:name="io.github.cfraz89.slipstream.LauncherOnPhone"
             android:targetActivity="io.github.cfraz89.slipstream.launcher.HomeActivity"

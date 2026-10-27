@@ -26,7 +26,7 @@ import java.io.IOException
 
 /**
  * The generic build: an ordinary app on someone's phone, with Shizuku standing in for the
- * privileges the platform build has - the unit's display, touch on it, Bluetooth cycling and the
+ * privileges the platform build has - the head unit's display, touch on it, Bluetooth cycling and the
  * phone's Bluetooth address. Permissions and pairing are asked of the user.
  */
 object Variant {
@@ -114,7 +114,7 @@ object Variant {
     private const val TRUST_CHECK_DELAY_MS = 15_000L
 
     /**
-     * Whether the unit keeps the phone unlocked (a trusted device), noted once seen so the
+     * Whether the head unit keeps the phone unlocked (a trusted device), noted once seen so the
      * reminder to set it up can go. Seen only, never unset: trust also lapses for other reasons.
      */
     private fun checkTrustSoon(app: Context) {
@@ -122,14 +122,14 @@ object Variant {
             AccessoryWifi.afterShell {
                 if (!prefs(app).getBoolean("linked", false)) return@afterShell
                 val trusted = ShizukuDisplay.trusted()
-                Log.i(TAG, "Phone trusted while the unit's connected: $trusted")
+                Log.i(TAG, "Phone trusted while the head unit's connected: $trusted")
                 if (trusted == true) prefs(app).edit().putBoolean("trust_seen", true).apply()
             }
         }, TRUST_CHECK_DELAY_MS)
     }
 
     private const val LOCK_AFTER = "lock_screen_lock_after_timeout"
-    /** A day: in effect, no locking on screen-off while the unit is connected. */
+    /** A day: in effect, no locking on screen-off while the head unit is connected. */
     private val HELD_LOCK_AFTER = (24 * 60 * 60 * 1000).toString()
 
     /** Whether the phone's panel goes dark rather than the phone sleeping; off until proven. */
@@ -140,7 +140,7 @@ object Variant {
 
     /**
      * While a unit's connected (and the user wants it), the screen going off doesn't lock the
-     * phone: the lock screen would hide the apps on the unit's display, which shares its display
+     * phone: the lock screen would hide the apps on the head unit's display, which shares its display
      * group. Done as Smart Lock's trusted devices do, by holding off the lock after screen-off;
      * the power button still locks if it's set to lock instantly. Off the caller's thread.
      */
@@ -164,7 +164,7 @@ object Variant {
             }
             // Unset is kept as absent, and put back as unset.
             prefs.edit().putBoolean("lock_held", true).putString("lock_after_saved", original).commit()
-            Log.i(TAG, "Holding off the lock while the unit's connected (was $original)")
+            Log.i(TAG, "Holding off the lock while the head unit's connected (was $original)")
         } else {
             if (!ShizukuDisplay.setSecureSetting(LOCK_AFTER, prefs.getString("lock_after_saved", null))) {
                 return
@@ -223,7 +223,7 @@ object Variant {
         return false
     }
 
-    /** No paging for apps: Slipstream dials the unit's iAP service instead. */
+    /** No paging for apps: Slipstream dials the head unit's iAP service instead. */
     fun canPage() = false
 
     /**
@@ -246,29 +246,29 @@ object Variant {
      */
     fun bluetoothAddress(context: Context, adapter: BluetoothAdapter): String? {
         ShizukuDisplay.bluetoothAddress()?.let { return it }
-        Log.w(TAG, "No Bluetooth address from Shizuku; the unit gets a placeholder")
+        Log.w(TAG, "No Bluetooth address from Shizuku; the head unit gets a placeholder")
         return adapter.address
     }
 
     /**
-     * The MAC [iface] joined with, which apps can't read and the unit may check against the
+     * The MAC [iface] joined with, which apps can't read and the head unit may check against the
      * station on its AP; null without Shizuku.
      */
     fun interfaceMac(iface: String) = ShizukuDisplay.interfaceMac(iface)
 
     /**
-     * The phone's WiFi switched over to the unit's AP, through Shizuku: one channel for the radio
+     * The phone's WiFi switched over to the head unit's AP, through Shizuku: one channel for the radio
      * rather than two time-sliced. False where it can't, for the local-only request instead.
      * Blocks.
      */
     fun joinPrimary(ssid: String, passphrase: String?) = ShizukuDisplay.joinPrimary(ssid, passphrase)
 
-    /** Back off the unit's AP; with a null SSID, just unlocks switching. Blocks. */
+    /** Back off the head unit's AP; with a null SSID, just unlocks switching. Blocks. */
     fun leavePrimary(ssid: String?) {
         ShizukuDisplay.leavePrimary(ssid)
     }
 
-    /** The built-in launcher's home screen, which the unit gets unless another app is chosen. */
+    /** The built-in launcher's home screen, which the head unit gets unless another app is chosen. */
     private const val LAUNCHER = "$APP_ID/$APP_ID.launcher.HomeActivity"
 
     /** The chosen app while it's still installed, else the launcher. */
@@ -280,7 +280,7 @@ object Variant {
             context.packageManager.getPackageInfo(app.substringBefore('/'), 0)
             app
         } catch (e: PackageManager.NameNotFoundException) {
-            Log.w(TAG, "$app isn't installed; the unit gets the launcher")
+            Log.w(TAG, "$app isn't installed; the head unit gets the launcher")
             LAUNCHER
         }
     }
@@ -297,7 +297,7 @@ object Variant {
         return ComponentName(activity.packageName, activity.name)
     }
 
-    /** A display of the unit's own size with the chosen app on it, or null without Shizuku. */
+    /** A display of the head unit's own size with the chosen app on it, or null without Shizuku. */
     fun openDisplay(context: Context, width: Int, height: Int, density: Int, target: Surface): Runnable? {
         val close = ShizukuDisplay.open(target, width, height, density, appFor(context), keepsPanel(context))
         if (close == null) {
@@ -326,14 +326,14 @@ object Variant {
 
     private const val KEYCODE_HOME = 3
 
-    /** A key from the unit's switchgear, through its mode; see [Switchgear]. */
+    /** A key from the head unit's switchgear, through its mode; see [Switchgear]. */
     fun switchgear(context: Context, code: Int, down: Boolean) {
         Switchgear.key(context, code, down)
     }
 
     /**
      * A key onto the display. Home isn't sent as a key: on a display without system decorations
-     * that's the phone's own home; it reopens what the unit opens on connect instead.
+     * that's the phone's own home; it reopens what the head unit opens on connect instead.
      */
     fun key(context: Context, code: Int, down: Boolean) {
         when (code) {
@@ -367,7 +367,7 @@ object Variant {
         key(context, code, false)
     }
 
-    /** What the unit opens on connect, brought back to the front. */
+    /** What the head unit opens on connect, brought back to the front. */
     fun goHome(context: Context) {
         val display = ShizukuDisplay.active ?: return
         try {

@@ -9,7 +9,7 @@ import android.graphics.Path
 import kotlin.math.roundToInt
 
 /**
- * A back and home bar along the bottom of the unit's picture, for where its switchgear can't do
+ * A back and home bar along the bottom of the head unit's picture, for where its switchgear can't do
  * either. Drawn into the stream by the [Relay] below the display, rather than as a window on it,
  * so it sits over any app; touches on it are taken before they reach the display.
  */

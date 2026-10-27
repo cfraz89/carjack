@@ -140,7 +140,7 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
   never carried them), and carjack never overrode them. catplay documents `deviceID` as the
   device's **Bluetooth MAC address** - the exact field a head unit uses to tie the WiFi session
   back to the device it authenticated over Bluetooth (same rule as `_carplay-ctrl`'s `id`, and the
-  reason `cfmoto_16` answered a SETUP then still refused: the unit is lenient until the stream
+  reason `cfmoto_16` answered a SETUP then still refused: the head unit is lenient until the stream
   actually starts, then validates). So the bike sees us claim `ff:ee:dd:cc:bb:aa`/`aa:bb:cc:dd:ee:ff`
   while the station on its AP is `FE:E8:AC:31:AD:C9` and the BT identity was `4C:79:6E:DA:29:4B` -
   an identity matching nothing, dropped at the moment the screen stream begins.
@@ -373,7 +373,7 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
     `cfmoto_12` is the same shape: event socket 45.418, SETUP answered 45.4486, screen socket
     45.4497, RECORD answered 45.4548 - and the deauth in that same 20:16:45 second. The screen
     socket carries **no data at all** before the deauth in `cfmoto_16` - three-way handshake and
-    nothing else. The BT link following ~2 s later matches the known "the unit walks away, taking
+    nothing else. The BT link following ~2 s later matches the known "the head unit walks away, taking
     both radios" behaviour.
   - **Correction, same day: it is not the screen socket - it is `assert_modes`.** The proposed
     "don't open the screen socket" experiment had already been run by `cfmoto_13` and `cfmoto_14`,
@@ -527,13 +527,13 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
   - **Fault 3 - and the one that had been masking everything:** the recovery path called
     `connect_profile(&IAP_ACCESSORY_UUID)` before `device.connect()`. `connect_profile` leaves a
     connection in progress, so **`connect()` failed `br-connection-busy` on every single retry** and
-    HFP/A2DP never came up. Without them the unit never engages and never opens its channel. Log
+    HFP/A2DP never came up. Without them the head unit never engages and never opens its channel. Log
     evidence, three runs in a row: `Reconnected the accessory profile iap=Ok(())` immediately
     followed by `Reconnected remaining profiles all=Err(... "br-connection-busy")`. Replacing the
     pair with a plain spawned `device.connect()` made the very next run complete the handshake.
     This one is mine: it was introduced answering "would `connect_profile` block less" - it does,
     but it also breaks the thing that matters.
-  - **Also tried and discarded:** an 8s grace after disconnect to let the unit re-establish the link
+  - **Also tried and discarded:** an 8s grace after disconnect to let the head unit re-establish the link
     itself. Measured - the AUTO BOX never reconnects on its own (`Unit did not reconnect; paging it`
     every time), so it was pure delay. Removed.
   - **Result:** `iAP2 handshake completed ... profile=device` -> `Accessory identified: AUTO BOX` ->
@@ -580,7 +580,7 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
        is now a one-glance check that previously needed HCI from a capture.
   - **What this does not explain:** why the bike's page-scan window opens when it does. It does not
     correlate simply with time since our disconnect (`cfmoto_11` paged successfully 2.8s after one;
-    `cfmoto_14` timed out 16s after one). Both changes are untested against the unit.
+    `cfmoto_14` timed out 16s after one). Both changes are untested against the head unit.
 
 - **The "stuck waiting for iAP2 switch" investigation (2026-07-28). I proposed a livelock and was
   wrong about the mechanism; the HCI layer refuted it. Recording both, because the refutation is
@@ -593,11 +593,11 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
   - **Refuted, by `cfmoto_14` session 2 - which worked end to end.** HCI:
     `Sent Create Connection` 00:09:08.087 -> `Connect Complete status=0x00` 00:09:08.373. **Our own
     page created that ACL.** The bike then sent `Rcvd SABM Channel=1` at 00:09:09.818 on it, `FF 55`
-    248ms later, and the full handshake plus AirPlay to RECORD followed. So the unit is perfectly
+    248ms later, and the full handshake plus AirPlay to RECORD followed. So the head unit is perfectly
     willing to speak iAP2 over a carjack-originated ACL, and the `cfmoto_6` conclusion is at best
     too strong.
   - **The reasoning error, worth naming:** `Accessory connection r=Ok(())` was read as "our page
-    succeeded". It is not. `connect_accessory` resolves Ok just as readily when the unit connected
+    succeeded". It is not. `connect_accessory` resolves Ok just as readily when the head unit connected
     first and our in-flight `device.connect()` merely completed. Session 2 proves it: our page
     returned `br-connection-page-timeout` **twice** (`Connect Complete status=0x04` at 00:08:59.957
     and 00:09:06.083), and the eventual Ok arrived **7ms after** an inbound connect request.
@@ -606,13 +606,13 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
     `Connect Complete` status byte.**
   - **Reverted:** the `CAR_FIRST_MOVE_GRACE` delay before paging. It rested entirely on the wrong
     premise, and would have added 5s to every connection - including the ones where *our* page is
-    what wakes the unit, which session 2 shows is a real case.
+    what wakes the head unit, which session 2 shows is a real case.
   - **Kept, because each stands on its own:**
     1. `SWITCH_TIMEOUT` 3s, single attempt (was 12s x 3 = ~38s). Re-reading a mute channel cannot
        make it speak; the bike sends `FF 55` in 268ms and the AUTO BOX repeats every ~1s, so 3s has
        ~10x margin and failing fast is what lets the caller go get a different channel.
     2. ~~`perform_switch` dispatches on the **2-byte** magic~~ - built, then **reverted the same day
-       after testing against the unit: an accessory that does not send the switch never sends a SYN
+       after testing against the head unit: an accessory that does not send the switch never sends a SYN
        either.** The `FF 5A`-first state it was written for does not occur, so the dispatch (and the
        `FramedParts.read_buf` seeding behind it) was removed and the plain six-byte read restored.
        Recorded because it was a plausible-looking fix for a case that simply is not real - the
@@ -648,7 +648,7 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
     from t=73.10 our neighbour solicitations go unanswered and DHCP Discovers get no offer, so the
     SETUP bytes never reached the wire at all. Across four captures the pattern is exact:
     `cfmoto_12` sent SETUP **2ms** after the modes assertion and the car went on to answer RECORD;
-    `cfmoto_13` (never), `cfmoto_14` s1 (4.9s) and s2 (296ms) all lost the unit within ~2s of the
+    `cfmoto_13` (never), `cfmoto_14` s1 (4.9s) and s2 (296ms) all lost the head unit within ~2s of the
     assertion. **Fixed:** `wait_for_first_keyframe` moved back to where it was first designed to
     go - after `setup_screen`, before `record`. Nothing may sit between `assert_modes` and SETUP.
   - **Fault 3: carjack streamed to the wrong head unit.** The log is unambiguous: targeting
@@ -661,7 +661,7 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
     adapter, so any bonded unit that pages us landed in that accept. **Fixed:** compare
     `rq.device()` against the configured target and `reject()` anything else. Inbound still has to
     be accepted in general - the bike requires a car-originated ACL (`cfmoto_6`).
-  - **Still open:** whether a session survives past RECORD. Every capture so far has lost the unit
+  - **Still open:** whether a session survives past RECORD. Every capture so far has lost the head unit
     before or at that point, and the bike's own link kept failing early in this run too
     (`Timed out waiting for iAP2 switch command` twice, then `Connection reset by peer`) - which
     is the aggressive-reconnect state, so **power-cycle before reading much into a run**.
@@ -689,7 +689,7 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
     released**. The car sent RFCOMM DISC at t=23.252 (reason `0x13`), 2.3s later. One SYN to port
     7000 in the whole 181s capture - no retry.
   - **So the watchdog is not specifically about RECORD.** `cfmoto_12`: 2.0s after RECORD.
-    `cfmoto_13`: 2.3s after `assert_modes`. The unit gives up ~2s after carjack stops making
+    `cfmoto_13`: 2.3s after `assert_modes`. The head unit gives up ~2s after carjack stops making
     progress, whatever the last step was.
   - **But this run never spoke iAP2 to the bike.** The only RFCOMM DLCIs present are `0x00`
     (control) and `0x1a` (HFP). **Zero `FF 55`, zero `FF 5A`, no DLCI `0x05`** - where
@@ -732,7 +732,7 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
     ARP, no neighbour solicitation. At **t=63.992 the accessory sends RFCOMM DISC**, tears down
     HFP/AVDTP/A2DP, and the ACL drops at t=64.314 with reason `0x13` (remote user terminated).
     Its AP goes with it: ten neighbour solicitations from t=64.118 to t=73.525 go unanswered,
-    DHCP Discovers at t=66.05 and t=70.82 get no offer, and the unit only comes back at t=75.9
+    DHCP Discovers at t=66.05 and t=70.82 get no offer, and the head unit only comes back at t=75.9
     (re-association, DHCP ACK, and the car re-paging us over Bluetooth).
   - **The timing is the whole story.** RECORD answered at t=62.011; car gives up at t=63.992
     (1.98 s later); carjack's first video frame is ready at t=64.118 (2.11 s later). The first
@@ -765,13 +765,13 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
     the pipeline has to be built after `reconfigure` has settled the output size. With RECORD
     gated on a real keyframe the warm-up no longer causes a failure, only a slower start.
   - **Untested against the bike.** The fix is unit-tested and builds; nobody has watched it
-    complete a session on the unit.
+    complete a session on the head unit.
 
 - **`bench_2.pcapng` (2026-07-27): the AUTO BOX stopped working, and it is a regression from the
   link-layer rewrite - two bugs, both in the SYN handshake, both mine. Fixed, with the test that
   should have caught them.**
   - **What the capture shows.** Bluetooth connects, HFP runs, RFCOMM channel 1 opens. At t=14.29
-    the switch command goes both ways, then the unit sends its SYN
+    the switch command goes both ways, then the head unit sends its SYN
     (`ff5a 0017 80 a8 0000 68 | 01 7fffff 07d0 03e8 1e 06 01 00 02`) - seq `0xa8`, and a
     parameter set very different from the bike's: `max_outstanding=127, max_length=65535,
     retx=2000ms, cumack=1000ms, max_retx=30, max_cumack=6`, **control session id 1**.
@@ -785,9 +785,9 @@ Captures referenced by name are inventoried in [captures.md](captures.md).
     swallow bare acknowledgements as link-layer noise - and the third leg of the SYN handshake
     *is* a bare acknowledgement (`ff5a 0009 40 a8 9d 00`, visible at t=14.387). `Syn` was calling
     that same filtered receive, so it sat waiting for a packet that would never be handed to it.
-  - **How it ends:** each SYN retransmit from the unit arrives where `Syn` expected the ack, so
+  - **How it ends:** each SYN retransmit from the head unit arrives where `Syn` expected the ack, so
     `perform_inner` errors and retries - our SYN+ACK goes out again as seq `0x9e`, then `0x9f`.
-    After the retries are exhausted the unit gives up on iAP2 and falls back to sending `FF 55`
+    After the retries are exhausted the head unit gives up on iAP2 and falls back to sending `FF 55`
     every ~1 s from t=19.5 to the end of the capture.
   - **Fixed** by splitting the receive path in two. `receive_raw` does the link-layer bookkeeping
     and returns *every* packet, bare acks and SYNs included; `receive_packet` is the session-level

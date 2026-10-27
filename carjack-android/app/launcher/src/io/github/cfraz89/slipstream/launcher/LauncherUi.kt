@@ -106,7 +106,7 @@ val CardShape @Composable get() = RoundedCornerShape(dimensionResource(R.dimen.c
 
 /**
  * Tappable, the launcher's way: a ripple, a shrink that shows at once even when the stream to
- * the unit lags the touch, and an accent ring while the unit's switchgear has it focused - the
+ * the head unit lags the touch, and an accent ring while the head unit's switchgear has it focused - the
  * ripple's own focus tint is too faint to find on a wallpaper at a glance.
  */
 @OptIn(ExperimentalFoundationApi::class)

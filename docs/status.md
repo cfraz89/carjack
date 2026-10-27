@@ -35,7 +35,7 @@ channel 157) and then failed to join in 50 ms, every time: the bike's `bssid` is
 
 ## `auto` could never resolve a unit that dialled in first (2026-09-15)
 
-On the board, against the bench AUTO BOX. The unit connected, ran a complete HFP session, opened
+On the board, against the bench AUTO BOX. The head unit connected, ran a complete HFP session, opened
 our iAP channel - and sent nothing on it. The 5 s SYN wait expired and did not retry, correctly:
 `heard_from_peer` was false, so not one byte arrived. The rest of the boot was then dead - `No iAP
 channel offered; head unit not resolved yet` every 20 s, and `Discovering: yes` the whole time.
@@ -48,11 +48,11 @@ Two things in `find_target_device`, both only reachable with `device = "auto"`:
   looked for again.
 
 The watch therefore stayed `None`, which is what made it terminal: the accept loop's timeout branch
-needs a resolved `Device` to `relink`, and paging is what makes the unit offer a live channel. One
+needs a resolved `Device` to `relink`, and paging is what makes the head unit offer a live channel. One
 silent channel ended the run.
 
 `is_present` now takes connected *or* in-range, and `await_known_target` polls BlueZ's list beside
-the scan, returning as soon as the unit appears there; the scan future is dropped with it, so
+the scan, returning as soon as the head unit appears there; the scan future is dropped with it, so
 resolution also ends the permanent inquiry.
 
 **Still open: why that channel was silent.** `iap2_proto` was at info, so nothing recorded whether
@@ -155,14 +155,14 @@ bike won't do it.
 
 ## Who starts the iAP channel, and why it looked random (2026-08-13, night)
 
-The unit hosts the iAP accessory service (`...decacaff`); we host the device side (`...decacafe`)
-and can only wait. So the channel opens on the unit's schedule - but "its schedule" is not
+The head unit hosts the iAP accessory service (`...decacaff`); we host the device side (`...decacafe`)
+and can only wait. So the channel opens on the head unit's schedule - but "its schedule" is not
 arbitrary, and 17 successful bike runs split cleanly in two:
 
 | how the channel arrived | runs | timing |
 | --- | --- | --- |
 | within a second of **our** page completing | 9 | 0.00 - 0.86 s after `Connection result` |
-| with no page of ours anywhere near it | 8 | the unit initiating by itself |
+| with no page of ours anywhere near it | 8 | the head unit initiating by itself |
 
 So paging *is* a trigger, and when it works it works immediately. Nothing waits 20 s and then
 succeeds. That makes a run easy to read: if the channel has not arrived a second after the ACL is
@@ -170,17 +170,17 @@ up, that page was refused, and waiting longer is not going to change it.
 
 **The three initiation paths had been switched off** in the working tree - `PAGE_RETRY_DELAY` 2 s ->
 10000 s, `OFFER_WAIT` 5 s -> 50000 s, and the startup `relink` commented out. A baseline run
-confirmed the effect: carjack found the unit, printed `Waiting for iAP2 connection requests`, and
+confirmed the effect: carjack found the head unit, printed `Waiting for iAP2 connection requests`, and
 sat idle for 45 s. Only a unit that initiated on its own could ever connect, which is exactly the
 randomness that prompted this.
 
-**Cycling harder is the wrong lever.** Restored at 5 s, the unit accepted every page
+**Cycling harder is the wrong lever.** Restored at 5 s, the head unit accepted every page
 (`res=Ok(())`, ~1 s each) and offered nothing; after five rapid cycles `connect()` began hanging
-outright - the unit had stopped answering pages, which is the "aggressive reconnect" degradation in
+outright - the head unit had stopped answering pages, which is the "aggressive reconnect" degradation in
 the hardware-quirks list, and we were causing it. At 20 s backing off to 60 s, ten cycles over nine
 minutes drew no degradation and one recovered page timeout.
 
-What the run could not do is matter, because **the unit sat in its Phone settings page the whole
+What the run could not do is matter, because **the head unit sat in its Phone settings page the whole
 time** (`Now discoverable as "CFMOTO-G2Y70E"`, `My Devices > carjack` ticked). Photographed at
 21:19 and again at 21:34, unchanged across every run. A unit parked in its own Bluetooth settings
 does not start CarPlay on link-up; the rider backing out of that screen, pressing the device, or
@@ -192,9 +192,9 @@ that has gone away, where before it only cycled one that was up and so waited fo
 and the adapter is left discoverable and pairable while waiting, which it was not.
 
 Untested: a successful initiation under the new timing. Nine minutes of runs never got one,
-because of the screen the unit was on.
+because of the screen the head unit was on.
 
-### The unit withdraws its iAP record, and that is what "random" was
+### The head unit withdraws its iAP record, and that is what "random" was
 
 The same SDP query, seventeen minutes apart, from `logs/bike-hci.btsnoop`:
 
@@ -206,11 +206,11 @@ The same SDP query, seventeen minutes apart, from `logs/bike-hci.btsnoop`:
 
 The record was published at 21:53 and at 22:09:41, and **gone by 22:10:02** - within about twenty
 seconds of the one channel that opened and had its handshake reset. `bluetoothctl info` still lists
-the UUID, but that is BlueZ's cached list from when the record was live; the unit itself now answers
+the UUID, but that is BlueZ's cached list from when the record was live; the head unit itself now answers
 the query empty.
 
 With no record there is no iAP path in **either** direction - nothing to dial, and nothing that
-would make the unit dial us. That is a better explanation of "it connects randomly" than anything
+would make the head unit dial us. That is a better explanation of "it connects randomly" than anything
 before it: the record is only up sometimes, and a session can only start while it is. Both triggers
 that are known to work - power-cycling the bike, pressing the device on screen - are things that
 would republish it.
@@ -246,12 +246,12 @@ So the pattern is one restart, one session. Every previously "random" success fi
 `timeout(1)`, which sends `SIGTERM` - whose default disposition killed us outright, leaving the
 accessory holding a session we never ended. Every timed run tonight died that way. `main.rs` now
 treats SIGTERM like Ctrl-C (`shutdown_requested`, and the watchdog arms both), which is right
-regardless of whether it is what the unit is reacting to.
+regardless of whether it is what the head unit is reacting to.
 
 To test: restart the bike, run once and let it end **gracefully**, then run again without touching
 the bike. If the second run connects, the abrupt kill was the cause.
 
-## Why the unit shows no CarPlay icon for us: the record has no `0x1101` (2026-08-14)
+## Why the head unit shows no CarPlay icon for us: the record has no `0x1101` (2026-08-14)
 
 **Superseded (2026-10-19):** a stock phone with no `0x1101` gets the icon once
 `CarPlayAvailability` carries its real Bluetooth address - see
@@ -287,20 +287,20 @@ profile descriptor list:
 **Our record carries none of that.** "Serial Port" appears 32 times in the iPhone capture and
 **zero** times in ours - BlueZ's default record for an external profile is the service class, the
 RFCOMM channel and little else. So a search for `0x1101` finds nothing on us however correct our
-service class UUID is, and the unit never concludes we do CarPlay. No icon, no probe, no session.
+service class UUID is, and the head unit never concludes we do CarPlay. No icon, no probe, no session.
 
-This also explains the shape of what the unit does to us: it browses, reads attribute `0x0001` off
+This also explains the shape of what the head unit does to us: it browses, reads attribute `0x0001` off
 each record, and stops. It never sends us the `0x1101` search it sends an iPhone, and never the
 targeted `...decacafe` search either.
 
-**The icon is a cached verdict, not a live probe** - the unit shows it for the iPhone even with the
+**The icon is a cached verdict, not a live probe** - the head unit shows it for the iPhone even with the
 phone out of range. So the sequence above is what CarPlay *initiation* looks like once a device is
 already classified; the classification itself happened earlier and stuck. Two consequences:
 
-- fixing the record is necessary but may not be sufficient - the unit is still holding "carjack does
+- fixing the record is necessary but may not be sufficient - the head unit is still holding "carjack does
   not do CarPlay" from whenever it last decided, and has to be made to re-evaluate;
 - the decision point is most likely the bond, when a unit browses a new device in full. carjack's
-  profiles only exist while it runs, so any pairing done with carjack stopped taught the unit the
+  profiles only exist while it runs, so any pairing done with carjack stopped taught the head unit the
   wrong thing.
 
 Not the device identity: we already present as Apple in the Device ID record - `Vendor: Apple, Inc.
@@ -311,8 +311,8 @@ Not the device identity: we already present as Apple in the Device ID record - `
 it replaces, never both) and attribute `0x0009` from `uuid_str` (the profile UUID), emitted only
 when `Version` is set. So `Version = 0x0102` yields a descriptor carrying our 128-bit UUID and a
 `0x1101` search still misses, while `Service = 0x1101` puts SPP in the service class list and the
-unit's `...decacafe` search misses instead. The iPhone's record needs both at once. Registering a
-second, standalone SPP profile does not help either: the unit's `0x1101` search must resolve to the
+head unit's `...decacafe` search misses instead. The iPhone's record needs both at once. Registering a
+second, standalone SPP profile does not help either: the head unit's `0x1101` search must resolve to the
 iAP record itself - its answer to `tid 5360` is a record whose service class is the 128-bit UUID.
 
 `device_profile()` now supplies `service_record` by hand - the iPhone's record, field for field.
@@ -339,28 +339,28 @@ BIKE->us  ff 55 02 00 ee 10    x50, once per second
 us->BIKE  (nothing)
 ```
 
-**Fifty SYNs, zero replies.** So the SDP record is settled: the unit classifies us, opens the
+**Fifty SYNs, zero replies.** So the SDP record is settled: the head unit classifies us, opens the
 channel, and speaks. The failure moved to our side.
 
 The cause was ordering. `wireless_carplay` awaited `find_target_device` *before* anything read the
 profile stream, and with the bond just removed that falls into discovery for up to `DISCOVERY_WAIT`
 (60 s). BlueZ answered the SABM - the profile is registered from `IapHost::start`, so the channel
 opens - but nothing was polling for the `ConnectRequest`, so it was neither accepted nor rejected.
-The unit talked into a socket no one was reading, for the whole discovery window, on every retry.
+The head unit talked into a socket no one was reading, for the whole discovery window, on every retry.
 
 Resolution now runs in a background task feeding a `watch<Option<Device>>`: the accept loop arms
 immediately and filters incoming requests against the configured *selector* rather than a resolved
 address, while paging and the MAC hand-off wait on the resolved device. Confirmed by log order -
 `Waiting for iAP2 connection requests` at 12.227, `Waiting for the configured head unit` at 12.232.
 
-The bond is currently removed, so the next test is: start carjack, then pair from the unit.
+The bond is currently removed, so the next test is: start carjack, then pair from the head unit.
 
-### The unit asks nothing else, and it decides 240 ms after bonding
+### The head unit asks nothing else, and it decides 240 ms after bonding
 
 The same capture contains the bond, so the whole classification is visible:
 
 ```
-95.672 - 96.040   phone browses the UNIT (all attributes, PnP, SDP server class)
+95.672 - 96.040   phone browses the HEAD UNIT (all attributes, PnP, SDP server class)
 96.144 - 99.613   pairing: IO capability, user confirmation, link key, auth complete
 99.850            UNIT -> phone: search 00000000-deca-fade-deca-deafdecacafe
 99.904 / 99.929   UNIT -> phone: search Serial Port (0x1101), twice
@@ -369,7 +369,7 @@ The same capture contains the bond, so the whole classification is visible:
 123.123           iAP2 SYN (ff 55 02 00 ee 10) - the session finally starts
 ```
 
-**Those three UUIDs are the only things the unit ever asks the phone for**, across the entire
+**Those three UUIDs are the only things the head unit ever asks the phone for**, across the entire
 capture. It never browses the phone's full service list, never reads its PnP/Device ID record,
 sends no Apple HFP extension (no `AT+XAPL`, no `AT+IPHONEACCEV` - only stock HF commands), and no
 vendor-specific exchange. Nothing the phone volunteers is involved either: the first probe lands
@@ -378,7 +378,7 @@ identification can be the source.
 
 So the memorised fact is built from SDP alone, at bond time, and the only query of the three we
 cannot answer is `0x1101`. That also fixes when the fix has to be in place: the record must be
-registered **before the unit bonds**, because that is the moment it decides.
+registered **before the head unit bonds**, because that is the moment it decides.
 
 ## Answering `ForceKeyFrame` properly (2026-08-13)
 
@@ -463,7 +463,7 @@ cannot tell a decoded stream from an ignored one, a photograph can.
 
 | | picture? |
 | --- | --- |
-| idle, no session | the unit's own home menu |
+| idle, no session | the head unit's own home menu |
 | `codec = hevc` (the default since 2026-08-12) | black |
 | `codec = h264` | **video** |
 | `codec = auto` after the fix (picks H264) | **video** |
@@ -484,8 +484,8 @@ Two things this run of experiments also settled:
 
 - **The bench never displayed anything through the HEVC period.** Its 1822-frame run with zero
   keyframe requests was a black screen the whole time. Silence from a head unit means nothing.
-- **The unit does not always switch to the CarPlay surface.** Three runs out of five showed video;
-  the other two sat on the unit's own home menu with identical logs and a healthy 30 fps stream. A
+- **The head unit does not always switch to the CarPlay surface.** Three runs out of five showed video;
+  the other two sat on the head unit's own home menu with identical logs and a healthy 30 fps stream. A
   blank screen is worth photographing twice before believing it.
 
 ## The encoder now produces the wire form directly (2026-08-13)
@@ -522,7 +522,7 @@ taken, because `dumpcap` needs a privilege this session does not have.
 
 `logs/cfmogo-12-08-2053.log` + capture. Still black, but the behaviour changed for the first time
 in the whole investigation: **407 `ForceKeyFrame` requests, one per frame at 30/s**, where every
-previous run produced exactly one. The unit is now looking at our frames and rejecting each one,
+previous run produced exactly one. The head unit is now looking at our frames and rejecting each one,
 rather than ignoring the stream.
 
 The capture says what it is rejecting. Frame by frame, off the wire:
@@ -534,7 +534,7 @@ The capture says what it is rejecting. Frame by frame, off the wire:
 #6 op=0 sp=000000  21528 b   <- the keyframe it asked for: unmarked, no config
 ```
 
-...and the flood starts right after #6. The unit asked for a keyframe, we sent one, and on the wire
+...and the flood starts right after #6. The head unit asked for a keyframe, we sent one, and on the wire
 it was **indistinguishable from a delta frame**: no config frame, no `0x10` marker. Only the first
 keyframe of a session ever carried either, because catplay deduplicated the config against the last
 one it sent - and the config is what the marker follows.
@@ -587,7 +587,7 @@ codecs, both units, every run - rather than the bike alone.
 
 Two more bike runs, both black (`logs/cfmoto-12-08-1942.*` with a capture, `cfmoto-12-08-1945.log`
 at trace). Nothing in either log is wrong: HEVC picked, VBR, view rect sent, first keyframe 88 ms
-in, the unit acknowledges the screen SETUP, asks for one keyframe, then feeds back happily for the
+in, the head unit acknowledges the screen SETUP, asks for one keyframe, then feeds back happily for the
 rest of the run. It even moves iAP2 onto the AirPlay control channel two seconds after the WiFi
 handover and completes the link there (detect, SYN, SYN+ACK, ACK).
 
@@ -638,7 +638,7 @@ anyway. VBR shows too - 2-3 KB frames where CBR sent 12500 every time. Sending n
 unit with no `displayPanels` is correctly a no-op.
 
 **What this does not prove is that the bench displays a picture** - exactly the trap the bike set.
-Nothing in a log distinguishes a decoded stream from an ignored one; only eyes on the unit do.
+Nothing in a log distinguishes a decoded stream from an ignored one; only eyes on the head unit do.
 
 ### The Bluetooth teardown: do what the phone does, and stop calling it an error
 
@@ -959,8 +959,8 @@ below. The bike answers `0x4300` for `FE:B2:9F:ED:EA:72` and for an invented `FE
 and refuses to answer at all for the permanent `4c:79:6e:da:29:47`, which differs from the
 adapter's Bluetooth address only in the last byte. An iPhone's globally administered address is
 answered fine, so the administered bit is not the discriminator - it reads like a collision with
-our own Bluetooth identity in the unit's device table. `afd6605` introduced that address and broke
-`0x4300` outright: the unit acks the request and never sends `0x4301`.
+our own Bluetooth identity in the head unit's device table. `afd6605` introduced that address and broke
+`0x4300` outright: the head unit acks the request and never sends `0x4301`.
 
 **Current lead: carjack was connecting to AirPlay uninvited.** A head unit invites the phone -
 it watches for a `_carplay-ctrl._tcp` Bonjour record and only then sends `GET /ctrl-int/1/connect`
@@ -1049,12 +1049,12 @@ pass it, and take `/pair-verify`.
   Device), mux ownership, and four different ways of resetting a link. The findings and the
   measurements are in `CLAUDE.md`; do not re-run them.
 - **The dead first channel after a fresh bond was ours, and is fixed.** `set_trusted(false)` made
-  BlueZ refuse the unit's inbound profile connections - HFP answered `DM`, AVDTP and HID refused
-  with "security block" - and the unit will not drive iAP until its profile set is up. Trusted:
+  BlueZ refuse the head unit's inbound profile connections - HFP answered `DM`, AVDTP and HID refused
+  with "security block" - and the head unit will not drive iAP until its profile set is up. Trusted:
   **6/6 clean first bonds, against 1/17 untrusted**.
 - **The `Connection reset by peer` on iAP2 after the WiFi handover is correct behaviour**, not a
   fault. CarPlay moves the session onto WiFi - frames tunnel inside AirPlay `iAPSendMessage`
-  commands - and the phone asks the accessory to drop Bluetooth with `disableBluetooth`. The unit
+  commands - and the phone asks the accessory to drop Bluetooth with `disableBluetooth`. The head unit
   does the same to a real iPhone.
 - **Neither unit implements that tunnel.** The bench AUTO BOX and the bike both report
   `extended_features = [VocoderInfo]`. carjack has the transport (`libcarjack/src/iap2_tunnel.rs`)
@@ -1138,7 +1138,7 @@ Two real defects surfaced and fixed while standing this up against a live iwd on
   empty `CapabilityBoundingSet=`. `write_profile` writes 0640 and `fchown`s only the *group*, taken
   from the directory itself - setting a group the process is already in needs no privilege, which
   is what makes the bullet above (iwd reading by ordinary permissions) work without root ownership.
-  The group has to exist before iwd starts or the unit fails, so it is created in three places: the
+  The group has to exist before iwd starts or the head unit fails, so it is created in three places: the
   deb's `debian/postinst`, `just install-carjack-service`, and the image build's
   `config-carjack.conf`.
 - **The HCI sidecar absorbed it** rather than a second binary being added:
@@ -1269,7 +1269,7 @@ stands:
   configured one are rejected.
 
 **Lesson worth keeping:** `Accessory connection r=Ok(())` does **not** mean our page made the link -
-it resolves Ok just as readily when the unit connected first. Only HCI (`Sent Create Connection` vs
+it resolves Ok just as readily when the head unit connected first. Only HCI (`Sent Create Connection` vs
 `Rcvd Connect Request`, plus the `Connect Complete` status) answers who paged.
 
 And from the session/video side:
@@ -1281,7 +1281,7 @@ And from the session/video side:
 2. **The keyframe gate moved back after `setup_screen`.** Putting it before was my regression:
    nothing may sit between `assert_modes` and SETUP. `cfmoto_12` sent SETUP 2 ms after the modes
    assertion and the accessory answered RECORD; `cfmoto_13` and both `cfmoto_14` sessions delayed it and
-   lost the unit within ~2 s.
+   lost the head unit within ~2 s.
 3. **Inbound iAP2 connections are filtered by the configured address.** carjack was accepting a
    page from *any* bonded head unit - in `cfmoto_14` it streamed to the bench AUTO BOX 58 s after
    the bike's link failed.
@@ -1301,13 +1301,13 @@ dropped to backpressure and no keyframe stalls.
 Three things had to be true at once, and each was individually fatal:
 
 1. **The iAP SDP record must live for the process, not the session** (`IapHost`). Registered per
-   session, it blinked out between sessions; the unit probed in that window, saw no iAP service and
+   session, it blinked out between sessions; the head unit probed in that window, saw no iAP service and
    fell back to **Android Auto** (`bench_4`).
 2. **Start from a fresh link, and never commit to a stale one.** A pre-existing link is stale and
    never carries the switch; it is cycled at session start. carjack tries one channel per attempt -
    concurrent racing was built and removed as unexercised and slower.
 3. **Recovery must call plain `device.connect()`.** Bringing up the whole profile set (HFP above
-   all) is what makes the unit open its channel. `connect_profile` first leaves a connection in
+   all) is what makes the head unit open its channel. `connect_profile` first leaves a connection in
    progress so the follow-up `connect()` fails `br-connection-busy` and HFP never comes up.
 
 Startup no longer waits out a guaranteed failure. A link that predates the session is stale, so it

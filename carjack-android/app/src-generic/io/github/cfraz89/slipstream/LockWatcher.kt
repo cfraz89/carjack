@@ -12,9 +12,9 @@ import android.util.Log
 
 /**
  * The phone's lock screen, during a session. While it's up, Android shows only windows that may
- * show over it (the launcher) on the unit's display, which shares the phone's display group, and
+ * show over it (the launcher) on the head unit's display, which shares the phone's display group, and
  * every other app draws black. A lock screen that needs no PIN - a trusted device's - is taken
- * away; one that does gets [LockedActivity] on the unit and a notification on the phone, both gone
+ * away; one that does gets [LockedActivity] on the head unit and a notification on the phone, both gone
  * at unlock.
  */
 object LockWatcher {
@@ -31,7 +31,7 @@ object LockWatcher {
     private var lastDismiss = 0L
     private var shown = false
 
-    /** From the unit's display opening. */
+    /** From the head unit's display opening. */
     fun watch(context: Context) {
         handler.post {
             this.context = context.applicationContext
@@ -65,7 +65,7 @@ object LockWatcher {
                 }
                 !shown -> {
                     shown = true
-                    Log.i(TAG, "Phone locked; the unit shows so until it's unlocked")
+                    Log.i(TAG, "Phone locked; the head unit shows so until it's unlocked")
                     ShizukuDisplay.launch(LOCKED)
                     notify(ctx)
                 }
@@ -95,7 +95,7 @@ object LockWatcher {
             Notification.Builder(context, CHANNEL)
                 .setSmallIcon(Variant.NOTIFICATION_ICON)
                 .setContentTitle("Phone locked")
-                .setContentText("Unlock it to use apps on the unit")
+                .setContentText("Unlock it to use apps on the head unit")
                 .setContentIntent(Variant.openApp(context))
                 .setAutoCancel(true)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)

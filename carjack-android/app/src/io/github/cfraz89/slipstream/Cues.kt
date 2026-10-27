@@ -7,7 +7,7 @@ import android.graphics.Paint
 import android.graphics.Path
 
 /**
- * Badges the [Relay] flashes over the picture when the unit's switchgear goes back or selects: in
+ * Badges the [Relay] flashes over the picture when the head unit's switchgear goes back or selects: in
  * an app that shows no focus, nothing else would answer the press.
  */
 object Cues {

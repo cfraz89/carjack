@@ -74,7 +74,7 @@ class MainActivity : ComponentActivity() {
             Manifest.permission.BLUETOOTH_ADVERTISE,
             Manifest.permission.NEARBY_WIFI_DEVICES,
             Manifest.permission.POST_NOTIFICATIONS,
-            // The phone's wallpaper, for the launcher on the unit.
+            // The phone's wallpaper, for the launcher on the head unit.
             Manifest.permission.READ_MEDIA_IMAGES,
         )
 
@@ -174,14 +174,14 @@ class MainActivity : ComponentActivity() {
         }
         when (dialog) {
             Dialog.UNIT -> ChoiceDialog(
-                "Unit", unitNames, unitIndex(), { dialog = null },
+                "Head unit", unitNames, unitIndex(), { dialog = null },
             ) {
                 Variant.prefs(this).edit().putString("target", unitAddresses[it]).apply()
                 dialog = null
                 revision++
             }
             Dialog.SIZE -> ChoiceDialog(
-                "Scale on the unit", SIZES, densityIndex(), { dialog = null },
+                "Scale on the head unit", SIZES, densityIndex(), { dialog = null },
             ) {
                 Variant.prefs(this).edit()
                     .putString("density", if (DENSITIES[it] == 0) "" else DENSITIES[it].toString())
@@ -273,13 +273,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        // Locked, the phone hides every app on the unit but the launcher; a trusted unit keeps it
+        // Locked, the phone hides every app on the head unit but the launcher; a trusted unit keeps it
         // unlocked while connected. Gone once that's been seen working.
         val secure = getSystemService(KeyguardManager::class.java).isDeviceSecure
         if (unitAddresses.size > 1 && !Variant.prefs(this).getBoolean("trust_seen", false) &&
             secure
         ) {
-            steps += Step("Make the unit a trusted device, to stay unlocked", "Settings",
+            steps += Step("Make the head unit a trusted device, to stay unlocked", "Settings",
                 SetupHelp.trustedDevice, ::openSecuritySettings)
         }
         // The lock hold keeps a screen timeout from locking, but not the power button.
@@ -287,22 +287,22 @@ class MainActivity : ComponentActivity() {
             Variant.prefs(this).getBoolean(Variant.POWER_LOCKS, false)
         ) {
             steps += Step(
-                "The power button locks the phone, hiding the unit's apps: turn off \"Power " +
+                "The power button locks the phone, hiding the head unit's apps: turn off \"Power " +
                     "button instantly locks\"",
                 "Settings",
                 SetupHelp.powerButton,
                 ::openSecuritySettings,
             )
         }
-        // An app inside a VPN can't reach the unit's Wi-Fi: the stream times out.
+        // An app inside a VPN can't reach the head unit's Wi-Fi: the stream times out.
         if (inVpn()) {
             // Excluding an app is the VPN app's own setting; Android's VPN page only has on/off.
             val tailscale = packageManager.getLaunchIntentForPackage(TAILSCALE_PACKAGE)
             steps += if (tailscale != null) {
-                Step("Tailscale blocks the unit: exclude Slipstream in split tunneling",
+                Step("Tailscale blocks the head unit: exclude Slipstream in split tunneling",
                     "Tailscale", SetupHelp.tailscale) { startActivity(tailscale) }
             } else {
-                Step("A VPN blocks the unit: exclude Slipstream, or turn it off", "VPN", SetupHelp.vpn) {
+                Step("A VPN blocks the head unit: exclude Slipstream, or turn it off", "VPN", SetupHelp.vpn) {
                     startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
                 }
             }
@@ -310,7 +310,7 @@ class MainActivity : ComponentActivity() {
         return steps
     }
 
-    /** First-time pairing, step by step: the unit searches, the phone is found, codes match. */
+    /** First-time pairing, step by step: the head unit searches, the phone is found, codes match. */
     @Composable
     private fun PairCard() {
         val colors = MaterialTheme.colorScheme
@@ -332,9 +332,9 @@ class MainActivity : ComponentActivity() {
                 )
             }
             listOf(
-                "On the unit, add a phone",
+                "On the head unit, add a phone",
                 "Make this phone visible",
-                "Pick it on the unit, and confirm the code",
+                "Pick it on the head unit, and confirm the code",
             ).forEachIndexed { index, step ->
                 Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -394,7 +394,7 @@ class MainActivity : ComponentActivity() {
     private fun SettingsCard() {
         val context = this
         SectionCard(MaterialTheme.colorScheme.surfaceContainer) {
-            ListRow(Leading.Glyph(R.drawable.ic_sl_unit), "Unit", unitNames[unitIndex()],
+            ListRow(Leading.Glyph(R.drawable.ic_sl_unit), "Head unit", unitNames[unitIndex()],
                 trailing = { Chevron() }) { dialog = Dialog.UNIT }
 
             val app = Choices.current(context)
@@ -431,7 +431,7 @@ class MainActivity : ComponentActivity() {
             val navBar = Variant.setting(context, "nav_bar", "false").toBoolean()
             ListRow(
                 Leading.Glyph(R.drawable.ic_sl_home), "Back and home bar",
-                "Along the bottom of the unit. From next session", trailing = { RowSwitch(navBar) },
+                "Along the bottom of the head unit. From next session", trailing = { RowSwitch(navBar) },
             ) {
                 Variant.prefs(context).edit().putString("nav_bar", (!navBar).toString()).apply()
                 revision++
@@ -481,7 +481,7 @@ class MainActivity : ComponentActivity() {
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     Text(
-                        "A few days of logs, with unit names and Bluetooth addresses." +
+                        "A few days of logs, with head unit names and Bluetooth addresses." +
                             if (upload) "" else " Send only to whoever's looking into it.",
                     )
                     if (upload) {

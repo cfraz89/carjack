@@ -14,8 +14,8 @@ import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * The phone's screen going dark without the phone going to sleep, while the unit's display is
- * up: asleep, Android drops the touches sent to the unit, whose display shares the phone's
+ * The phone's screen going dark without the phone going to sleep, while the head unit's display is
+ * up: asleep, Android drops the touches sent to the head unit, whose display shares the phone's
  * display group, and a lock screen would hide its apps. So for the session Android's own timeout
  * is held off and the power button's short press does nothing; in their place the panel is
  * switched off (`cmd display power-off`) once the phone's touchscreen has been idle for the
@@ -172,8 +172,8 @@ class PanelKeeper(shellContext: Context) {
     /**
      * A session started with the phone asleep (in a pocket, as it would be) gets no touches
      * through, so the phone wakes - dark, as it was. Also the lock screen goes where it can: it
-     * hides every app on the unit's display but the launcher, which may show over it. That's only
-     * where it isn't secured, or Smart Lock trusts the unit; elsewhere this just asks for unlock.
+     * hides every app on the head unit's display but the launcher, which may show over it. That's only
+     * where it isn't secured, or Smart Lock trusts the head unit; elsewhere this just asks for unlock.
      */
     @Synchronized
     private fun wakeForSession() {
@@ -253,14 +253,14 @@ class PanelKeeper(shellContext: Context) {
         save(brightnessWhileDark ?: "")
         put(SYSTEM, BRIGHTNESS_MODE, "0")
         run("cmd", "display", "power-off", "0")
-        Log.i(TAG, "Phone panel off; the unit carries on")
+        Log.i(TAG, "Phone panel off; the head unit carries on")
     }
 
     /**
      * Back as it was: the brightness mode the user had, and the panel's proper state. power-reset
      * alone is refused (silently: "runnable is null") when the display manager has the panel down
      * as on already - nothing to change, as it sees it. Off first makes the reset a change it acts
-     * on. (Not a sleep and wake: that brings up the lock screen, over the unit's apps.)
+     * on. (Not a sleep and wake: that brings up the lock screen, over the head unit's apps.)
      */
     private fun lit() {
         panelOff = false

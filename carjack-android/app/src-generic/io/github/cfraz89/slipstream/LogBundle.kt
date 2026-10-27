@@ -86,7 +86,7 @@ object LogBundle {
         zip.closeEntry()
     }
 
-    /** Lines that may carry the unit's WiFi password. */
+    /** Lines that may carry the head unit's WiFi password. */
     private fun secret(line: String) = "passphrase=" in line || "connect-network" in line
 
     private fun add(zip: ZipOutputStream, name: String, bytes: ByteArray) {

@@ -27,7 +27,7 @@ import androidx.compose.ui.unit.sp
 import java.lang.ref.WeakReference
 
 /**
- * The unit's screen while the phone is locked ([LockWatcher]): nothing else on it can draw, so it
+ * The head unit's screen while the phone is locked ([LockWatcher]): nothing else on it can draw, so it
  * says why rather than showing a launcher of black apps. Closes itself at unlock.
  */
 class LockedActivity : ComponentActivity() {

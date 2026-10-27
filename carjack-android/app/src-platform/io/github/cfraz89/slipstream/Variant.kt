@@ -116,7 +116,7 @@ object Variant {
 
     fun isConnected(device: BluetoothDevice) = device.isConnected
 
-    /** Page the unit; false where this build can't. */
+    /** Page the head unit; false where this build can't. */
     fun connect(device: BluetoothDevice): Boolean = try {
         device.connect()
         true
@@ -133,7 +133,7 @@ object Variant {
         }
     }
 
-    /** Never needed: this build pages the unit. */
+    /** Never needed: this build pages the head unit. */
     fun cycleBluetooth() = false
 
     fun bluetoothAddress(context: Context, adapter: BluetoothAdapter): String? = adapter.address
@@ -161,7 +161,7 @@ object Variant {
     fun touch(context: Context, viewX: Int, viewY: Int, viewWidth: Int, viewHeight: Int): Touch =
         TouchInjector(viewX, viewY, viewWidth, viewHeight)
 
-    /** A key from the unit's switchgear, with back and select answered on the picture. */
+    /** A key from the head unit's switchgear, with back and select answered on the picture. */
     fun switchgear(context: Context, code: Int, down: Boolean) {
         if (down && (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_DPAD_CENTER)) {
             ScreenStream.current?.cue(code == KeyEvent.KEYCODE_BACK)
@@ -169,7 +169,7 @@ object Variant {
         key(context, code, down)
     }
 
-    /** A key onto the board's own display, which is what the unit mirrors; Home included. */
+    /** A key onto the board's own display, which is what the head unit mirrors; Home included. */
     fun key(context: Context, code: Int, down: Boolean) {
         val now = SystemClock.uptimeMillis()
         val event = KeyEvent(

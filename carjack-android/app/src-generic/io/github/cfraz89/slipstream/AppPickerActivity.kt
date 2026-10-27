@@ -16,7 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 
-/** Every app with a launcher icon, by name, for the unit to open on connect. */
+/** Every app with a launcher icon, by name, for the head unit to open on connect. */
 class AppPickerActivity : ComponentActivity() {
     companion object {
         const val EXTRA_PACKAGE = "package"

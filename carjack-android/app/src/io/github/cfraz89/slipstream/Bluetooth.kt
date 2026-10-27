@@ -20,8 +20,8 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * The Bluetooth side a phone shows a CarPlay unit: discoverable, the iAP service the unit dials in
- * on, and paging the unit to get it to dial. How much of that happens without asking is up to the
+ * The Bluetooth side a phone shows a CarPlay unit: discoverable, the iAP service the head unit dials in
+ * on, and paging the head unit to get it to dial. How much of that happens without asking is up to the
  * [Variant].
  */
 class Bluetooth(
@@ -56,7 +56,7 @@ class Bluetooth(
     private val adapter: BluetoothAdapter =
         context.getSystemService(BluetoothManager::class.java).adapter
     @Volatile private var lastLinked: BluetoothDevice? = null
-    /** The unit's link has just come up: when it dials iAP, if it is going to. */
+    /** The head unit's link has just come up: when it dials iAP, if it is going to. */
     private var onUnitLinked: (BluetoothDevice) -> Unit = {}
 
     /** When each device was last asked for its services. */
@@ -91,7 +91,7 @@ class Bluetooth(
         if (adapter.isEnabled) Variant.makeDiscoverable(adapter) else adapter.enable()
     }
 
-    /** Whether we opened this channel rather than the unit. */
+    /** Whether we opened this channel rather than the head unit. */
     fun wasDialled(socket: BluetoothSocket) = dialled.remove(socket)
 
     /**
@@ -234,7 +234,7 @@ class Bluetooth(
         device.createBond()
     }
 
-    /** Drop any link and page again, so the unit offers a fresh iAP channel. */
+    /** Drop any link and page again, so the head unit offers a fresh iAP channel. */
     fun relink(device: BluetoothDevice) {
         Log.i(TAG, "Relinking ${device.address}")
         when {
@@ -248,8 +248,8 @@ class Bluetooth(
     }
 
     /**
-     * Open the unit's own iAP service, for where it won't dial us and we can't page it. The
-     * channel is handed on as if the unit had dialled.
+     * Open the head unit's own iAP service, for where it won't dial us and we can't page it. The
+     * channel is handed on as if the head unit had dialled.
      */
     fun dial(device: BluetoothDevice) {
         val thread = Thread({
@@ -276,7 +276,7 @@ class Bluetooth(
         Variant.onLinked(context, device != null)
     }
 
-    /** The unit's link is up, as far as an app can tell. */
+    /** The head unit's link is up, as far as an app can tell. */
     fun isLinked(device: BluetoothDevice) = device == lastLinked
 
     fun page(device: BluetoothDevice) {

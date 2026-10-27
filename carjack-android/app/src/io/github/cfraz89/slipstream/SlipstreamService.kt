@@ -30,12 +30,12 @@ class SlipstreamService : Service() {
         const val ACTION_STOP = "io.github.cfraz89.slipstream.STOP"
         /** Try again after giving up on a unit. */
         const val ACTION_RETRY = "io.github.cfraz89.slipstream.RETRY"
-        const val WAITING = "Waiting for the unit"
+        const val WAITING = "Waiting for the head unit"
 
         /** How often to page an absent unit, and how long to wait before cycling a link that is up. */
         private const val OFFER_WAIT_MS = 20_000L
         private const val OFFER_WAIT_MAX_MS = 60_000L
-        /** Once the unit's link is up, how long it gets to dial iAP before we dial it. */
+        /** Once the head unit's link is up, how long it gets to dial iAP before we dial it. */
         private const val UNIT_DIAL_GRACE_MS = 8_000L
         /** How long a session on a channel we dialled is still setting up iAP2, and can give way. */
         private const val DIALLED_SETUP_MS = 6_000L
@@ -72,7 +72,7 @@ class SlipstreamService : Service() {
     private var cyclesLeft = MAX_CYCLES
     /** Sessions in a row that never got to video. */
     private var failures = 0
-    /** The unit given up on, for Retry. */
+    /** The head unit given up on, for Retry. */
     private var gaveUpOn: BluetoothDevice? = null
     private lateinit var stopAction: Notification.Action
     private lateinit var retryAction: Notification.Action
@@ -148,7 +148,7 @@ class SlipstreamService : Service() {
         }
     }
 
-    /** A fresh start with the unit given up on: the failure count cleared, its link renewed. */
+    /** A fresh start with the head unit given up on: the failure count cleared, its link renewed. */
     private fun retry() {
         failures = 0
         cyclesLeft = MAX_CYCLES
@@ -163,14 +163,14 @@ class SlipstreamService : Service() {
         bluetooth.relink(unit)
     }
 
-    /** Without a session: find the unit, and page it until it dials in. */
+    /** Without a session: find the head unit, and page it until it dials in. */
     private val watch = object : Runnable {
         override fun run() {
             handler.postDelayed(this, 2000)
             if (session != null) return
             val unit = bluetooth.headUnit()
             if (!Variant.canPage()) {
-                // Nothing to do until the unit links: its link coming up is the cue. A unit given
+                // Nothing to do until the head unit links: its link coming up is the cue. A unit given
                 // up on is left alone until it relinks or the user retries.
                 if (unit != null && bluetooth.isLinked(unit) && gaveUpOn == null) renewLink(unit)
                 return
@@ -182,7 +182,7 @@ class SlipstreamService : Service() {
                 }
                 return
             }
-            // Android's stack brings its own profiles up on a page, which is the unit's cue to dial
+            // Android's stack brings its own profiles up on a page, which is the head unit's cue to dial
             // iAP; the link is only cycled if that turns out not to be enough.
             if (now() - waitingSince < offerWait) return
             waitingSince = now()
@@ -220,7 +220,7 @@ class SlipstreamService : Service() {
         session?.let { current ->
             // A unit carries iAP2 on the channel it opened over one we dialled, if it opens one.
             if (sessionDialled && !dialled && now() - sessionStarted < DIALLED_SETUP_MS) {
-                Log.i(TAG, "The unit dialled in; dropping the channel we dialled")
+                Log.i(TAG, "The head unit dialled in; dropping the channel we dialled")
                 session = null
                 current.stop()
             } else {
@@ -244,9 +244,9 @@ class SlipstreamService : Service() {
             } else {
                 failures++
             }
-            // The unit only dials iAP on a fresh link, and stays connected after a session
+            // The head unit only dials iAP on a fresh link, and stays connected after a session
             // ends; cycle it so the next one can start - unless they keep failing, when it
-            // waits for the unit to reconnect by itself.
+            // waits for the head unit to reconnect by itself.
             if (failures < MAX_FAILURES) {
                 bluetooth.relink(unit)
             } else {

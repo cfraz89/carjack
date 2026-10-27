@@ -17,8 +17,8 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 /**
- * The weather where the phone is, from Open-Meteo (free, no key): the air temperature the unit
- * doesn't show, and a word for the sky. Approximate location only, and not at all without the
+ * The weather where the phone is, from Open-Meteo (free, no key): the air temperature the head
+ * unit doesn't show, and a word for the sky. Approximate location only, and not at all without the
  * permission.
  */
 object Weather {
@@ -70,7 +70,7 @@ object Weather {
 
     /**
      * A network with internet. Not the process default: during a session the app is bound to the
-     * unit's WiFi, which has none.
+     * head unit's WiFi, which has none.
      */
     private fun internet(context: Context): Network? {
         val connectivity = context.getSystemService(ConnectivityManager::class.java)

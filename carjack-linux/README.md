@@ -1,13 +1,13 @@
 # carjack for Linux
 
 Turns a Linux machine into a wireless CarPlay source. carjack pairs with the head unit over
-Bluetooth, joins its WiFi, and streams a screen to it over AirPlay, with the unit's touchscreen
+Bluetooth, joins its WiFi, and streams a screen to it over AirPlay, with the head unit's touchscreen
 and buttons coming back as input. What it streams is either an app running in carjack's own
 headless compositor (Waydroid by default) or your existing Wayland desktop.
 
 ## Requirements
 
-- Bluetooth through **BlueZ**, and a WiFi adapter that can join the unit's access point, both
+- Bluetooth through **BlueZ**, and a WiFi adapter that can join the head unit's access point, both
   managed by **NetworkManager**. A second adapter can keep the machine's own uplink.
 - **PipeWire/WirePlumber**, configured to leave the hands-free gateway role to carjack (below).
 - **GStreamer** 1.24+ with an H.264 or HEVC encoder: VA-API, V4L2, NVENC, x264/x265 or
@@ -26,7 +26,7 @@ just deb              # an arm64 .deb, built in a Debian container
 
 ## Setup
 
-1. Hand the hands-free gateway over from PipeWire, which otherwise answers the unit's identity
+1. Hand the hands-free gateway over from PipeWire, which otherwise answers the head unit's identity
    check with an error:
 
    ```sh
@@ -39,7 +39,7 @@ just deb              # an arm64 .deb, built in a Debian container
 3. Copy [`config.toml.example`](config.toml.example) to `~/.config/carjack/config.toml` and adjust
    it. The defaults take any CarPlay unit in range and run Waydroid.
 
-4. Pair the machine with the unit from the unit's phone menu, as you would an iPhone.
+4. Pair the machine with the head unit from the head unit's phone menu, as you would an iPhone.
 
 ## Run
 
@@ -52,7 +52,7 @@ With the `.deb`, the service is installed but left disabled: enable it with
 `systemctl --user enable --now carjack`. It reads `/etc/carjack/config.toml` when the user has no
 config of their own.
 
-carjack then waits for the unit, starts a session when it connects, and retries on its own when a
+carjack then waits for the head unit, starts a session when it connects, and retries on its own when a
 session drops.
 
 ### Config portal

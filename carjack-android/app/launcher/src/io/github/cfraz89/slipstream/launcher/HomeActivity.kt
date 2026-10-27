@@ -292,7 +292,7 @@ class HomeActivity : ComponentActivity() {
         }
     }
 
-    /** Time and date; the weather where the phone is (the unit shows none) and its battery. */
+    /** Time and date; the weather where the phone is (the head unit shows none) and its battery. */
     @Composable
     private fun Status() {
         val now = rememberMinute()

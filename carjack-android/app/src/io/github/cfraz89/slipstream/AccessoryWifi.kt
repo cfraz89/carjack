@@ -87,7 +87,7 @@ class AccessoryWifi(context: Context, private val handler: Handler) {
     private var multicast: WifiManager.MulticastLock? = null
     private var callback: ConnectivityManager.NetworkCallback? = null
     private var pending: Result? = null
-    /** The unit's AP while the phone's WiFi is switched over to it, for leave() to undo. */
+    /** The head unit's AP while the phone's WiFi is switched over to it, for leave() to undo. */
     private var primarySsid: String? = null
 
     /** Runs on the handler; [result] is answered there once. */

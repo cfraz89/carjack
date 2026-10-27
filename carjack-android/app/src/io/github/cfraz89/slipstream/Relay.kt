@@ -267,7 +267,7 @@ void main() { gl_FragColor = texture2D(cue, uv) * alpha; }
         }
     }
 
-    /** The picture as the unit next gets it, [CAPTURE_WIDTH] wide, to [sink]. */
+    /** The picture as the head unit next gets it, [CAPTURE_WIDTH] wide, to [sink]. */
     fun capture(sink: (Bitmap) -> Unit) {
         handler.post {
             if (texture == null || !haveFrame) return@post

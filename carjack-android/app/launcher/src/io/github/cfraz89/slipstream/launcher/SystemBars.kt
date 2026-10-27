@@ -7,10 +7,10 @@ import android.view.WindowInsetsController
 
 /**
  * Keeps the status and navigation bars out of the way until a swipe in from their edge brings
- * them back - on the unit. On the phone's own screen, opened from its app drawer, they stay.
+ * them back - on the head unit. On the phone's own screen, opened from its app drawer, they stay.
  */
 object SystemBars {
-    /** Whether [activity] is on the phone's own screen rather than the unit's. */
+    /** Whether [activity] is on the phone's own screen rather than the head unit's. */
     fun onPhone(activity: Activity) = activity.display?.displayId == Display.DEFAULT_DISPLAY
 
     fun hide(activity: Activity) {

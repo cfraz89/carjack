@@ -7,11 +7,11 @@ import android.util.Log
 import android.view.KeyEvent
 
 /**
- * The unit's switchgear, in one of two modes. System: up and down move focus through everything
+ * The head unit's switchgear, in one of two modes. System: up and down move focus through everything
  * on the screen (Shift+Tab, Tab), left is back and right selects. Remote: plain arrows, for apps
  * with remotes of their own (DMD2) that map the keys themselves. A long press on right switches
  * by hand; an app in the remote list switches it on while it's showing. Each change is flashed on
- * the unit.
+ * the head unit.
  */
 object Switchgear {
     private const val TAG = "carjack"
@@ -20,7 +20,7 @@ object Switchgear {
     val DEFAULT_APPS = setOf("com.thorkracing.dmd2launcher")
     private const val LONG_PRESS_MS = 600L
     private const val WATCH_MS = 1000L
-    /** The unit lets go of select within a few ms; held a moment, the press shows. */
+    /** The head unit lets go of select within a few ms; held a moment, the press shows. */
     private const val SELECT_HOLD_MS = 150L
 
     /** Keys arrive on the core's threads and the top app is a binder call away: all of it here. */
@@ -37,7 +37,7 @@ object Switchgear {
         Variant.prefs(context).edit().putStringSet(PREF_APPS, apps).apply()
     }
 
-    /** From the unit's display opening: follows the app on it, starting in system mode. */
+    /** From the head unit's display opening: follows the app on it, starting in system mode. */
     fun watch(context: Context) {
         handler.post {
             this.context = context.applicationContext

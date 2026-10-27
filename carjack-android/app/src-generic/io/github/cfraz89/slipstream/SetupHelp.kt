@@ -4,9 +4,9 @@ package io.github.cfraz89.slipstream
 object SetupHelp {
     val installShizuku = Help(
         "Install Shizuku",
-        "Shizuku lets Slipstream do what an ordinary app can't: give the unit a screen of its own " +
-            "size, pass the unit's touches and buttons to it, and switch the phone's Wi-Fi over to " +
-            "the unit's. It's free and open source.",
+        "Shizuku lets Slipstream do what an ordinary app can't: give the head unit a screen of its own " +
+            "size, pass the head unit's touches and buttons to it, and switch the phone's Wi-Fi over to " +
+            "the head unit's. It's free and open source.",
         listOf(
             "Tap Install to open Shizuku in the Play Store, and install it.",
             "Open Shizuku and follow \"Start via Wireless debugging\". It walks you through " +
@@ -37,7 +37,7 @@ object SetupHelp {
 
     val permissions = Help(
         "Permissions",
-        "Bluetooth and nearby devices to find and talk to the unit, and to join its Wi-Fi; " +
+        "Bluetooth and nearby devices to find and talk to the head unit, and to join its Wi-Fi; " +
             "notifications for Slipstream's status; photos for the launcher's wallpaper.",
         listOf(
             "Tap Allow, and allow each one Android asks about.",
@@ -47,27 +47,27 @@ object SetupHelp {
 
     val bluetooth = Help(
         "Bluetooth",
-        "The unit finds the phone, and starts each session, over Bluetooth.",
+        "The head unit finds the phone, and starts each session, over Bluetooth.",
         listOf("Tap Turn on, or turn Bluetooth on from Quick Settings."),
     )
 
     val trustedDevice = Help(
         "Trusted device",
-        "While the phone is locked, Android hides every app on the unit but Slipstream's own " +
-            "screens. With the unit as a trusted device, the phone needs no PIN while it's " +
+        "While the phone is locked, Android hides every app on the head unit but Slipstream's own " +
+            "screens. With the head unit as a trusted device, the phone needs no PIN while it's " +
             "connected, so Slipstream can clear the lock screen by itself.",
         listOf(
-            "Connect to the unit, so it's in range and on Bluetooth.",
+            "Connect to the head unit, so it's in range and on Bluetooth.",
             "Tap Settings, or open Settings and search for \"Trusted devices\".",
-            "Under Extend Unlock → Trusted devices, add a trusted device and pick the unit.",
+            "Under Extend Unlock → Trusted devices, add a trusted device and pick the head unit.",
             "Unlock the phone once after adding it: trust starts from an unlock.",
         ),
     )
 
     val powerButton = Help(
         "Power button lock",
-        "Slipstream holds off the phone's own locking while the unit is connected, but a power " +
-            "button set to lock instantly still locks it, which hides the unit's apps.",
+        "Slipstream holds off the phone's own locking while the head unit is connected, but a power " +
+            "button set to lock instantly still locks it, which hides the head unit's apps.",
         listOf(
             "Tap Settings, then Device unlock.",
             "Tap the gear beside Screen lock.",
@@ -77,7 +77,7 @@ object SetupHelp {
 
     val tailscale = Help(
         "Tailscale",
-        "With Tailscale on, Slipstream's traffic goes through it and can't reach the unit's Wi-Fi, " +
+        "With Tailscale on, Slipstream's traffic goes through it and can't reach the head unit's Wi-Fi, " +
             "so the picture never starts. Excluding Slipstream keeps Tailscale for everything else.",
         listOf(
             "Tap Tailscale, then open its settings.",
@@ -89,7 +89,7 @@ object SetupHelp {
 
     val vpn = Help(
         "VPN",
-        "With a VPN on, Slipstream's traffic goes through it and can't reach the unit's Wi-Fi, " +
+        "With a VPN on, Slipstream's traffic goes through it and can't reach the head unit's Wi-Fi, " +
             "so the picture never starts.",
         listOf(
             "Open your VPN app's settings.",

@@ -13,7 +13,7 @@
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_PRIVILEGED" />
-    <!-- BluetoothDevice.connect() and disconnect(), which page the unit. -->
+    <!-- BluetoothDevice.connect() and disconnect(), which page the head unit. -->
     <uses-permission android:name="android.permission.MODIFY_PHONE_STATE" />
     <uses-permission android:name="android.permission.LOCAL_MAC_ADDRESS" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />

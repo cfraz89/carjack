@@ -2,7 +2,7 @@
 
 Wireless CarPlay for things that aren't iPhones. carjack makes a Linux machine or an Android
 phone look like an iPhone to a CarPlay head unit - a car stereo, a motorcycle dash - and streams
-its own screen to it, with touch and the unit's buttons coming back.
+its own screen to it, with touch and the head unit's buttons coming back.
 
 ## Why
 
@@ -18,8 +18,8 @@ currently, so haven't looked at it in a while.
 
 | | |
 | --- | --- |
-| [`carjack-linux/`](carjack-linux) | The Linux app: runs an app (Waydroid, say) or your desktop in its own compositor and streams it to the unit. Built for small boards, packaged as a `.deb`. |
-| [`carjack-android/`](carjack-android) | The Android app, **Slipstream**: turns an Android phone into the unit's CarPlay source, showing its apps on the unit's screen. Runs on a stock phone with [Shizuku](https://shizuku.rikka.app/). |
+| [`carjack-linux/`](carjack-linux) | The Linux app: runs an app (Waydroid, say) or your desktop in its own compositor and streams it to the head unit. Built for small boards, packaged as a `.deb`. |
+| [`carjack-android/`](carjack-android) | The Android app, **Slipstream**: turns an Android phone into the head unit's CarPlay source, showing its apps on the head unit's screen. Runs on a stock phone with [Shizuku](https://shizuku.rikka.app/). |
 | [`libcarjack/`](libcarjack) | The shared core: Bluetooth iAP2, the CarPlay session, AirPlay screen streaming. |
 | [`iap2-proto/`](iap2-proto) | iAP2 message encoding and decoding. |
 | [`cuda-dmabuf/`](cuda-dmabuf) | Optional NVIDIA zero-copy encode for the Linux app. |

@@ -198,7 +198,7 @@ class ScreenStream(
         relay?.cue(Cues.label(text, labelHeight), FLASH_MS)
     }
 
-    /** What the unit shows, now and then, as the on-connect picker's thumbnail. */
+    /** What the head unit shows, now and then, as the on-connect picker's thumbnail. */
     private val preview = object : Runnable {
         override fun run() {
             val r = relay ?: return
@@ -213,7 +213,7 @@ class ScreenStream(
 
     /**
      * The relay redraws a still screen twice a second, so a long silence means the pipeline has
-     * wedged; the session ends rather than leaving the unit on a frozen picture.
+     * wedged; the session ends rather than leaving the head unit on a frozen picture.
      */
     private val watchdog = object : Runnable {
         override fun run() {
@@ -256,7 +256,7 @@ class ScreenStream(
     }
 
     /**
-     * The start of the stream as the unit gets it, in files/stream-HHmmss.hevc (or .h264) beside
+     * The start of the stream as the head unit gets it, in files/stream-HHmmss.hevc (or .h264) beside
      * the log: playable, so what a unit shows black for can be looked at.
      */
     private fun sample(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {

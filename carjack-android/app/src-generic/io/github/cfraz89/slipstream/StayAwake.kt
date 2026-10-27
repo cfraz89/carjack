@@ -8,7 +8,7 @@ import android.os.PowerManager
 import android.util.Log
 
 /**
- * Keeps the phone's CPU from suspending for as long as the unit has a display, leaving its screen
+ * Keeps the phone's CPU from suspending for as long as the head unit has a display, leaving its screen
  * to do as it would. Runs in the Shizuku process, as the shell user.
  */
 class StayAwake(private val shell: Context) {

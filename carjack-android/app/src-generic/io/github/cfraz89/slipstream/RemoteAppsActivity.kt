@@ -18,7 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** The apps the switchgear goes into remote mode for while they're on the unit ([Switchgear]). */
+/** The apps the switchgear goes into remote mode for while they're on the head unit ([Switchgear]). */
 class RemoteAppsActivity : ComponentActivity() {
     private class App(val pkg: String, val label: String, val icon: Drawable)
 
@@ -39,7 +39,7 @@ class RemoteAppsActivity : ComponentActivity() {
                 Page {
                     TopBar("Remote mode apps") { finish() }
                     Text(
-                        "The switchgear sends plain arrows while one of these is on the unit, for " +
+                        "The switchgear sends plain arrows while one of these is on the head unit, for " +
                             "apps that map a remote's keys themselves. A long press on right " +
                             "switches modes by hand.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

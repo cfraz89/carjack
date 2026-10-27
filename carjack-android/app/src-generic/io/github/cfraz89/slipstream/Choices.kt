@@ -5,7 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 
 /**
- * What the unit opens on connect, as the "app" setting holds it: "" for the built-in launcher,
+ * What the head unit opens on connect, as the "app" setting holds it: "" for the built-in launcher,
  * [Previews.HOME] for the phone's home app, else a package. Names and icons for the UI.
  */
 object Choices {

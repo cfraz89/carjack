@@ -23,7 +23,7 @@ import java.io.IOException
 
 /**
  * Runs in a process Shizuku starts as the shell user, which may create trusted displays and inject
- * input - what lets Slipstream give the unit a display of its own resolution with apps running on
+ * input - what lets Slipstream give the head unit a display of its own resolution with apps running on
  * it, rather than a mirror of the phone. Hidden APIs are reached by reflection; that is allowed
  * here. Shizuku constructs it with a [Context], or with none.
  */
@@ -111,7 +111,7 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     private var display: VirtualDisplay? = null
     /** The phone kept awake while the display is up. */
     private var awake: StayAwake? = null
-    /** The phone's screen dark but the phone awake, so the unit's touches still land. */
+    /** The phone's screen dark but the phone awake, so the head unit's touches still land. */
     private var panel: PanelKeeper? = null
     private var fingers = Fingers()
     private var systemLog: Process? = null
@@ -325,7 +325,7 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     }
 
     /**
-     * The phone's WiFi switched over to the unit's AP, so the radio stays on its channel rather
+     * The phone's WiFi switched over to the head unit's AP, so the radio stays on its channel rather
      * than time-slicing with home WiFi on another. Switching to another saved network while
      * connected is locked out (the associated network selection override); autojoin stays off for
      * it, so it's never joined outside a session.
@@ -362,7 +362,7 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     }
 
     // The wallpaper calls below are hidden, and need READ_WALLPAPER_INTERNAL, which the shell has:
-    // they're how a home screen of the unit's size would frame the phone's wallpaper, from the
+    // they're how a home screen of the head unit's size would frame the phone's wallpaper, from the
     // original rather than the phone's own portrait crop of it.
 
     override fun wallpaperOriginal(): ParcelFileDescriptor? = try {

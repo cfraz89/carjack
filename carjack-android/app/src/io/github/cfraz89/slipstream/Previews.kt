@@ -8,7 +8,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 
 /**
- * The last picture each on-connect choice put on the unit, for the picker's thumbnails. Keyed by
+ * The last picture each on-connect choice put on the head unit, for the picker's thumbnails. Keyed by
  * the "app" setting: the launcher, the phone's home app, or a package.
  */
 object Previews {

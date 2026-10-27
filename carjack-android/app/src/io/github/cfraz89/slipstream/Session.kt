@@ -131,7 +131,7 @@ class Session(
 
     override fun ended(error: String?) {
         Log.i(TAG, "Session ended" + if (error == null) "" else ": $error")
-        status("Session ended" + (if (error == null) "" else " ($error)") + "; waiting for the unit")
+        status("Session ended" + (if (error == null) "" else " ($error)") + "; waiting for the head unit")
         handler.post {
             stream?.stop()
             stream = null
