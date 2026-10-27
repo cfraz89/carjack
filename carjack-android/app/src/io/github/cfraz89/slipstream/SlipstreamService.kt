@@ -28,12 +28,8 @@ class SlipstreamService : Service() {
         const val NOTIFICATION_ID = 1
         /** The notification's Turn off. */
         const val ACTION_STOP = "io.github.cfraz89.slipstream.STOP"
-        /** Turn on, from outside the app's screens. */
-        const val ACTION_START = "io.github.cfraz89.slipstream.START"
         /** Try again after giving up on a unit. */
         const val ACTION_RETRY = "io.github.cfraz89.slipstream.RETRY"
-        /** The notification swiped away: it comes back while the service runs. */
-        private const val ACTION_SHOW = "io.github.cfraz89.slipstream.SHOW"
         const val WAITING = "Waiting for the unit"
 
         /** How often to page an absent unit, and how long to wait before cycling a link that is up. */
@@ -94,12 +90,6 @@ class SlipstreamService : Service() {
             .setOnlyAlertOnce(true)
             .setOngoing(true)
             .setContentIntent(Variant.openApp(this))
-            .setDeleteIntent(
-                PendingIntent.getService(
-                    this, 2, Intent(this, SlipstreamService::class.java).setAction(ACTION_SHOW),
-                    PendingIntent.FLAG_IMMUTABLE,
-                ),
-            )
             .setActions(stopAction)
         startForeground(NOTIFICATION_ID, notification.build(), Variant.foregroundServiceTypes())
         Variant.onStatus(this, WAITING, false)
@@ -288,11 +278,6 @@ class SlipstreamService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_RETRY -> handler.post(::retry)
-            ACTION_START -> Variant.onStartRequested(this)
-            ACTION_SHOW -> synchronized(notification) {
-                getSystemService(NotificationManager::class.java)
-                    .notify(NOTIFICATION_ID, notification.build())
-            }
         }
         return Variant.onStartCommand(this, intent)
     }

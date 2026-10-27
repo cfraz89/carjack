@@ -85,8 +85,6 @@ object Variant {
     /** Stopped until the next boot. */
     fun onStopRequested(context: Context) {}
 
-    fun onStartRequested(context: Context) {}
-
     /** No app screen to open. */
     fun openApp(context: Context): PendingIntent? = null
 
@@ -162,6 +160,14 @@ object Variant {
     /** Touches in the view rectangle land 1:1 on the resized default display. */
     fun touch(context: Context, viewX: Int, viewY: Int, viewWidth: Int, viewHeight: Int): Touch =
         TouchInjector(viewX, viewY, viewWidth, viewHeight)
+
+    /** A key from the unit's switchgear, with back and select answered on the picture. */
+    fun switchgear(context: Context, code: Int, down: Boolean) {
+        if (down && (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_DPAD_CENTER)) {
+            ScreenStream.current?.cue(code == KeyEvent.KEYCODE_BACK)
+        }
+        key(context, code, down)
+    }
 
     /** A key onto the board's own display, which is what the unit mirrors; Home included. */
     fun key(context: Context, code: Int, down: Boolean) {

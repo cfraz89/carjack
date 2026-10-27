@@ -23,8 +23,6 @@ class Session(
 ) : Native.Callbacks {
     private companion object {
         const val TAG = "carjack"
-        const val KEYCODE_BACK = 4
-        const val KEYCODE_DPAD_CENTER = 23
     }
 
     @Volatile private var handle = 0L
@@ -128,11 +126,7 @@ class Session(
     }
 
     override fun key(code: Int, down: Boolean) {
-        val s = stream
-        if (down && s != null && (code == KEYCODE_BACK || code == KEYCODE_DPAD_CENTER)) {
-            s.cue(code == KEYCODE_BACK)
-        }
-        Variant.key(context, code, down)
+        Variant.switchgear(context, code, down)
     }
 
     override fun ended(error: String?) {

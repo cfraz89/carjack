@@ -75,6 +75,9 @@ interface IDisplayService {
     /** The phone's voice assistant, opened on the display rather than over the phone's screen. */
     void voice() = 21;
 
+    /** The package of the app showing on the display, or null. */
+    String topPackage() = 22;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

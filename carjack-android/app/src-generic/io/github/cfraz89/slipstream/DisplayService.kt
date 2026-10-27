@@ -1,6 +1,7 @@
 package io.github.cfraz89.slipstream
 
 import android.app.WallpaperManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.Point
@@ -249,6 +250,33 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
             "am", "start", "--display", id.toString(),
             "-a", "android.intent.action.VOICE_COMMAND", "-f", "0x10000000",
         )
+    }
+
+    /** From the activity manager's root tasks on the display, topmost first: the visible one's app. */
+    override fun topPackage(): String? {
+        val id = displayId ?: return null
+        return try {
+            val atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
+            val tasks = atm.javaClass
+                .getMethod("getAllRootTaskInfosOnDisplay", Int::class.javaPrimitiveType)
+                .invoke(atm, id) as List<*>
+            val visible = tasks.filterNotNull().filter {
+                try {
+                    it.javaClass.getField("isVisible").getBoolean(it)
+                } catch (e: NoSuchFieldException) {
+                    true
+                }
+            }
+            visible.firstNotNullOfOrNull {
+                (it.javaClass.getField("topActivity").get(it) as? ComponentName)?.packageName
+            }
+        } catch (e: ReflectiveOperationException) {
+            Log.w(TAG, "No top app for display $id", e)
+            null
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "No top app for display $id", e)
+            null
+        }
     }
 
     override fun cycleBluetooth() {

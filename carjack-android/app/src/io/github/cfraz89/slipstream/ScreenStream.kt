@@ -30,8 +30,12 @@ class ScreenStream(
     private val session: Long,
     private val onError: Runnable,
 ) {
-    private companion object {
-        const val TAG = "carjack"
+    companion object {
+        /** The stream running now, for the switchgear's cues; null between sessions. */
+        @Volatile var current: ScreenStream? = null
+            private set
+
+        private const val TAG = "carjack"
         /** The UI's smallest width, in dp, unless the `density` setting says otherwise. */
         const val SMALLEST_WIDTH_DP = 480
         const val REPEAT_FRAME_US = 100_000L
@@ -44,6 +48,9 @@ class ScreenStream(
         const val PREVIEW_INTERVAL_MS = 60_000L
         /** A cue badge's size, as a fraction of the view's height. */
         const val CUE_FRACTION = 0.14f
+        /** A flashed label's height, likewise, and how long it shows. */
+        const val LABEL_FRACTION = 0.09f
+        const val FLASH_MS = 1200L
         /** How much of each session's start is kept, in encoder buffers: the config and ~6 s. */
         const val SAMPLE_BUFFERS = 60
         const val KEPT_SAMPLES = 6
@@ -169,7 +176,9 @@ class ScreenStream(
         val cueSize = (viewHeight * CUE_FRACTION).roundToInt()
         backCue = Cues.back(cueSize)
         selectCue = Cues.select(cueSize)
+        labelHeight = (viewHeight * LABEL_FRACTION).roundToInt()
         closeDisplay = Variant.openDisplay(context, viewWidth, viewHeight, density, target)
+        current = this
         lastOutput = SystemClock.uptimeMillis()
         watchdogHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS)
         watchdogHandler.postDelayed(preview, FIRST_PREVIEW_MS)
@@ -179,6 +188,14 @@ class ScreenStream(
     fun cue(back: Boolean) {
         val badge = (if (back) backCue else selectCue) ?: return
         relay?.cue(badge)
+    }
+
+    private var labelHeight = 0
+
+    /** [text] in a pill low on the picture, for a moment. */
+    fun flash(text: String) {
+        if (labelHeight == 0) return
+        relay?.cue(Cues.label(text, labelHeight), FLASH_MS)
     }
 
     /** What the unit shows, now and then, as the on-connect picker's thumbnail. */
@@ -219,6 +236,7 @@ class ScreenStream(
     }
 
     fun stop() {
+        if (current === this) current = null
         watchdogHandler.removeCallbacks(watchdog)
         watchdogHandler.removeCallbacks(preview)
         closeDisplay?.run()

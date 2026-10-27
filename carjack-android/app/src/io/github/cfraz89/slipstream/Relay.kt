@@ -122,7 +122,9 @@ void main() { gl_FragColor = texture2D(cue, uv) * alpha; }
     private var barProgram = 0
     private var cueProgram = 0
     private var cueTexture = 0
-    private var cueSize = 0
+    private var cueWidth = 0
+    private var cueHeight = 0
+    private var cueMs = CUE_MS
     /** When the showing cue started; 0 for none. */
     private var cueStartMs = 0L
 
@@ -217,15 +219,17 @@ void main() { gl_FragColor = texture2D(cue, uv) * alpha; }
         GLES20.glVertexAttribPointer(pos, 2, GLES20.GL_FLOAT, false, 0, quad)
     }
 
-    /** Flashes [badge] low in the middle of the view, fading out. */
-    fun cue(badge: Bitmap) {
+    /** Flashes [badge] low in the middle of the view, fading out over [ms]. */
+    fun cue(badge: Bitmap, ms: Long = CUE_MS) {
         handler.post {
             if (texture == null) return@post
             GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, cueTexture)
             GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, badge, 0)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            cueSize = badge.width
+            cueWidth = badge.width
+            cueHeight = badge.height
+            cueMs = ms
             val showing = cueStartMs != 0L
             cueStartMs = SystemClock.uptimeMillis()
             if (!showing) handler.post(cueFrame)
@@ -314,18 +318,18 @@ void main() { gl_FragColor = texture2D(cue, uv) * alpha; }
         }
         if (cueStartMs != 0L) {
             val elapsed = SystemClock.uptimeMillis() - cueStartMs
-            if (elapsed >= CUE_MS) {
+            if (elapsed >= cueMs) {
                 cueStartMs = 0
             } else {
-                val x = viewX + (viewWidth - cueSize) / 2
-                val top = viewY + viewHeight * 3 / 4 - cueSize / 2
-                GLES20.glViewport(x, height - top - cueSize, cueSize, cueSize)
+                val x = viewX + (viewWidth - cueWidth) / 2
+                val top = viewY + viewHeight * 3 / 4 - cueHeight / 2
+                GLES20.glViewport(x, height - top - cueHeight, cueWidth, cueHeight)
                 GLES20.glEnable(GLES20.GL_BLEND)
                 GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
                 GLES20.glUseProgram(cueProgram)
                 GLES20.glUniform1f(
                     GLES20.glGetUniformLocation(cueProgram, "alpha"),
-                    1f - elapsed.toFloat() / CUE_MS,
+                    1f - elapsed.toFloat() / cueMs,
                 )
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
                 GLES20.glUseProgram(program)

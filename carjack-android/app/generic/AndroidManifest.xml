@@ -64,6 +64,9 @@
         <activity
             android:name=".AppPickerActivity"
             android:exported="false" />
+        <activity
+            android:name=".RemoteAppsActivity"
+            android:exported="false" />
 
         <receiver
             android:name=".BootReceiver"
@@ -121,6 +124,21 @@
             android:name=".SlipstreamService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- On and off from Quick Settings. -->
+        <service
+            android:name=".SlipstreamTile"
+            android:exported="true"
+            android:label="Slipstream"
+            android:icon="@drawable/ic_sl_notify"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
+                android:value="true" />
+        </service>
 
         <!-- Lets the launcher see what other apps are playing; enabled through Shizuku. -->
         <service

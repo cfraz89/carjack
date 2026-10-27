@@ -6,12 +6,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 
-/** Back on after a reboot or an update, if the user left it on; else the off notification. */
+/** Back on after a reboot or an update, if the user left it on. */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (!isOn(context)) {
-            OffNotice.show(context)
-        } else if (intent.action != OffNotice.ACTION_SHOW &&
+        if (isOn(context) &&
             // A connected-device service can't start without it.
             context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) ==
             PackageManager.PERMISSION_GRANTED

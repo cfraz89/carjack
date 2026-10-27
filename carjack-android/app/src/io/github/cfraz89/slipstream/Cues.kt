@@ -37,6 +37,24 @@ object Cues {
         return badge
     }
 
+    /** [text] on a dark pill [height] tall, as wide as the text needs. */
+    fun label(text: String, height: Int): Bitmap {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(0xe2, 0xe2, 0xe9)
+            textSize = height * 0.42f
+            isFakeBoldText = true
+            letterSpacing = 0.08f
+        }
+        val width = (paint.measureText(text) + height).toInt()
+        val badge = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(badge)
+        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(0xcc, 0x12, 0x14, 0x18) }
+        canvas.drawRoundRect(0f, 0f, width.toFloat(), height.toFloat(), height / 2f, height / 2f, fill)
+        val baseline = height / 2f - (paint.descent() + paint.ascent()) / 2
+        canvas.drawText(text, height / 2f, baseline, paint)
+        return badge
+    }
+
     private fun disc(size: Int): Bitmap {
         val badge = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(0xcc, 0x12, 0x14, 0x18) }

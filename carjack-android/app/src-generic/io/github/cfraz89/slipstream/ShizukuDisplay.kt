@@ -32,7 +32,7 @@ object ShizukuDisplay {
         .daemon(false)
         .processNameSuffix("display")
         .debuggable(false)
-        .version(33)
+        .version(34)
 
     @Volatile private var service: IDisplayService? = null
     private var bound = CountDownLatch(1)
@@ -102,6 +102,13 @@ object ShizukuDisplay {
             Log.w(TAG, "Shizuku display service failed", e)
             null
         }
+    }
+
+    /** The app showing on the unit's display, while there is one. */
+    fun topPackage(): String? = try {
+        active?.topPackage()
+    } catch (e: RemoteException) {
+        null
     }
 
     /** Bluetooth off and on through Shizuku; false where Shizuku can't. */

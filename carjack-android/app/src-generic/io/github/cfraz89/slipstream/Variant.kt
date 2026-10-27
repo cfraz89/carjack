@@ -47,7 +47,6 @@ object Variant {
      * 40 MB in all. -T: from now, not the whole ring buffer again after each restart.
      */
     fun prepare(context: Context) {
-        OffNotice.hide(context)
         // Not linked yet: puts back a lock delay a crash left held.
         prefs(context).edit().putBoolean("linked", false).apply()
         applyLockHold(context)
@@ -175,13 +174,9 @@ object Variant {
         }
     }
 
-    /** The notification's Turn off and Turn on flip the app's own switch. */
+    /** The notification's Turn off flips the app's own switch. */
     fun onStopRequested(context: Context) {
         BootReceiver.setOn(context, false)
-    }
-
-    fun onStartRequested(context: Context) {
-        BootReceiver.setOn(context, true)
     }
 
     fun openApp(context: Context): PendingIntent? = PendingIntent.getActivity(
@@ -198,7 +193,6 @@ object Variant {
      */
     fun onServiceDestroyed(service: Service) {
         val app = service.applicationContext
-        OffNotice.show(app)
         AccessoryWifi.afterShell {
             holdLock(app, false)
             ShizukuDisplay.unbind()
@@ -306,8 +300,15 @@ object Variant {
     /** A display of the unit's own size with the chosen app on it, or null without Shizuku. */
     fun openDisplay(context: Context, width: Int, height: Int, density: Int, target: Surface): Runnable? {
         val close = ShizukuDisplay.open(target, width, height, density, appFor(context), keepsPanel(context))
-        if (close == null) Log.e(TAG, "No display: Shizuku isn't running or hasn't let Slipstream in")
-        return close
+        if (close == null) {
+            Log.e(TAG, "No display: Shizuku isn't running or hasn't let Slipstream in")
+            return null
+        }
+        Switchgear.watch(context)
+        return Runnable {
+            Switchgear.stop()
+            close.run()
+        }
     }
 
     /** Onto the display, 1:1. */
@@ -322,40 +323,25 @@ object Variant {
         }
 
     private const val KEYCODE_HOME = 3
-    private const val SELECT_HOLD_MS = 150L
+
+    /** A key from the unit's switchgear, through its mode; see [Switchgear]. */
+    fun switchgear(context: Context, code: Int, down: Boolean) {
+        Switchgear.key(context, code, down)
+    }
 
     /**
-     * A key from the switchgear or the bar onto the display. Home isn't sent as a key: on a
-     * display without system decorations that's the phone's own home; it reopens what the unit
-     * opens on connect instead.
+     * A key onto the display. Home isn't sent as a key: on a display without system decorations
+     * that's the phone's own home; it reopens what the unit opens on connect instead.
      */
     fun key(context: Context, code: Int, down: Boolean) {
-        if (code == KEYCODE_HOME) {
-            if (down) goHome(context)
-            return
-        }
-        if (code == KeyEvent.KEYCODE_VOICE_ASSIST) {
-            if (down) voice()
-            return
-        }
-        // Up and down as Shift+Tab and Tab: focus then visits everything on the screen in reading
-        // order, wrapping round, where the arrows only reach what lies above or below.
         when (code) {
-            KeyEvent.KEYCODE_DPAD_DOWN -> inject(KeyEvent.KEYCODE_TAB, down, 0)
-            KeyEvent.KEYCODE_DPAD_UP -> inject(
-                KeyEvent.KEYCODE_TAB, down, KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON,
-            )
-            // The unit lets go of select within a few ms; held a moment, the press shows.
-            KeyEvent.KEYCODE_DPAD_CENTER -> if (down) {
-                inject(code, true, 0)
-            } else {
-                Handler(Looper.getMainLooper()).postDelayed({ inject(code, false, 0) }, SELECT_HOLD_MS)
-            }
+            KEYCODE_HOME -> if (down) goHome(context)
+            KeyEvent.KEYCODE_VOICE_ASSIST -> if (down) voice()
             else -> inject(code, down, 0)
         }
     }
 
-    private fun inject(code: Int, down: Boolean, meta: Int) {
+    fun inject(code: Int, down: Boolean, meta: Int) {
         val display = ShizukuDisplay.active ?: return
         try {
             display.key(code, down, meta)

@@ -124,8 +124,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Its Turn on starts the service, which can't start before Bluetooth is granted.
-        if (permissionsGranted()) OffNotice.show(this)
         refresh()
     }
 
@@ -396,6 +394,13 @@ class MainActivity : ComponentActivity() {
 
             ListRow(Leading.Glyph(R.drawable.ic_sl_text_size), "Scale", SIZES[densityIndex()],
                 trailing = { Chevron() }) { dialog = Dialog.SIZE }
+
+            val remoteApps = Switchgear.apps(context).size
+            ListRow(
+                Leading.Glyph(R.drawable.ic_sl_remote), "Remote mode apps",
+                if (remoteApps == 1) "1 app" else "$remoteApps apps",
+                trailing = { Chevron() },
+            ) { startActivity(Intent(context, RemoteAppsActivity::class.java)) }
 
             val dark = Variant.keepsPanel(context)
             ListRow(
