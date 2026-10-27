@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
@@ -30,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
@@ -45,6 +47,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import io.github.cfraz89.slipstream.launcher.DrawableImage
 
 /** Material 3 in Slipstream's palette (res/values/colors.xml, dark in values-night). */
@@ -95,15 +99,55 @@ fun SlipstreamTheme(content: @Composable () -> Unit) {
 /** A scrolling page drawn edge to edge, kept clear of the system bars. */
 @Composable
 fun Page(content: @Composable ColumnScope.() -> Unit) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.surface)
-            .systemBarsPadding()
-            .verticalScroll(rememberScrollState())
-            .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
-        content = content,
-    )
+    // A Surface, not just a background: it also sets the text and icon colour beneath it.
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .systemBarsPadding()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
+            content = content,
+        )
+    }
+}
+
+/** A setup step's explanation: what it's for, then what to do, step by step. */
+class Help(val title: String, val why: String, val steps: List<String>)
+
+/** [help] as a screen of its own, over whatever opened it. */
+@Composable
+fun HelpScreen(help: Help, onClose: () -> Unit) {
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Page {
+            TopBar(help.title, onClose)
+            Text(
+                help.why,
+                fontSize = 16.sp,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+            )
+            SectionCard(
+                MaterialTheme.colorScheme.surfaceContainer,
+                padding = PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 16.dp),
+            ) {
+                help.steps.forEachIndexed { index, step ->
+                    Row(Modifier.padding(top = if (index == 0) 0.dp else 14.dp)) {
+                        Text(
+                            "${index + 1}",
+                            color = MaterialTheme.colorScheme.onTertiary,
+                            fontSize = 13.sp,
+                            modifier = Modifier
+                                .size(22.dp)
+                                .background(MaterialTheme.colorScheme.tertiary, CircleShape)
+                                .wrapContentSize(Alignment.Center),
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(step, fontSize = 15.sp)
+                    }
+                }
+            }
+        }
+    }
 }
 
 /** M3's small top app bar: back, then the title. */

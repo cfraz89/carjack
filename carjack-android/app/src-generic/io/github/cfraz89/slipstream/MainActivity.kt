@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -87,8 +88,15 @@ class MainActivity : ComponentActivity() {
 
     private enum class Dialog { UNIT, SIZE, LOGS }
 
-    /** A thing still to set up, with the button that sees to it. */
-    private data class Step(val text: String, val action: String, val onClick: () -> Unit)
+    /** A thing still to set up, with the button that sees to it and how to do it by hand. */
+    private data class Step(
+        val text: String,
+        val action: String,
+        val help: Help,
+        val onClick: () -> Unit,
+    )
+
+    private var help by mutableStateOf<Help?>(null)
 
     /** Bumped by [refresh]: the screen reads everything afresh from settings and the system. */
     private var revision by mutableIntStateOf(0)
@@ -184,6 +192,7 @@ class MainActivity : ComponentActivity() {
             Dialog.LOGS -> SendLogsDialog()
             null -> {}
         }
+        help?.let { HelpScreen(it) { help = null } }
     }
 
     @Composable
@@ -224,8 +233,15 @@ class MainActivity : ComponentActivity() {
                         step.text,
                         color = colors.onTertiaryContainer,
                         fontSize = 15.sp,
-                        modifier = Modifier.weight(1f).padding(end = 12.dp),
+                        modifier = Modifier.weight(1f).padding(end = 4.dp),
                     )
+                    IconButton(onClick = { help = step.help }) {
+                        Icon(
+                            painterResource(R.drawable.ic_sl_info),
+                            contentDescription = "How to",
+                            tint = colors.onTertiaryContainer,
+                        )
+                    }
                     FilledButton(step.action, step.onClick)
                 }
             }
@@ -236,23 +252,23 @@ class MainActivity : ComponentActivity() {
         val steps = mutableListOf<Step>()
         val shizuku = packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
         if (shizuku == null) {
-            steps += Step("Slipstream needs Shizuku", "Install", ::installShizuku)
+            steps += Step("Slipstream needs Shizuku", "Install", SetupHelp.installShizuku, ::installShizuku)
         } else if (!pingShizuku()) {
-            steps += Step("Start Shizuku", "Open") { startActivity(shizuku) }
+            steps += Step("Start Shizuku", "Open", SetupHelp.startShizuku) { startActivity(shizuku) }
         } else if (!ShizukuDisplay.available()) {
-            steps += Step("Slipstream needs Shizuku", "Allow") {
+            steps += Step("Slipstream needs Shizuku", "Allow", SetupHelp.allowShizuku) {
                 Shizuku.requestPermission(REQUEST_SHIZUKU)
             }
         }
         // With Shizuku, autoSetUp sees to these.
         if (!ShizukuDisplay.available()) {
             if (!permissionsGranted()) {
-                steps += Step("Slipstream needs permissions", "Allow") {
+                steps += Step("Slipstream needs permissions", "Allow", SetupHelp.permissions) {
                     requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS)
                 }
             }
             if (!bluetoothOn()) {
-                steps += Step("Bluetooth is off", "Turn on") {
+                steps += Step("Bluetooth is off", "Turn on", SetupHelp.bluetooth) {
                     startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
                 }
             }
@@ -264,7 +280,7 @@ class MainActivity : ComponentActivity() {
             secure
         ) {
             steps += Step("Make the unit a trusted device, to stay unlocked", "Settings",
-                ::openSecuritySettings)
+                SetupHelp.trustedDevice, ::openSecuritySettings)
         }
         // The lock hold keeps a screen timeout from locking, but not the power button.
         if (secure && Variant.holdsUnlock(this) &&
@@ -274,6 +290,7 @@ class MainActivity : ComponentActivity() {
                 "The power button locks the phone, hiding the unit's apps: turn off \"Power " +
                     "button instantly locks\"",
                 "Settings",
+                SetupHelp.powerButton,
                 ::openSecuritySettings,
             )
         }
@@ -283,9 +300,9 @@ class MainActivity : ComponentActivity() {
             val tailscale = packageManager.getLaunchIntentForPackage(TAILSCALE_PACKAGE)
             steps += if (tailscale != null) {
                 Step("Tailscale blocks the unit: exclude Slipstream in split tunneling",
-                    "Tailscale") { startActivity(tailscale) }
+                    "Tailscale", SetupHelp.tailscale) { startActivity(tailscale) }
             } else {
-                Step("A VPN blocks the unit: exclude Slipstream, or turn it off", "VPN") {
+                Step("A VPN blocks the unit: exclude Slipstream, or turn it off", "VPN", SetupHelp.vpn) {
                     startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
                 }
             }
