@@ -20,6 +20,9 @@ import android.view.Surface
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 
 /**
  * Runs in a process Shizuku starts as the shell user, which may create trusted displays and inject
@@ -56,6 +59,9 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
             "BluetoothManagerService", "AdapterService", "UserServiceManager", "MediaCodec",
             "CCodec",
         )
+
+        /** How long a detached display waits for its session to come back. */
+        const val KEEP_MS = 5 * 60_000L
 
         const val PRIMARY_JOIN_MS = 20_000L
         const val PRIMARY_POLL_MS = 500L
@@ -109,6 +115,11 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     }
 
     private var display: VirtualDisplay? = null
+    /** The display's width, height and density. */
+    private var size = Triple(0, 0, 0)
+    private val timer = Executors.newSingleThreadScheduledExecutor()
+    /** A detached display's release, unless its session comes back first. */
+    private var expiry: ScheduledFuture<*>? = null
     /** The phone kept awake while the display is up. */
     private var awake: StayAwake? = null
     private var fingers = Fingers()
@@ -196,6 +207,7 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
                 .newInstance(shellContext())
             val created = dm.createVirtualDisplay("slipstream", width, height, density, surface, FLAGS)
             display = created
+            size = Triple(width, height, density)
             fingers = Fingers()
             val id = created.display.displayId
             Log.i(TAG, "Display $id at ${width}x$height, ${density}dpi")
@@ -209,6 +221,41 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
             Log.e(TAG, "Could not create a display", e)
             -1
         }
+    }
+
+    @Synchronized
+    override fun resume(surface: Surface, width: Int, height: Int, density: Int): Int {
+        val d = display ?: return -1
+        expiry?.cancel(false)
+        expiry = null
+        return try {
+            if (size != Triple(width, height, density)) {
+                d.resize(width, height, density)
+                size = Triple(width, height, density)
+            }
+            d.surface = surface
+            fingers = Fingers()
+            awake = StayAwake(shellContext()).also { it.start() }
+            Log.i(TAG, "Display ${d.display.displayId} resumed at ${width}x$height, ${density}dpi")
+            d.display.displayId
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Could not resume the display", e)
+            release()
+            -1
+        }
+    }
+
+    @Synchronized
+    override fun detach() {
+        val d = display ?: return
+        d.surface = null
+        awake?.stop()
+        awake = null
+        expiry = timer.schedule({
+            Log.i(TAG, "No session came back for the detached display; releasing it")
+            release()
+        }, KEEP_MS, TimeUnit.MILLISECONDS)
+        Log.i(TAG, "Display ${d.display.displayId} detached, kept for ${KEEP_MS}ms")
     }
 
     @Synchronized
@@ -444,6 +491,8 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
 
     @Synchronized
     override fun release() {
+        expiry?.cancel(false)
+        expiry = null
         awake?.stop()
         awake = null
         display?.release()

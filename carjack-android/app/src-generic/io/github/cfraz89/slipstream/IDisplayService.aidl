@@ -78,6 +78,15 @@ interface IDisplayService {
     /** Starts an activity ("pkg/class") on the phone's own screen. */
     void launchOnPhone(String component) = 24;
 
+    /**
+     * The display a session left ({@link #detach}), drawing into {@code surface} again at this
+     * size; returns its id, or -1 where there's none.
+     */
+    int resume(in Surface surface, int width, int height, int density) = 25;
+
+    /** Off its surface but kept, apps and all, for a session that comes back soon; released after a while. */
+    void detach() = 26;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

@@ -32,7 +32,7 @@ object ShizukuDisplay {
         .daemon(false)
         .processNameSuffix("display")
         .debuggable(false)
-        .version(36)
+        .version(37)
 
     @Volatile private var service: IDisplayService? = null
     private var bound = CountDownLatch(1)
@@ -70,20 +70,25 @@ object ShizukuDisplay {
     }
 
     /**
-     * A display drawing into [target] with [app] (a component or package) on it; returns what
-     * closes it, or null where Shizuku can't make one.
+     * A display drawing into [target]: the last session's, as it was left, if it's still kept,
+     * else a new one with [app] (a component or package) on it. Returns what detaches it, or null
+     * where Shizuku can't make one.
      */
     fun open(target: Surface, width: Int, height: Int, density: Int, app: String): Runnable? {
         val s = bind() ?: return null
         return try {
-            if (s.create(target, width, height, density) < 0) return null
-            s.launch(app)
-            Log.i(TAG, "Display up")
+            if (s.resume(target, width, height, density) >= 0) {
+                Log.i(TAG, "Display back as the last session left it")
+            } else {
+                if (s.create(target, width, height, density) < 0) return null
+                s.launch(app)
+                Log.i(TAG, "Display up")
+            }
             active = s
             Runnable {
                 active = null
                 try {
-                    s.release()
+                    s.detach()
                 } catch (ignored: RemoteException) {
                 }
             }
