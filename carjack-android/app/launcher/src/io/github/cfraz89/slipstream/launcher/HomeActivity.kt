@@ -18,7 +18,6 @@ import android.window.OnBackInvokedDispatcher
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -59,9 +58,6 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
-import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
@@ -364,7 +360,11 @@ class HomeActivity : ComponentActivity() {
                     }
                     charge?.let { battery ->
                         Spacer(Modifier.width(dimensionResource(R.dimen.status_battery_gap)))
-                        BatteryIcon(battery)
+                        BatteryIcon(
+                            battery.percent,
+                            battery.charging,
+                            Modifier.size(dimensionResource(R.dimen.status_battery_size)),
+                        )
                         Spacer(Modifier.width(dimensionResource(R.dimen.status_battery_text_gap)))
                         Text(
                             stringResource(R.string.status_battery, battery.percent),
@@ -377,21 +377,6 @@ class HomeActivity : ComponentActivity() {
         }
     }
 
-    /** ic_battery's fill is a clip drawable, cut to the charge by the drawable's level. */
-    @Composable
-    private fun BatteryIcon(battery: Charge) {
-        val context = LocalContext.current
-        val drawable = remember { context.getDrawable(R.drawable.ic_battery)!!.mutate() }
-        val tint = (if (battery.charging) Palette.accent else Palette.textSecondary).toArgb()
-        // The fill spans x 4.25-18.25 of the icon's 24; the clip runs across all 24.
-        val level = ((4.25f + battery.percent * 0.14f) / 24f * 10000).toInt()
-        Canvas(Modifier.size(dimensionResource(R.dimen.status_battery_size))) {
-            drawable.level = level
-            drawable.setTint(tint)
-            drawable.setBounds(0, 0, size.width.toInt(), size.height.toInt())
-            drawIntoCanvas { drawable.draw(it.nativeCanvas) }
-        }
-    }
 
     @Composable
     private fun Grid(modifier: Modifier) {

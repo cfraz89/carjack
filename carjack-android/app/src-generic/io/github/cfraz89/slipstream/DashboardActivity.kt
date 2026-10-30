@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.drawable.Drawable
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -42,7 +43,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -55,10 +55,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.cfraz89.slipstream.launcher.BatteryIcon
+import io.github.cfraz89.slipstream.launcher.DrawableImage
+import io.github.cfraz89.slipstream.launcher.Hud
+import io.github.cfraz89.slipstream.launcher.LauncherTheme
+import io.github.cfraz89.slipstream.launcher.Palette
 import io.github.cfraz89.slipstream.launcher.Weather
+import io.github.cfraz89.slipstream.launcher.hudCaption
+import io.github.cfraz89.slipstream.launcher.hudText
+import io.github.cfraz89.slipstream.launcher.tappable
 import kotlinx.coroutines.delay
 import java.lang.ref.WeakReference
 import java.text.SimpleDateFormat
@@ -100,7 +110,7 @@ class DashboardActivity : ComponentActivity() {
     private var weather by mutableStateOf<Weather.Now?>(null)
     private var battery by mutableStateOf<Battery?>(null)
     private var thermal by mutableStateOf(PowerManager.THERMAL_STATUS_NONE)
-    private var headUnitApp by mutableStateOf<String?>(null)
+    private var headUnitPackage by mutableStateOf<String?>(null)
 
     private class Battery(val percent: Int, val charging: Boolean, val celsius: Float)
 
@@ -218,24 +228,24 @@ class DashboardActivity : ComponentActivity() {
     private val pollHeadUnit = object : Runnable {
         override fun run() {
             background.execute {
-                val label = ShizukuDisplay.topPackage()?.let(::appLabel)
-                main.post { headUnitApp = label }
+                val top = ShizukuDisplay.topPackage()
+                main.post { headUnitPackage = top }
             }
             main.postDelayed(this, HEAD_UNIT_MS)
         }
     }
 
-    private fun appLabel(pkg: String): String = when (pkg) {
-        packageName -> "Slipstream launcher"
+    private fun appIcon(pkg: String): Drawable? = when (pkg) {
+        packageName -> getDrawable(R.drawable.ic_launcher)
         else -> try {
-            packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+            packageManager.getApplicationIcon(pkg)
         } catch (e: PackageManager.NameNotFoundException) {
-            pkg
+            null
         }
     }
 
     @Composable
-    private fun Dashboard() {
+    private fun Dashboard() = LauncherTheme {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             if (covered) {
                 // Every touch taken here, and none acted on.
@@ -280,7 +290,15 @@ class DashboardActivity : ComponentActivity() {
         }
         val locale = Locale.getDefault()
         val pattern = DateFormat.getBestDateTimePattern(locale, if (DateFormat.is24HourFormat(this)) "Hm" else "hm")
-        Text(SimpleDateFormat(pattern, locale).format(Date(now)), color = TEXT, fontSize = 56.sp)
+        Column {
+            Text(SimpleDateFormat(pattern, locale).format(Date(now)), style = hudText(64.sp, FontWeight.SemiBold))
+            Text(
+                SimpleDateFormat(DateFormat.getBestDateTimePattern(locale, "EEEEdMMMM"), locale)
+                    .format(Date(now)).uppercase(locale),
+                style = hudCaption(),
+                maxLines = 1,
+            )
+        }
     }
 
     /** The speed, the limit beside it as signed, and the road beneath. */
@@ -291,31 +309,34 @@ class DashboardActivity : ComponentActivity() {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f, fill = false)) {
                 Text(
-                    speed?.toString() ?: "-",
-                    color = if (over) WARN else TEXT,
-                    fontSize = 120.sp,
-                    fontWeight = FontWeight.Medium,
+                    speed?.toString() ?: "–",
+                    style = hudText(144.sp, FontWeight.SemiBold, if (over) WARN else Palette.text),
+                    maxLines = 1,
                 )
-                Text(if (mph) "mph" else "km/h", color = DIM, fontSize = 22.sp)
+                Text(if (mph) "MPH" else "KM/H", style = hudCaption())
             }
             if (limit != null) {
-                Spacer(Modifier.width(24.dp))
+                Spacer(Modifier.width(28.dp))
                 Box(
                     Modifier
-                        .size(112.dp)
+                        .size(116.dp)
                         .background(Color.White, CircleShape)
                         .border(12.dp, LIMIT_RING, CircleShape),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(limit.toString(), color = Color.Black, fontSize = 44.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        limit.toString(),
+                        style = TextStyle(fontFamily = Hud, fontWeight = FontWeight.SemiBold, fontSize = 48.sp),
+                        color = Color.Black,
+                    )
                 }
             }
         }
         val r = road
-        val name = listOfNotNull(r?.ref, r?.name).joinToString(" · ")
+        val name = listOfNotNull(r?.ref, r?.name).joinToString("  ·  ")
         if (name.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
-            Text(name, color = TEXT, fontSize = 28.sp, maxLines = 2)
+            Text(name, style = hudText(30.sp), maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
     }
 
@@ -329,54 +350,85 @@ class DashboardActivity : ComponentActivity() {
     /** Weather, battery and the phone's heat. */
     @Composable
     private fun Status() {
+        val locale = Locale.getDefault()
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             weather?.let { w ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(painterResource(w.icon), null, tint = TEXT, modifier = Modifier.size(32.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("${w.temperature}${w.unit}", color = TEXT, fontSize = 26.sp)
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(painterResource(w.icon), null, tint = Palette.accent, modifier = Modifier.size(30.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("${w.temperature}°", style = hudText(32.sp, FontWeight.SemiBold))
+                    }
+                    Text(w.sky.uppercase(locale), style = hudCaption(), maxLines = 1)
                 }
             }
             battery?.let { b ->
-                Text(
-                    "${b.percent}%" + if (b.charging) " ⚡" else "",
-                    color = if (b.percent <= 15 && !b.charging) WARN else TEXT,
-                    fontSize = 26.sp,
-                )
-            }
-            val (heat, hot) = heat()
-            battery?.let { b ->
-                Text("${b.celsius.roundToInt()}°C $heat", color = if (hot) WARN else TEXT, fontSize = 26.sp)
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        BatteryIcon(b.percent, b.charging, Modifier.size(30.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "${b.percent}%",
+                            style = hudText(
+                                32.sp, FontWeight.SemiBold,
+                                if (b.percent <= 15 && !b.charging) WARN else Palette.text,
+                            ),
+                        )
+                    }
+                    Text(if (b.charging) "CHARGING" else "BATTERY", style = hudCaption())
+                }
+                val (heat, hot) = heat()
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        "${b.celsius.roundToInt()}°",
+                        style = hudText(32.sp, FontWeight.SemiBold, if (hot) WARN else Palette.text),
+                    )
+                    Text(heat, style = hudCaption())
+                }
             }
         }
     }
 
     /** The phone's own read of its heat, and whether it's slowing down for it. */
     private fun heat(): Pair<String, Boolean> = when (thermal) {
-        PowerManager.THERMAL_STATUS_NONE -> "" to false
-        PowerManager.THERMAL_STATUS_LIGHT -> "warm" to false
-        PowerManager.THERMAL_STATUS_MODERATE -> "hot" to true
-        else -> "too hot" to true
+        PowerManager.THERMAL_STATUS_NONE -> "PHONE" to false
+        PowerManager.THERMAL_STATUS_LIGHT -> "PHONE WARM" to false
+        PowerManager.THERMAL_STATUS_MODERATE -> "PHONE HOT" to true
+        else -> "PHONE TOO HOT" to true
     }
 
+    /** What's on the head unit; Slipstream's settings and the phone's own apps. */
     @Composable
     private fun HeadUnit() {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                headUnitApp?.let { "Head unit: $it" } ?: "",
-                color = DIM,
-                fontSize = 20.sp,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = {
+            val pkg = headUnitPackage
+            val icon = remember(pkg) { pkg?.let(::appIcon) }
+            if (icon != null) {
+                DrawableImage(icon, Modifier.size(44.dp))
+                Spacer(Modifier.width(12.dp))
+                Text("ON HEAD UNIT", style = hudCaption())
+            }
+            Spacer(Modifier.weight(1f))
+            RoundButton(R.drawable.settings_24, "Slipstream settings") {
+                startActivity(Intent(this@DashboardActivity, MainActivity::class.java))
+            }
+            Spacer(Modifier.width(16.dp))
+            RoundButton(R.drawable.ic_apps, "Phone apps") {
                 startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME))
-            }) { Text("Phone apps", color = ACCENT, fontSize = 18.sp) }
+            }
+        }
+    }
+
+    @Composable
+    private fun RoundButton(icon: Int, description: String, onClick: () -> Unit) {
+        Box(
+            Modifier.size(64.dp).tappable(CircleShape, onClick = onClick).background(Palette.tonal),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(painterResource(icon), description, tint = Palette.onTonal, modifier = Modifier.size(28.dp))
         }
     }
 }
 
-private val TEXT = Color(0xFFE2E2E9)
-private val DIM = Color(0xFF8D9199)
 private val WARN = Color(0xFFFFB4AB)
-private val ACCENT = Color(0xFFA5C8FF)
 private val LIMIT_RING = Color(0xFFD32F2F)

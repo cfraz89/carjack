@@ -86,7 +86,9 @@
             android:launchMode="singleTask"
             android:taskAffinity="io.github.cfraz89.slipstream.dashboard"
             android:showWhenLocked="true"
-            android:turnScreenOn="true" />
+            android:turnScreenOn="true"
+            android:screenOrientation="fullSensor"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
 
         <receiver
             android:name=".BootReceiver"

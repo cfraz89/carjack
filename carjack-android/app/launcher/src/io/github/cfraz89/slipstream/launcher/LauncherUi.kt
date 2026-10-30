@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.dimensionResource
@@ -140,6 +141,22 @@ fun Modifier.tappable(
             onLongClick = onLongClick,
             onClick = onClick,
         )
+}
+
+/** ic_battery's fill is a clip drawable, cut to the charge by the drawable's level. */
+@Composable
+fun BatteryIcon(percent: Int, charging: Boolean, modifier: Modifier) {
+    val context = LocalContext.current
+    val drawable = remember { context.getDrawable(R.drawable.ic_battery)!!.mutate() }
+    val tint = (if (charging) Palette.accent else Palette.textSecondary).toArgb()
+    // The fill spans x 4.25-18.25 of the icon's 24; the clip runs across all 24.
+    val level = ((4.25f + percent * 0.14f) / 24f * 10000).toInt()
+    Canvas(modifier) {
+        drawable.level = level
+        drawable.setTint(tint)
+        drawable.setBounds(0, 0, size.width.toInt(), size.height.toInt())
+        drawIntoCanvas { drawable.draw(it.nativeCanvas) }
+    }
 }
 
 /**
