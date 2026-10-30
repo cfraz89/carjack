@@ -369,6 +369,17 @@ object Variant {
         key(context, code, false)
     }
 
+    /** Whether the head unit opens the built-in launcher on connect. */
+    fun opensLauncher(context: Context) = appFor(context) == LAUNCHER
+
+    /** The built-in launcher on the head unit, whatever it opens on connect. */
+    fun openLauncher() {
+        ShizukuDisplay.launch(LAUNCHER)
+    }
+
+    /** The phone dashboard's layout: just controls, or the ride's figures too. */
+    fun dashboardRide(context: Context) = setting(context, "dashboard", "controls") == "ride"
+
     /** What the head unit opens on connect, brought back to the front. */
     fun goHome(context: Context) {
         val display = ShizukuDisplay.active ?: return

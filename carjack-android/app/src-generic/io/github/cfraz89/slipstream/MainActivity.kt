@@ -86,10 +86,13 @@ class MainActivity : ComponentActivity() {
 
         /** Display densities offered, by name; 0 is automatic. */
         val SIZES = listOf("Default", "Smaller", "Larger", "Largest")
+
+        /** The dashboard's layouts, as [Variant.dashboardRide] picks. */
+        val PHONE_SCREENS = listOf("Controls", "Ride info")
         val DENSITIES = intArrayOf(0, 160, 240, 280)
     }
 
-    private enum class Dialog { UNIT, SIZE, LOGS }
+    private enum class Dialog { UNIT, SIZE, PHONE_SCREEN, LOGS }
 
     /** A thing still to set up, with the button that sees to it and how to do it by hand. */
     private data class Step(
@@ -189,6 +192,13 @@ class MainActivity : ComponentActivity() {
                 Variant.prefs(this).edit()
                     .putString("density", if (DENSITIES[it] == 0) "" else DENSITIES[it].toString())
                     .apply()
+                dialog = null
+                revision++
+            }
+            Dialog.PHONE_SCREEN -> ChoiceDialog(
+                "Phone screen", PHONE_SCREENS, if (Variant.dashboardRide(this)) 1 else 0, { dialog = null },
+            ) {
+                Variant.prefs(this).edit().putString("dashboard", if (it == 1) "ride" else "controls").apply()
                 dialog = null
                 revision++
             }
@@ -421,6 +431,11 @@ class MainActivity : ComponentActivity() {
                 if (remoteApps == 1) "1 app" else "$remoteApps apps",
                 trailing = { Chevron() },
             ) { startActivity(Intent(context, RemoteAppsActivity::class.java)) }
+
+            ListRow(
+                Leading.Glyph(R.drawable.ic_sl_phone), "Phone screen",
+                PHONE_SCREENS[if (Variant.dashboardRide(context)) 1 else 0], trailing = { Chevron() },
+            ) { dialog = Dialog.PHONE_SCREEN }
 
             val navBar = Variant.setting(context, "nav_bar", "false").toBoolean()
             ListRow(

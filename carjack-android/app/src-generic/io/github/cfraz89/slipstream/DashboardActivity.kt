@@ -20,6 +20,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.text.format.DateFormat
+import android.view.KeyEvent
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
@@ -58,6 +59,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.cfraz89.slipstream.launcher.BatteryIcon
@@ -78,9 +80,9 @@ import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
 /**
- * The phone's screen during a session: what the head unit doesn't show, readable at a glance -
- * speed against the road's limit, the road, the time, the weather and how the phone is faring.
- * It keeps the screen on, so the phone neither sleeps (dropping the head unit's touches) nor
+ * The phone's screen during a session: what's on the head unit, with its back and home, and the
+ * phone's heat or battery once they matter; or, as an option, the ride's figures - speed against
+ * the road's limit, the road, the time, the weather and how the phone is faring. It keeps the screen on, so the phone neither sleeps (dropping the head unit's touches) nor
  * locks; covered (in a pocket), it goes black, dimmed right down, and takes no touches.
  */
 class DashboardActivity : ComponentActivity() {
@@ -111,6 +113,8 @@ class DashboardActivity : ComponentActivity() {
     private var battery by mutableStateOf<Battery?>(null)
     private var thermal by mutableStateOf(PowerManager.THERMAL_STATUS_NONE)
     private var headUnitPackage by mutableStateOf<String?>(null)
+    /** The ride's figures as well as the controls ([Variant.dashboardRide]). */
+    private var ride by mutableStateOf(false)
 
     private class Battery(val percent: Int, val charging: Boolean, val celsius: Float)
 
@@ -129,7 +133,9 @@ class DashboardActivity : ComponentActivity() {
                 sm.registerListener(proximity, it, SensorManager.SENSOR_DELAY_NORMAL)
             }
         }
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+        ride = Variant.dashboardRide(this)
+        val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (ride && fine) {
             getSystemService(LocationManager::class.java)
                 .requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, location, Looper.getMainLooper())
         }
@@ -138,7 +144,7 @@ class DashboardActivity : ComponentActivity() {
             thermal = it.currentThermalStatus
             it.addThermalStatusListener(mainExecutor, thermalChanged)
         }
-        main.post(pollWeather)
+        if (ride) main.post(pollWeather)
         main.post(pollHeadUnit)
     }
 
@@ -254,25 +260,142 @@ class DashboardActivity : ComponentActivity() {
                 })
                 return@Box
             }
-            BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding().padding(24.dp)) {
-                if (maxWidth > maxHeight) {
-                    Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) { Speed() }
-                        Spacer(Modifier.width(24.dp))
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                            Clock()
-                            Status()
-                            HeadUnit()
-                        }
+            if (ride) Ride() else Controls()
+        }
+    }
+
+    /** What's on the head unit, its back and home, and only what needs attention. */
+    @Composable
+    private fun Controls() {
+        BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding().padding(24.dp)) {
+            if (maxWidth > maxHeight) {
+                Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(
+                        Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
+                        OnHeadUnit()
+                        Alerts()
                     }
-                } else {
-                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
+                    Column(
+                        Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(32.dp),
+                    ) {
+                        HeadUnitButtons(88.dp)
+                        PhoneButtons()
+                    }
+                }
+            } else {
+                Column(
+                    Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Alerts()
+                    OnHeadUnit()
+                    HeadUnitButtons(88.dp)
+                    PhoneButtons()
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun OnHeadUnit() {
+        val pkg = headUnitPackage
+        val icon = remember(pkg) { pkg?.let(::appIcon) }
+        val label = remember(pkg) { pkg?.let(::appLabel) }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            DrawableImage(icon, Modifier.size(112.dp))
+            Spacer(Modifier.height(16.dp))
+            Text(label.orEmpty(), style = hudText(34.sp, FontWeight.SemiBold), maxLines = 1)
+            Text("ON HEAD UNIT", style = hudCaption())
+        }
+    }
+
+    /** The phone's heat and a low battery, only once they matter. */
+    @Composable
+    private fun Alerts() {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            val (heat, hot) = heat()
+            if (thermal >= PowerManager.THERMAL_STATUS_LIGHT) {
+                Text(heat, style = hudText(26.sp, FontWeight.SemiBold, if (hot) WARN else Palette.text))
+            }
+            battery?.let { b ->
+                if (b.percent <= 15 && !b.charging) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        BatteryIcon(b.percent, false, Modifier.size(26.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("${b.percent}%", style = hudText(26.sp, FontWeight.SemiBold, WARN))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun appLabel(pkg: String): String = when (pkg) {
+        packageName -> "Launcher"
+        else -> try {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+        } catch (e: PackageManager.NameNotFoundException) {
+            pkg
+        }
+    }
+
+    /** Back and home on the head unit, and its launcher where home is another app. */
+    @Composable
+    private fun HeadUnitButtons(size: Dp) {
+        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+            RoundButton(R.drawable.ic_sl_arrow_back, "Back", size) {
+                background.execute { Variant.key(this@DashboardActivity, KeyEvent.KEYCODE_BACK) }
+            }
+            RoundButton(R.drawable.ic_sl_home, "Home", size) {
+                background.execute { Variant.goHome(this@DashboardActivity) }
+            }
+            if (!Variant.opensLauncher(this@DashboardActivity)) {
+                RoundButton(R.drawable.ic_apps, "Launcher", size) {
+                    background.execute { Variant.openLauncher() }
+                }
+            }
+        }
+    }
+
+    /** Slipstream's settings and the phone's own apps. */
+    @Composable
+    private fun PhoneButtons() {
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            RoundButton(R.drawable.settings_24, "Slipstream settings", 56.dp) {
+                startActivity(Intent(this@DashboardActivity, MainActivity::class.java))
+            }
+            RoundButton(R.drawable.ic_sl_phone, "Phone apps", 56.dp) {
+                startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME))
+            }
+        }
+    }
+
+    /** The ride's figures: speed against the limit, the road, the time, weather and the phone. */
+    @Composable
+    private fun Ride() {
+        BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding().padding(24.dp)) {
+            if (maxWidth > maxHeight) {
+                Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) { Speed() }
+                    Spacer(Modifier.width(24.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(20.dp)) {
                         Clock()
-                        Speed()
-                        Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                            Status()
-                            HeadUnit()
-                        }
+                        Status()
+                        Buttons()
+                    }
+                }
+            } else {
+                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
+                    Clock()
+                    Speed()
+                    Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                        Status()
+                        Buttons()
                     }
                 }
             }
@@ -397,35 +520,22 @@ class DashboardActivity : ComponentActivity() {
         else -> "PHONE TOO HOT" to true
     }
 
-    /** What's on the head unit; Slipstream's settings and the phone's own apps. */
+    /** The head unit's back and home; Slipstream's settings and the phone's own apps. */
     @Composable
-    private fun HeadUnit() {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            val pkg = headUnitPackage
-            val icon = remember(pkg) { pkg?.let(::appIcon) }
-            if (icon != null) {
-                DrawableImage(icon, Modifier.size(44.dp))
-                Spacer(Modifier.width(12.dp))
-                Text("ON HEAD UNIT", style = hudCaption())
-            }
-            Spacer(Modifier.weight(1f))
-            RoundButton(R.drawable.settings_24, "Slipstream settings") {
-                startActivity(Intent(this@DashboardActivity, MainActivity::class.java))
-            }
-            Spacer(Modifier.width(16.dp))
-            RoundButton(R.drawable.ic_apps, "Phone apps") {
-                startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME))
-            }
+    private fun Buttons() {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            HeadUnitButtons(56.dp)
+            PhoneButtons()
         }
     }
 
     @Composable
-    private fun RoundButton(icon: Int, description: String, onClick: () -> Unit) {
+    private fun RoundButton(icon: Int, description: String, size: Dp, onClick: () -> Unit) {
         Box(
-            Modifier.size(64.dp).tappable(CircleShape, onClick = onClick).background(Palette.tonal),
+            Modifier.size(size).tappable(CircleShape, onClick = onClick).background(Palette.tonal),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(painterResource(icon), description, tint = Palette.onTonal, modifier = Modifier.size(28.dp))
+            Icon(painterResource(icon), description, tint = Palette.onTonal, modifier = Modifier.size(size * 0.44f))
         }
     }
 }
