@@ -132,8 +132,8 @@ object Variant {
     /** A day: in effect, no locking on screen-off while the head unit is connected. */
     private val HELD_LOCK_AFTER = (24 * 60 * 60 * 1000).toString()
 
-    /** Whether the phone's panel goes dark rather than the phone sleeping; off until proven. */
-    fun keepsPanel(context: Context) = prefs(context).getBoolean("keep_panel", false)
+    /** The phone's screen during a session. */
+    private const val DASHBOARD = "$APP_ID/$APP_ID.DashboardActivity"
 
     /** Whether to keep the phone unlocked while a unit's connected; the user's choice. */
     fun holdsUnlock(context: Context) = prefs(context).getBoolean("hold_unlock", true)
@@ -299,16 +299,18 @@ object Variant {
 
     /** A display of the head unit's own size with the chosen app on it, or null without Shizuku. */
     fun openDisplay(context: Context, width: Int, height: Int, density: Int, target: Surface): Runnable? {
-        val close = ShizukuDisplay.open(target, width, height, density, appFor(context), keepsPanel(context))
+        val close = ShizukuDisplay.open(target, width, height, density, appFor(context))
         if (close == null) {
             Log.e(TAG, "No display: Shizuku isn't running or hasn't let Slipstream in")
             return null
         }
         Switchgear.watch(context)
         LockWatcher.watch(context)
+        ShizukuDisplay.launchOnPhone(DASHBOARD)
         return Runnable {
             Switchgear.stop()
             LockWatcher.stop()
+            DashboardActivity.close()
             close.run()
         }
     }

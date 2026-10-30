@@ -78,8 +78,11 @@ class MainActivity : ComponentActivity() {
             Manifest.permission.READ_MEDIA_IMAGES,
         )
 
-        /** Granted with the rest through Shizuku, but nothing waits on them: the weather, here. */
-        val OPTIONAL_PERMISSIONS = arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION)
+        /** Granted with the rest through Shizuku, but nothing waits on them: the weather, the dashboard's road. */
+        val OPTIONAL_PERMISSIONS = arrayOf(
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        )
 
         /** Display densities offered, by name; 0 is automatic. */
         val SIZES = listOf("Default", "Smaller", "Larger", "Largest")
@@ -418,15 +421,6 @@ class MainActivity : ComponentActivity() {
                 if (remoteApps == 1) "1 app" else "$remoteApps apps",
                 trailing = { Chevron() },
             ) { startActivity(Intent(context, RemoteAppsActivity::class.java)) }
-
-            val dark = Variant.keepsPanel(context)
-            ListRow(
-                Leading.Glyph(R.drawable.ic_sl_cast), "Dark screen",
-                "The phone's screen goes dark instead of sleeping", trailing = { RowSwitch(dark) },
-            ) {
-                Variant.prefs(context).edit().putBoolean("keep_panel", !dark).apply()
-                revision++
-            }
 
             val navBar = Variant.setting(context, "nav_bar", "false").toBoolean()
             ListRow(

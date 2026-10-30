@@ -111,14 +111,42 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     private var display: VirtualDisplay? = null
     /** The phone kept awake while the display is up. */
     private var awake: StayAwake? = null
-    /** The phone's screen dark but the phone awake, so the head unit's touches still land. */
-    private var panel: PanelKeeper? = null
     private var fingers = Fingers()
     private var systemLog: Process? = null
 
     init {
         startSystemLog()
-        PanelKeeper.restoreLeftovers()
+        restoreDarkScreen()
+    }
+
+    /**
+     * Puts back the screen timeout, power button press and brightness mode that the old dark
+     * screen mode held, where a session ended without restoring them.
+     */
+    private fun restoreDarkScreen() {
+        val saved = File("/data/local/tmp/slipstream-panel")
+        if (!saved.exists()) return
+        try {
+            val lines = saved.readText().split("\n")
+            listOf("system" to "screen_off_timeout", "global" to "power_button_short_press",
+                "system" to "screen_brightness_mode").forEachIndexed { i, (namespace, key) ->
+                val value = lines.getOrNull(i)
+                if (value.isNullOrEmpty()) {
+                    if (i < 2) run("settings", "delete", namespace, key)
+                } else {
+                    run("settings", "put", namespace, key, value)
+                }
+            }
+            // Left dark; power-reset alone is refused while the panel is taken as on.
+            if (!lines.getOrNull(2).isNullOrEmpty()) {
+                run("cmd", "display", "power-off", "0")
+                run("cmd", "display", "power-reset", "0")
+            }
+            Log.i(TAG, "Put back the screen settings the dark screen left held")
+        } catch (e: IOException) {
+            Log.w(TAG, "Couldn't read $saved", e)
+        }
+        saved.delete()
     }
 
     private val displayId get() = display?.display?.displayId
@@ -240,6 +268,10 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
             }
         }
         run("am", "start", "--display", id.toString(), "-n", target)
+    }
+
+    override fun launchOnPhone(component: String) {
+        run("am", "start", "--display", "0", "-n", component)
     }
 
     /** Hands-free voice search, an activity, where the assistant key's overlay is the phone's. */
@@ -411,29 +443,7 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     private fun wallpapers() = WallpaperManager.getInstance(shellContext())
 
     @Synchronized
-    override fun keepPanel(keep: Boolean) {
-        if (!keep || display == null) {
-            panel?.stop()
-            panel = null
-            return
-        }
-        if (panel == null) {
-            try {
-                panel = PanelKeeper(shellContext()).also { it.start() }
-            } catch (e: ReflectiveOperationException) {
-                Log.w(TAG, "No panel keeping; the phone sleeps as usual", e)
-                panel = null
-            } catch (e: RuntimeException) {
-                Log.w(TAG, "No panel keeping; the phone sleeps as usual", e)
-                panel = null
-            }
-        }
-    }
-
-    @Synchronized
     override fun release() {
-        panel?.stop()
-        panel = null
         awake?.stop()
         awake = null
         display?.release()

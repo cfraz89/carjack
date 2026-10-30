@@ -72,7 +72,7 @@ object Weather {
      * A network with internet. Not the process default: during a session the app is bound to the
      * head unit's WiFi, which has none.
      */
-    private fun internet(context: Context): Network? {
+    fun internet(context: Context): Network? {
         val connectivity = context.getSystemService(ConnectivityManager::class.java)
         @Suppress("DEPRECATION")
         return connectivity.allNetworks.firstOrNull { network ->

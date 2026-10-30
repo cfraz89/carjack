@@ -32,7 +32,7 @@ object ShizukuDisplay {
         .daemon(false)
         .processNameSuffix("display")
         .debuggable(false)
-        .version(35)
+        .version(36)
 
     @Volatile private var service: IDisplayService? = null
     private var bound = CountDownLatch(1)
@@ -71,25 +71,14 @@ object ShizukuDisplay {
 
     /**
      * A display drawing into [target] with [app] (a component or package) on it; returns what
-     * closes it, or null where Shizuku can't make one. [keepPanel]: the phone's panel goes dark
-     * rather than the phone sleeping, meanwhile.
+     * closes it, or null where Shizuku can't make one.
      */
-    fun open(
-        target: Surface, width: Int, height: Int, density: Int, app: String, keepPanel: Boolean,
-    ): Runnable? {
+    fun open(target: Surface, width: Int, height: Int, density: Int, app: String): Runnable? {
         val s = bind() ?: return null
         return try {
             if (s.create(target, width, height, density) < 0) return null
             s.launch(app)
-            Log.i(
-                TAG,
-                "Display up; the phone's panel " + if (keepPanel) {
-                    "goes dark instead of the phone sleeping"
-                } else {
-                    "sleeps with the phone, as usual"
-                },
-            )
-            if (keepPanel) s.keepPanel(true)
+            Log.i(TAG, "Display up")
             active = s
             Runnable {
                 active = null
@@ -123,6 +112,14 @@ object ShizukuDisplay {
     fun launch(component: String) {
         try {
             active?.launch(component)
+        } catch (ignored: RemoteException) {
+        }
+    }
+
+    /** [IDisplayService.launchOnPhone], while there's a display. */
+    fun launchOnPhone(component: String) {
+        try {
+            active?.launchOnPhone(component)
         } catch (ignored: RemoteException) {
         }
     }

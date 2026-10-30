@@ -27,8 +27,9 @@
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
     <!-- What the wallpaper service asks of an app reading the phone's wallpaper. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <!-- Roughly where the phone is, for the launcher's weather. -->
+    <!-- Roughly where the phone is, for the weather; exactly, for the dashboard's road and speed. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
     <!-- The apps the head unit can be given, for the picker and the launcher; and the home app. -->
     <queries>
@@ -77,6 +78,15 @@
             android:taskAffinity="io.github.cfraz89.slipstream.locked"
             android:excludeFromRecents="true"
             android:showWhenLocked="true" />
+        <!-- The phone's screen during a session, started by the shell; keeps the screen on. -->
+        <activity
+            android:name=".DashboardActivity"
+            android:exported="true"
+            android:theme="@style/SlipstreamTheme"
+            android:launchMode="singleTask"
+            android:taskAffinity="io.github.cfraz89.slipstream.dashboard"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true" />
 
         <receiver
             android:name=".BootReceiver"

@@ -54,12 +54,6 @@ interface IDisplayService {
     /** Sets a Settings.Secure value; null deletes it, back to the default. */
     void setSecureSetting(String key, String value) = 15;
 
-    /**
-     * While the display is up, whether the phone's panel goes dark instead of the phone
-     * sleeping ({@link PanelKeeper}).
-     */
-    void keepPanel(boolean keep) = 16;
-
     /** Part {@code part} (0 newest) of the phone's system log, open to read; null if none. */
     ParcelFileDescriptor systemLog(int part) = 17;
 
@@ -80,6 +74,9 @@ interface IDisplayService {
 
     /** Wakes the phone and takes away a lock screen that needs no PIN (a trusted device's). */
     void dismissKeyguard() = 23;
+
+    /** Starts an activity ("pkg/class") on the phone's own screen. */
+    void launchOnPhone(String component) = 24;
 
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
