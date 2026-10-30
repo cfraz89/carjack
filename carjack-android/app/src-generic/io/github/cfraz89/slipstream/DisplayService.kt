@@ -16,6 +16,7 @@ import android.view.InputDevice
 import android.view.InputEvent
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.Surface
 import java.io.File
 import java.io.FileNotFoundException
@@ -85,6 +86,21 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
                 Log.w(TAG, "The keyboard stays on the phone", e)
             } catch (e: RuntimeException) {
                 Log.w(TAG, "The keyboard stays on the phone", e)
+            }
+        }
+
+        /**
+         * The phone's focus moved to [displayId], as a tap on a display without a focus of its own
+         * would: the keyboard only opens on the focused display, and this one's focus is its own.
+         */
+        fun focusHere(displayId: Int) {
+            try {
+                val atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
+                atm.javaClass.getMethod("focusTopTask", Int::class.javaPrimitiveType).invoke(atm, displayId)
+            } catch (e: ReflectiveOperationException) {
+                Log.w(TAG, "Couldn't focus display $displayId", e)
+            } catch (e: RuntimeException) {
+                Log.w(TAG, "Couldn't focus display $displayId", e)
             }
         }
 
@@ -263,6 +279,7 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
         val id = displayId ?: return
         val event = fingers.event(action, pointer, x, y) ?: return
         try {
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) focusHere(id)
             inject(event, id)
         } catch (e: ReflectiveOperationException) {
             Log.w(TAG, "Could not inject a touch", e)

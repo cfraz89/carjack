@@ -32,7 +32,7 @@ object ShizukuDisplay {
         .daemon(false)
         .processNameSuffix("display")
         .debuggable(false)
-        .version(37)
+        .version(38)
 
     @Volatile private var service: IDisplayService? = null
     private var bound = CountDownLatch(1)

@@ -1,12 +1,17 @@
 package io.github.cfraz89.slipstream
 
 import android.Manifest
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.Icon
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -20,6 +25,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.text.format.DateFormat
+import android.util.Rational
 import android.view.KeyEvent
 import android.view.WindowInsets
 import android.view.WindowInsetsController
@@ -94,6 +100,8 @@ class DashboardActivity : ComponentActivity() {
         private val MPH_COUNTRIES = setOf("US", "GB", "LR", "MM")
         private const val MS_TO_KMH = 3.6
         private const val KMH_PER_MPH = 1.609344
+        private const val ACTION_BACK = "io.github.cfraz89.slipstream.dashboard.BACK"
+        private const val ACTION_HOME = "io.github.cfraz89.slipstream.dashboard.HOME"
 
         private var current = WeakReference<DashboardActivity>(null)
 
@@ -115,6 +123,7 @@ class DashboardActivity : ComponentActivity() {
     private var headUnitPackage by mutableStateOf<String?>(null)
     /** The ride's figures as well as the controls ([Variant.dashboardRide]). */
     private var ride by mutableStateOf(false)
+    private var pip by mutableStateOf(false)
 
     private class Battery(val percent: Int, val charging: Boolean, val celsius: Float)
 
@@ -123,6 +132,15 @@ class DashboardActivity : ComponentActivity() {
         current = WeakReference(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.setDecorFitsSystemWindows(false)
+        setPictureInPictureParams(pipParams())
+        registerReceiver(
+            pipAction,
+            IntentFilter().apply {
+                addAction(ACTION_BACK)
+                addAction(ACTION_HOME)
+            },
+            RECEIVER_NOT_EXPORTED,
+        )
         setContent { Dashboard() }
     }
 
@@ -133,36 +151,98 @@ class DashboardActivity : ComponentActivity() {
                 sm.registerListener(proximity, it, SensorManager.SENSOR_DELAY_NORMAL)
             }
         }
-        ride = Variant.dashboardRide(this)
-        val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        if (ride && fine) {
-            getSystemService(LocationManager::class.java)
-                .requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, location, Looper.getMainLooper())
-        }
         registerReceiver(batteryChanged, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         getSystemService(PowerManager::class.java).let {
             thermal = it.currentThermalStatus
             it.addThermalStatusListener(mainExecutor, thermalChanged)
         }
-        if (ride) main.post(pollWeather)
         main.post(pollHeadUnit)
+        ride = Variant.dashboardRide(this)
+        if (ride) startRide()
     }
 
     override fun onStop() {
         sensors()?.unregisterListener(proximity)
-        getSystemService(LocationManager::class.java).removeUpdates(location)
         unregisterReceiver(batteryChanged)
         getSystemService(PowerManager::class.java).removeThermalStatusListener(thermalChanged)
-        main.removeCallbacks(pollWeather)
         main.removeCallbacks(pollHeadUnit)
         main.removeCallbacks(uncover)
+        stopRide()
         cover(false)
         super.onStop()
     }
 
     override fun onDestroy() {
+        unregisterReceiver(pipAction)
         background.shutdown()
         super.onDestroy()
+    }
+
+    /** The ride layout's GPS and weather, which the controls don't need. */
+    private fun startRide() {
+        val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (fine) {
+            getSystemService(LocationManager::class.java)
+                .requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, location, Looper.getMainLooper())
+        }
+        main.post(pollWeather)
+    }
+
+    private fun stopRide() {
+        getSystemService(LocationManager::class.java).removeUpdates(location)
+        main.removeCallbacks(pollWeather)
+    }
+
+    /** Between the controls and the ride layout, kept for next time. */
+    private fun flip() {
+        stopRide()
+        ride = !ride
+        Variant.prefs(this).edit().putString("dashboard", if (ride) "ride" else "controls").apply()
+        if (ride) startRide()
+    }
+
+    /**
+     * Leaving shrinks it to a picture-in-picture window rather than closing it: the head unit's
+     * app, with back and home as the window's actions, and expanding it brings the dashboard back.
+     */
+    private fun pipParams(): PictureInPictureParams = PictureInPictureParams.Builder()
+        .setAspectRatio(Rational(1, 1))
+        .setAutoEnterEnabled(true)
+        .setActions(
+            listOf(
+                pipAction(ACTION_BACK, R.drawable.ic_sl_arrow_back, "Back"),
+                pipAction(ACTION_HOME, R.drawable.ic_sl_home, "Home"),
+            ),
+        )
+        .build()
+
+    private fun pipAction(action: String, icon: Int, title: String) = RemoteAction(
+        Icon.createWithResource(this, icon).setTint(android.graphics.Color.WHITE),
+        title,
+        title,
+        PendingIntent.getBroadcast(this, 0, Intent(action).setPackage(packageName), PendingIntent.FLAG_IMMUTABLE),
+    )
+
+    private val pipAction = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                ACTION_BACK -> background.execute { Variant.key(context, KeyEvent.KEYCODE_BACK) }
+                ACTION_HOME -> background.execute { Variant.goHome(context) }
+            }
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(inPip: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(inPip, newConfig)
+        pip = inPip
+        if (inPip) cover(false)
+    }
+
+    /** Out of the way as a picture-in-picture window, the phone's own screen showing beneath. */
+    private fun shrink(): Boolean = try {
+        enterPictureInPictureMode(pipParams())
+    } catch (e: IllegalStateException) {
+        false
     }
 
     private fun sensors() = getSystemService(SensorManager::class.java)
@@ -181,7 +261,7 @@ class DashboardActivity : ComponentActivity() {
 
     /** Dimmed right down, and the system bars away so a pocket can't swipe them open. */
     private fun cover(value: Boolean) {
-        if (covered == value) return
+        if (covered == value || (value && pip)) return
         covered = value
         window.attributes = window.attributes.apply {
             screenBrightness = if (value) 0f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
@@ -260,7 +340,14 @@ class DashboardActivity : ComponentActivity() {
                 })
                 return@Box
             }
-            if (ride) Ride() else Controls()
+            when {
+                pip -> Box(Modifier.fillMaxSize().padding(12.dp), contentAlignment = Alignment.Center) {
+                    val pkg = headUnitPackage
+                    DrawableImage(remember(pkg) { pkg?.let(::appIcon) }, Modifier.fillMaxSize(0.7f))
+                }
+                ride -> Ride()
+                else -> Controls()
+            }
         }
     }
 
@@ -362,15 +449,21 @@ class DashboardActivity : ComponentActivity() {
         }
     }
 
-    /** Slipstream's settings and the phone's own apps. */
+    /** The other layout; Slipstream's settings and the phone's apps, over this as picture-in-picture. */
     @Composable
     private fun PhoneButtons() {
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            RoundButton(
+                if (ride) R.drawable.ic_sl_dpad else R.drawable.ic_sl_speed,
+                if (ride) "Controls" else "Ride info",
+                56.dp,
+            ) { flip() }
             RoundButton(R.drawable.settings_24, "Slipstream settings", 56.dp) {
+                shrink()
                 startActivity(Intent(this@DashboardActivity, MainActivity::class.java))
             }
             RoundButton(R.drawable.ic_sl_phone, "Phone apps", 56.dp) {
-                startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME))
+                if (!shrink()) startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME))
             }
         }
     }
