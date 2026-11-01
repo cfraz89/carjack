@@ -62,7 +62,7 @@ class LockedActivity : ComponentActivity() {
                 Spacer(Modifier.height(24.dp))
                 Text("Phone locked", color = Color(0xFFE2E2E9), fontSize = 40.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(8.dp))
-                Text("Unlock it to continue", color = Color(0xFFC3C6CF), fontSize = 24.sp)
+                Text("Unlock to continue", color = Color(0xFFC3C6CF), fontSize = 24.sp)
             }
         }
     }

@@ -38,10 +38,10 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
         const val TAG = "carjack"
         const val SHELL = "com.android.shell"
 
-        // Private (no PUBLIC) and in the default group (no OWN_DISPLAY_GROUP, which this Android
-        // ignores anyway): together that makes it never-blank, rendering while the phone sleeps.
-        // No SHOULD_SHOW_SYSTEM_DECORATIONS either; the launcher brings its own taskbar.
-        const val FLAGS = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
+        // PUBLIC: on a private display only apps with activities there may use it, which shuts
+        // out the keyboard. No SHOULD_SHOW_SYSTEM_DECORATIONS: the launcher brings its own taskbar.
+        const val FLAGS = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
             (1 shl 6) or // SUPPORTS_TOUCH
             (1 shl 8) or // DESTROY_CONTENT_ON_REMOVAL
             (1 shl 10) or // TRUSTED
