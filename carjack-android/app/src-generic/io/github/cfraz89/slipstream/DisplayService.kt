@@ -59,6 +59,8 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
             "WifiConnectivityManager", "WifiNative", "ConnectivityService", "BluetoothAdapter",
             "BluetoothManagerService", "AdapterService", "UserServiceManager", "MediaCodec",
             "CCodec",
+            // DMD2's rescaling when it moves between the phone and the head unit.
+            "DisplayMetricsGuard", "DisplayUtils",
         )
 
         /** How long a detached display waits for its session to come back. */
