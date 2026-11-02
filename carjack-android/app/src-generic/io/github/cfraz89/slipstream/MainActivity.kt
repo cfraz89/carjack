@@ -118,6 +118,20 @@ class MainActivity : ComponentActivity() {
         Shizuku.addRequestPermissionResultListener(shizukuResult)
         Variant.prefs(this).registerOnSharedPreferenceChangeListener(prefsChanged)
         setContent { SlipstreamTheme { Screen() } }
+        if (savedInstanceState == null && toDashboard(intent)) finish()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (toDashboard(intent)) moveTaskToBack(true)
+    }
+
+    /** The app's icon during a session opens the dashboard; its settings button still opens this. */
+    private fun toDashboard(intent: Intent): Boolean {
+        val fromIcon = intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_LAUNCHER)
+        if (!fromIcon || ShizukuDisplay.active == null) return false
+        startActivity(Intent(this, DashboardActivity::class.java))
+        return true
     }
 
     private val shizukuResult =
