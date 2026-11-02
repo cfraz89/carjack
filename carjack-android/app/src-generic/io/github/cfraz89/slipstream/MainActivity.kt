@@ -437,16 +437,6 @@ class MainActivity : ComponentActivity() {
                 Variant.prefs(context).edit().putString("nav_bar", (!navBar).toString()).apply()
                 revision++
             }
-
-            val unlocked = Variant.holdsUnlock(context)
-            ListRow(
-                Leading.Glyph(R.drawable.ic_sl_lock_open), "Stay unlocked while connected",
-                trailing = { RowSwitch(unlocked) },
-            ) {
-                Variant.prefs(context).edit().putBoolean("hold_unlock", !unlocked).apply()
-                Variant.applyLockHold(context)
-                revision++
-            }
         }
     }
 

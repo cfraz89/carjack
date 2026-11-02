@@ -81,18 +81,15 @@ object Variant {
     /** The phone's screen during a session. */
     private const val DASHBOARD = "$APP_ID/$APP_ID.DashboardActivity"
 
-    /** Whether to keep the phone unlocked while a unit's connected; the user's choice. */
-    fun holdsUnlock(context: Context) = prefs(context).getBoolean("hold_unlock", true)
-
     /**
-     * While a unit's connected (and the user wants it), the screen going off doesn't lock the
+     * While a unit's connected, the screen going off doesn't lock the
      * phone: the lock screen would hide the apps on the head unit's display, which shares its display
      * group. Done as Smart Lock's trusted devices do, by holding off the lock after screen-off;
      * the power button still locks if it's set to lock instantly. Off the caller's thread.
      */
     fun applyLockHold(context: Context) {
         val app = context.applicationContext
-        val hold = prefs(app).getBoolean("linked", false) && holdsUnlock(app) && BootReceiver.isOn(app)
+        val hold = prefs(app).getBoolean("linked", false) && BootReceiver.isOn(app)
         AccessoryWifi.afterShell { holdLock(app, hold) }
     }
 
