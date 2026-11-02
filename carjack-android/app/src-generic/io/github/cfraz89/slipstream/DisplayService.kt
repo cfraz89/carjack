@@ -294,13 +294,6 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
         run("cmd", "notification", "allow_listener", component)
     }
 
-    /** From the trust service's dump: the current user's line reads trustState=TRUSTED. */
-    override fun trusted(): Boolean {
-        val line = run("dumpsys", "trust").lineSequence()
-            .firstOrNull { "(current)" in it && "trustState=" in it } ?: return false
-        return "trustState=TRUSTED" in line
-    }
-
     /** A key going down or up on the display, for its focused window (or, media keys, the player). */
     @Synchronized
     override fun key(code: Int, down: Boolean, meta: Int) {

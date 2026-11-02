@@ -1,16 +1,13 @@
 package io.github.cfraz89.slipstream
 
 import android.app.ActivityManager
-import android.app.KeyguardManager
 import android.app.PendingIntent
 import android.app.Service
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
-import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -75,57 +72,6 @@ object Variant {
     fun onLinked(context: Context, linked: Boolean) {
         prefs(context).edit().putBoolean("linked", linked).apply()
         applyLockHold(context)
-        watchScreenOff(context.applicationContext, linked)
-        if (linked) checkTrustSoon(context.applicationContext)
-    }
-
-    /** Whether the power button has been seen locking the phone through the lock hold. */
-    const val POWER_LOCKS = "power_locks"
-    private const val LOCK_CHECK_DELAY_MS = 2000L
-    private var screenOff: BroadcastReceiver? = null
-
-    /**
-     * With the lock hold on, a screen timeout can't lock the phone, so locking at screen-off is
-     * the power button's "instantly locks"; the shell can't read that setting itself.
-     */
-    private fun watchScreenOff(app: Context, linked: Boolean) {
-        if (linked && screenOff == null) {
-            val receiver = object : BroadcastReceiver() {
-                override fun onReceive(context: Context, intent: Intent) {
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        if (!prefs(app).getBoolean("linked", false) || !holdsUnlock(app)) {
-                            return@postDelayed
-                        }
-                        val locked = app.getSystemService(KeyguardManager::class.java).isDeviceLocked
-                        Log.i(TAG, "Locked at screen-off while held: $locked")
-                        prefs(app).edit().putBoolean(POWER_LOCKS, locked).apply()
-                    }, LOCK_CHECK_DELAY_MS)
-                }
-            }
-            screenOff = receiver
-            app.registerReceiver(receiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
-        } else if (!linked) {
-            screenOff?.let { app.unregisterReceiver(it) }
-            screenOff = null
-        }
-    }
-
-    /** Smart Lock takes a moment to trust a device that's just connected. */
-    private const val TRUST_CHECK_DELAY_MS = 15_000L
-
-    /**
-     * Whether the head unit keeps the phone unlocked (a trusted device), noted once seen so the
-     * reminder to set it up can go. Seen only, never unset: trust also lapses for other reasons.
-     */
-    private fun checkTrustSoon(app: Context) {
-        Handler(Looper.getMainLooper()).postDelayed({
-            AccessoryWifi.afterShell {
-                if (!prefs(app).getBoolean("linked", false)) return@afterShell
-                val trusted = ShizukuDisplay.trusted()
-                Log.i(TAG, "Phone trusted while the head unit's connected: $trusted")
-                if (trusted == true) prefs(app).edit().putBoolean("trust_seen", true).apply()
-            }
-        }, TRUST_CHECK_DELAY_MS)
     }
 
     private const val LOCK_AFTER = "lock_screen_lock_after_timeout"

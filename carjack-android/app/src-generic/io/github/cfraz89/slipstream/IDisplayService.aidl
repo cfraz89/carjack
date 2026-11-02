@@ -60,9 +60,6 @@ interface IDisplayService {
     /** An Android key code going down or up on the display, with KeyEvent meta state. */
     void key(int code, boolean down, int meta) = 18;
 
-    /** Whether a trust agent (Smart Lock's trusted devices, say) has the phone unlocked. */
-    boolean trusted() = 19;
-
     /** Enables a notification listener ("pkg/class"), as its settings switch would. */
     void allowNotificationListener(String component) = 20;
 

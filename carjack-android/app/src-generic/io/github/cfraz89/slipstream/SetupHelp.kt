@@ -51,30 +51,6 @@ object SetupHelp {
         listOf("Tap Turn on, or turn Bluetooth on from Quick Settings."),
     )
 
-    val trustedDevice = Help(
-        "Trusted device",
-        "While the phone is locked, Android hides every app on the head unit but Slipstream's own " +
-            "screens. With the head unit as a trusted device, the phone needs no PIN while it's " +
-            "connected, so Slipstream can clear the lock screen by itself.",
-        listOf(
-            "Connect to the head unit, so it's in range and on Bluetooth.",
-            "Tap Settings, or open Settings and search for \"Trusted devices\".",
-            "Under Extend Unlock → Trusted devices, add a trusted device and pick the head unit.",
-            "Unlock the phone once after adding it: trust starts from an unlock.",
-        ),
-    )
-
-    val powerButton = Help(
-        "Power button lock",
-        "Slipstream holds off the phone's own locking while the head unit is connected, but a power " +
-            "button set to lock instantly still locks it, which hides the head unit's apps.",
-        listOf(
-            "Tap Settings, then Device unlock.",
-            "Tap the gear beside Screen lock.",
-            "Turn off \"Power button instantly locks\".",
-        ),
-    )
-
     val tailscale = Help(
         "Tailscale",
         "With Tailscale on, Slipstream's traffic goes through it and can't reach the head unit's Wi-Fi, " +

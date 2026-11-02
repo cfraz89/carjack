@@ -32,7 +32,7 @@ object ShizukuDisplay {
         .daemon(false)
         .processNameSuffix("display")
         .debuggable(false)
-        .version(38)
+        .version(39)
 
     @Volatile private var service: IDisplayService? = null
     private var bound = CountDownLatch(1)
@@ -201,9 +201,6 @@ object ShizukuDisplay {
         it.setSecureSetting(key, value)
         true
     }
-
-    /** [IDisplayService.trusted]; null where Shizuku can't say. */
-    fun trusted(): Boolean? = withService(null) { it.trusted() }
 
     /** Part [part] of the phone's system log; null if none, or without Shizuku. */
     fun systemLog(part: Int): ParcelFileDescriptor? = withService(null) { it.systemLog(part) }

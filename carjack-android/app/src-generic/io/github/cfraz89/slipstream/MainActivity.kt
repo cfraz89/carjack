@@ -1,7 +1,6 @@
 package io.github.cfraz89.slipstream
 
 import android.Manifest
-import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
@@ -139,7 +138,7 @@ class MainActivity : ComponentActivity() {
 
     /** The service's status, and the switch flipped from the notification. */
     private val prefsChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key in setOf("status", "on", "retryable", "linked", "trust_seen", Variant.POWER_LOCKS)) {
+        if (key in setOf("status", "on", "retryable", "linked")) {
             runOnUiThread { revision++ }
         }
     }
@@ -299,27 +298,6 @@ class MainActivity : ComponentActivity() {
                     startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
                 }
             }
-        }
-        // Locked, the phone hides every app on the head unit but the launcher; a trusted unit keeps it
-        // unlocked while connected. Gone once that's been seen working.
-        val secure = getSystemService(KeyguardManager::class.java).isDeviceSecure
-        if (unitAddresses.size > 1 && !Variant.prefs(this).getBoolean("trust_seen", false) &&
-            secure
-        ) {
-            steps += Step("Make the head unit a trusted device, to stay unlocked", "Settings",
-                SetupHelp.trustedDevice, ::openSecuritySettings)
-        }
-        // The lock hold keeps a screen timeout from locking, but not the power button.
-        if (secure && Variant.holdsUnlock(this) &&
-            Variant.prefs(this).getBoolean(Variant.POWER_LOCKS, false)
-        ) {
-            steps += Step(
-                "The power button locks the phone, hiding the head unit's apps: turn off \"Power " +
-                    "button instantly locks\"",
-                "Settings",
-                SetupHelp.powerButton,
-                ::openSecuritySettings,
-            )
         }
         // An app inside a VPN can't reach the head unit's Wi-Fi: the stream times out.
         if (inVpn()) {
@@ -556,11 +534,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }, "slipstream-logs").start()
-    }
-
-    /** Trusted devices and the power button's lock are both reached from here. */
-    private fun openSecuritySettings() {
-        startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS))
     }
 
     /** Shizuku's Play Store page, or its download page where there's no store. */
