@@ -45,8 +45,6 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
             (1 shl 6) or // SUPPORTS_TOUCH
             (1 shl 8) or // DESTROY_CONTENT_ON_REMOVAL
             (1 shl 10) or // TRUSTED
-            (1 shl 11) or // OWN_DISPLAY_GROUP: awake while the phone's screen is off
-            (1 shl 12) or // ALWAYS_UNLOCKED: no lock screen, so apps draw while the phone's locked
             (1 shl 14) // OWN_FOCUS: its own input focus, apart from the phone's
 
         /** Where the system log goes: Downloads, so it can be sent on without adb or a shell app. */
@@ -372,12 +370,6 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
         }
     }
 
-    /** Asleep, a lock screen can't be dismissed: the phone wakes first, a no-op when it's awake. */
-    override fun dismissKeyguard() {
-        run("input", "keyevent", "KEYCODE_WAKEUP")
-        run("wm", "dismiss-keyguard")
-    }
-
     override fun cycleBluetooth() {
         run("cmd", "bluetooth_manager", "disable")
         run("cmd", "bluetooth_manager", "wait-for-state:STATE_OFF")
@@ -486,19 +478,6 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     } catch (e: RuntimeException) {
         Log.w(TAG, "No wallpaper crop for ${width}x$height", e)
         null
-    }
-
-    override fun secureSetting(key: String): String? {
-        val value = run("settings", "get", "secure", key).trim()
-        return if (value.isEmpty() || value == "null") null else value
-    }
-
-    override fun setSecureSetting(key: String, value: String?) {
-        if (value == null) {
-            run("settings", "delete", "secure", key)
-        } else {
-            run("settings", "put", "secure", key, value)
-        }
     }
 
     private fun wallpapers() = WallpaperManager.getInstance(shellContext())

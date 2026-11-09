@@ -48,12 +48,6 @@ interface IDisplayService {
      */
     int[] wallpaperCrop(int width, int height) = 13;
 
-    /** A Settings.Secure value, or null where unset. */
-    String secureSetting(String key) = 14;
-
-    /** Sets a Settings.Secure value; null deletes it, back to the default. */
-    void setSecureSetting(String key, String value) = 15;
-
     /** Part {@code part} (0 newest) of the phone's system log, open to read; null if none. */
     ParcelFileDescriptor systemLog(int part) = 17;
 
@@ -68,9 +62,6 @@ interface IDisplayService {
 
     /** The package of the app showing on the display, or null. */
     String topPackage() = 22;
-
-    /** Wakes the phone and takes away a lock screen that needs no PIN (a trusted device's). */
-    void dismissKeyguard() = 23;
 
     /** Starts an activity ("pkg/class") on the phone's own screen. */
     void launchOnPhone(String component) = 24;

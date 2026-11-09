@@ -44,9 +44,7 @@ object Variant {
      * 40 MB in all. -T: from now, not the whole ring buffer again after each restart.
      */
     fun prepare(context: Context) {
-        // Not linked yet: puts back a lock delay a crash left held.
         prefs(context).edit().putBoolean("linked", false).apply()
-        applyLockHold(context)
         val dir = context.getExternalFilesDir(null)
         if (dir == null || logcat != null) return
         try {
@@ -71,51 +69,10 @@ object Variant {
     /** Whether a unit's link is up, for [MainActivity]'s Bluetooth shortcut. */
     fun onLinked(context: Context, linked: Boolean) {
         prefs(context).edit().putBoolean("linked", linked).apply()
-        applyLockHold(context)
     }
-
-    private const val LOCK_AFTER = "lock_screen_lock_after_timeout"
-    /** A day: in effect, no locking on screen-off while the head unit is connected. */
-    private val HELD_LOCK_AFTER = (24 * 60 * 60 * 1000).toString()
 
     /** The phone's screen during a session. */
     private const val DASHBOARD = "$APP_ID/$APP_ID.DashboardActivity"
-
-    /**
-     * While a unit's connected, the screen going off doesn't lock the
-     * phone: the lock screen would hide the apps on the head unit's display, which shares its display
-     * group. Done as Smart Lock's trusted devices do, by holding off the lock after screen-off;
-     * the power button still locks if it's set to lock instantly. Off the caller's thread.
-     */
-    fun applyLockHold(context: Context) {
-        val app = context.applicationContext
-        val hold = prefs(app).getBoolean("linked", false) && BootReceiver.isOn(app)
-        AccessoryWifi.afterShell { holdLock(app, hold) }
-    }
-
-    /** Swaps the lock delay for [HELD_LOCK_AFTER], keeping the user's to put back. */
-    @Synchronized
-    private fun holdLock(context: Context, hold: Boolean) {
-        val prefs = prefs(context)
-        if (hold == prefs.getBoolean("lock_held", false)) return
-        if (hold) {
-            // Its own instance, told apart from a real answer by identity.
-            val unknown = String(charArrayOf('?'))
-            val original = ShizukuDisplay.secureSetting(LOCK_AFTER, unknown)
-            if (original === unknown || !ShizukuDisplay.setSecureSetting(LOCK_AFTER, HELD_LOCK_AFTER)) {
-                return
-            }
-            // Unset is kept as absent, and put back as unset.
-            prefs.edit().putBoolean("lock_held", true).putString("lock_after_saved", original).commit()
-            Log.i(TAG, "Holding off the lock while the head unit's connected (was $original)")
-        } else {
-            if (!ShizukuDisplay.setSecureSetting(LOCK_AFTER, prefs.getString("lock_after_saved", null))) {
-                return
-            }
-            prefs.edit().putBoolean("lock_held", false).remove("lock_after_saved").commit()
-            Log.i(TAG, "Lock delay put back")
-        }
-    }
 
     /** The notification's Turn off flips the app's own switch. */
     fun onStopRequested(context: Context) {
@@ -137,7 +94,6 @@ object Variant {
     fun onServiceDestroyed(service: Service) {
         val app = service.applicationContext
         AccessoryWifi.afterShell {
-            holdLock(app, false)
             ShizukuDisplay.unbind()
             Handler(Looper.getMainLooper()).postDelayed({
                 val state = ActivityManager.RunningAppProcessInfo()

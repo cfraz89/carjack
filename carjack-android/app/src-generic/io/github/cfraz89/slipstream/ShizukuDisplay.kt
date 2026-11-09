@@ -32,7 +32,7 @@ object ShizukuDisplay {
         .daemon(false)
         .processNameSuffix("display")
         .debuggable(false)
-        .version(39)
+        .version(40)
 
     @Volatile private var service: IDisplayService? = null
     private var bound = CountDownLatch(1)
@@ -105,13 +105,6 @@ object ShizukuDisplay {
         null
     }
 
-    /** [IDisplayService.dismissKeyguard], while there's a display. */
-    fun dismissKeyguard() {
-        try {
-            active?.dismissKeyguard()
-        } catch (ignored: RemoteException) {
-        }
-    }
 
     /** [IDisplayService.launch] onto the head unit's display, while there is one. */
     fun launch(component: String) {
@@ -187,19 +180,6 @@ object ShizukuDisplay {
             Log.w(TAG, "No framed wallpaper", e)
             null
         }
-    }
-
-    /**
-     * [IDisplayService.secureSetting]; [fallback] where Shizuku can't say, which callers tell from
-     * a real answer by identity.
-     */
-    fun secureSetting(key: String, fallback: String?): String? =
-        withService(fallback) { it.secureSetting(key) }
-
-    /** False where Shizuku couldn't set it. */
-    fun setSecureSetting(key: String, value: String?): Boolean = withService(false) {
-        it.setSecureSetting(key, value)
-        true
     }
 
     /** Part [part] of the phone's system log; null if none, or without Shizuku. */
