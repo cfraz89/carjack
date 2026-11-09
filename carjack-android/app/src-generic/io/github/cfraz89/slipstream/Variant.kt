@@ -248,11 +248,9 @@ object Variant {
             return null
         }
         Switchgear.watch(context)
-        LockWatcher.watch(context)
         ShizukuDisplay.launchOnPhone(DASHBOARD)
         return Runnable {
             Switchgear.stop()
-            LockWatcher.stop()
             DashboardActivity.close()
             close.run()
         }
@@ -320,8 +318,8 @@ object Variant {
         ShizukuDisplay.launch(LAUNCHER)
     }
 
-    /** The phone dashboard's layout: just controls, or the ride's figures too. */
-    fun dashboardRide(context: Context) = setting(context, "dashboard", "controls") == "ride"
+    /** Whether the phone's dashboard starts a session asleep, or with its controls lit. */
+    fun dashboardStartsAsleep(context: Context) = setting(context, "dashboard", "asleep") != "controls"
 
     /** What the head unit opens on connect, brought back to the front. */
     fun goHome(context: Context) {

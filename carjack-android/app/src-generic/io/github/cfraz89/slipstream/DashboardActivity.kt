@@ -1,6 +1,5 @@
 package io.github.cfraz89.slipstream
 
-import android.Manifest
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
@@ -16,33 +15,37 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.location.Location
-import android.location.LocationListener
-import android.location.LocationManager
-import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.PowerManager
-import android.text.format.DateFormat
 import android.util.Rational
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -51,55 +54,48 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
-import io.github.cfraz89.slipstream.launcher.BatteryIcon
 import io.github.cfraz89.slipstream.launcher.DrawableImage
-import io.github.cfraz89.slipstream.launcher.Hud
 import io.github.cfraz89.slipstream.launcher.LauncherTheme
-import io.github.cfraz89.slipstream.launcher.Palette
-import io.github.cfraz89.slipstream.launcher.Weather
 import io.github.cfraz89.slipstream.launcher.hudCaption
 import io.github.cfraz89.slipstream.launcher.hudText
 import io.github.cfraz89.slipstream.launcher.tappable
-import kotlinx.coroutines.delay
 import java.lang.ref.WeakReference
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.Executors
-import kotlin.math.roundToInt
 
 /**
- * The phone's screen during a session: what's on the head unit, with its back and home, and the
- * phone's heat or battery once they matter; or, as an option, the ride's figures - speed against
- * the road's limit, the road, the time, the weather and how the phone is faring. It keeps the screen on, so the phone neither sleeps (dropping the head unit's touches) nor
- * locks; covered (in a pocket), it goes black, dimmed right down, and takes no touches.
+ * The phone's screen during a session: asleep, for the least power, like the phone's own lock
+ * screen - a tap lights it a moment, and a swipe up brings back what's on the head unit, with its
+ * back and home. It keeps the screen on, so the phone neither sleeps (dropping the head unit's
+ * touches) nor locks; covered (in a pocket), it sleeps too, and a tap can't light it.
  */
 class DashboardActivity : ComponentActivity() {
     companion object {
-        private const val WEATHER_MS = 60_000L
         private const val HEAD_UNIT_MS = 2_000L
+        /** Near for this long, untouched, before it goes black: a hand reaching for it isn't a pocket. */
+        private const val COVER_MS = 1_500L
         /** Uncovered for this long before it lights again: a pocket's jostling isn't uncovering. */
         private const val UNCOVER_MS = 1_000L
-        private val MPH_COUNTRIES = setOf("US", "GB", "LR", "MM")
-        private const val MS_TO_KMH = 3.6
-        private const val KMH_PER_MPH = 1.609344
+        /** How long a tap lights the sleeping screen, from the last touch. */
+        private const val PEEK_MS = 4_000L
         private const val ACTION_BACK = "io.github.cfraz89.slipstream.dashboard.BACK"
         private const val ACTION_HOME = "io.github.cfraz89.slipstream.dashboard.HOME"
 
@@ -110,26 +106,50 @@ class DashboardActivity : ComponentActivity() {
         }
     }
 
-    private val mph = Locale.getDefault().country in MPH_COUNTRIES
+    /** How the window is set: lit, lit a moment over the sleeping screen, or black. */
+    private enum class Shown { LIT, PEEK, BLACK }
+
     private val main = Handler(Looper.getMainLooper())
     private val background = Executors.newSingleThreadExecutor()
 
+    /** In a pocket, by the proximity sensor. */
     private var covered by mutableStateOf(false)
-    private var speed by mutableStateOf<Int?>(null)
-    private var road by mutableStateOf<Roads.Road?>(null)
-    private var weather by mutableStateOf<Weather.Now?>(null)
-    private var battery by mutableStateOf<Battery?>(null)
-    private var thermal by mutableStateOf(PowerManager.THERMAL_STATUS_NONE)
+    /** Asleep: from the start ([Variant.dashboardStartsAsleep]), or put to sleep. */
+    private var asleep by mutableStateOf(true)
+    /** Lit a moment by a tap, asleep still. */
+    private var peeking by mutableStateOf(false)
+    /** Where the swipe hint's track is, in the window, once it's been shown. */
+    private var track: Rect? = null
+    /** How far up the track a swipe has the dot, while one's under way. */
+    private var drag by mutableStateOf<Float?>(null)
+    private var shown: Shown? = null
+    private var started = false
     private var headUnitPackage by mutableStateOf<String?>(null)
-    /** The ride's figures as well as the controls ([Variant.dashboardRide]). */
-    private var ride by mutableStateOf(false)
     private var pip by mutableStateOf(false)
 
-    private class Battery(val percent: Int, val charging: Boolean, val celsius: Float)
+    /** Slipstream's own colours (res/values-night), dark whatever the phone is set to. */
+    private val night by lazy {
+        createConfigurationContext(
+            Configuration(resources.configuration).apply {
+                uiMode = Configuration.UI_MODE_NIGHT_YES or (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv())
+            },
+        )
+    }
+    private fun tone(id: Int) = Color(night.getColor(id))
+    private val surface by lazy { tone(R.color.sl_surface) }
+    private val onSurface by lazy { tone(R.color.sl_on_surface) }
+    private val onSurfaceVariant by lazy { tone(R.color.sl_on_surface_variant) }
+    private val neutral by lazy { tone(R.color.sl_surface_container_highest) }
+    private val primary by lazy { tone(R.color.sl_primary) }
+    private val onPrimary by lazy { tone(R.color.sl_on_primary) }
+    private val primaryContainer by lazy { tone(R.color.sl_primary_container) }
+    private val onPrimaryContainer by lazy { tone(R.color.sl_on_primary_container) }
+    private val tertiary by lazy { tone(R.color.sl_tertiary) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         current = WeakReference(this)
+        asleep = Variant.dashboardStartsAsleep(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.setDecorFitsSystemWindows(false)
         setPictureInPictureParams(pipParams())
@@ -146,29 +166,25 @@ class DashboardActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        started = true
         sensors()?.let { sm ->
             sm.getDefaultSensor(Sensor.TYPE_PROXIMITY)?.let {
                 sm.registerListener(proximity, it, SensorManager.SENSOR_DELAY_NORMAL)
             }
         }
-        registerReceiver(batteryChanged, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        getSystemService(PowerManager::class.java).let {
-            thermal = it.currentThermalStatus
-            it.addThermalStatusListener(mainExecutor, thermalChanged)
-        }
-        main.post(pollHeadUnit)
-        ride = Variant.dashboardRide(this)
-        if (ride) startRide()
+        shown = null
+        applyShown()
     }
 
     override fun onStop() {
+        started = false
         sensors()?.unregisterListener(proximity)
-        unregisterReceiver(batteryChanged)
-        getSystemService(PowerManager::class.java).removeThermalStatusListener(thermalChanged)
         main.removeCallbacks(pollHeadUnit)
         main.removeCallbacks(uncover)
-        stopRide()
-        cover(false)
+        main.removeCallbacks(covering)
+        main.removeCallbacks(endPeek)
+        covered = false
+        peeking = false
         super.onStop()
     }
 
@@ -176,29 +192,6 @@ class DashboardActivity : ComponentActivity() {
         unregisterReceiver(pipAction)
         background.shutdown()
         super.onDestroy()
-    }
-
-    /** The ride layout's GPS and weather, which the controls don't need. */
-    private fun startRide() {
-        val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        if (fine) {
-            getSystemService(LocationManager::class.java)
-                .requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, location, Looper.getMainLooper())
-        }
-        main.post(pollWeather)
-    }
-
-    private fun stopRide() {
-        getSystemService(LocationManager::class.java).removeUpdates(location)
-        main.removeCallbacks(pollWeather)
-    }
-
-    /** Between the controls and the ride layout, kept for next time. */
-    private fun flip() {
-        stopRide()
-        ride = !ride
-        Variant.prefs(this).edit().putString("dashboard", if (ride) "ride" else "controls").apply()
-        if (ride) startRide()
     }
 
     /**
@@ -232,10 +225,16 @@ class DashboardActivity : ComponentActivity() {
         }
     }
 
+    /** As a picture-in-picture window it's lit, and comes back from one awake. */
     override fun onPictureInPictureModeChanged(inPip: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(inPip, newConfig)
         pip = inPip
-        if (inPip) cover(false)
+        if (inPip) {
+            covered = false
+            asleep = false
+            peeking = false
+        }
+        applyShown()
     }
 
     /** Out of the way as a picture-in-picture window, the phone's own screen showing beneath. */
@@ -251,64 +250,90 @@ class DashboardActivity : ComponentActivity() {
         override fun onSensorChanged(event: SensorEvent) {
             val near = event.values[0] < event.sensor.maximumRange
             main.removeCallbacks(uncover)
-            if (near) cover(true) else if (covered) main.postDelayed(uncover, UNCOVER_MS)
+            main.removeCallbacks(covering)
+            if (near) {
+                if (!covered) main.postDelayed(covering, COVER_MS)
+            } else if (covered) {
+                main.postDelayed(uncover, UNCOVER_MS)
+            }
         }
 
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
     }
 
+    private val covering = Runnable { cover(true) }
     private val uncover = Runnable { cover(false) }
+    private val endPeek = Runnable {
+        peeking = false
+        applyShown()
+    }
 
-    /** Dimmed right down, and the system bars away so a pocket can't swipe them open. */
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN && shown == Shown.LIT) main.removeCallbacks(covering)
+        return super.dispatchTouchEvent(event)
+    }
+
     private fun cover(value: Boolean) {
         if (covered == value || (value && pip)) return
         covered = value
+        if (value) peeking = false
+        applyShown()
+    }
+
+    private fun sleep(value: Boolean) {
+        main.removeCallbacks(endPeek)
+        peeking = false
+        if (asleep == value) return
+        asleep = value
+        applyShown()
+    }
+
+    /** Lit a moment longer, unless it's in a pocket. */
+    private fun peek() {
+        if (covered) return
+        main.removeCallbacks(endPeek)
+        main.postDelayed(endPeek, PEEK_MS)
+        if (peeking) return
+        peeking = true
+        applyShown()
+    }
+
+    /**
+     * Black: dimmed right down, at the display's slowest refresh, the system bars away so a pocket
+     * can't swipe them open, and no asking after the head unit. Peeking: lit, for the swipe's
+     * animation, the bars still away. Lit: all of it back.
+     */
+    private fun applyShown() {
+        val value = when {
+            pip || !(covered || asleep) -> Shown.LIT
+            peeking -> Shown.PEEK
+            else -> Shown.BLACK
+        }
+        if (shown == value) return
+        shown = value
         window.attributes = window.attributes.apply {
-            screenBrightness = if (value) 0f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+            screenBrightness = if (value == Shown.BLACK) 0f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+            preferredDisplayModeId = if (value == Shown.BLACK) slowestMode() else 0
         }
         window.insetsController?.let {
-            if (value) {
+            if (value == Shown.LIT) {
+                it.show(WindowInsets.Type.systemBars())
+            } else {
                 it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 it.hide(WindowInsets.Type.systemBars())
-            } else {
-                it.show(WindowInsets.Type.systemBars())
             }
         }
+        main.removeCallbacks(pollHeadUnit)
+        if (value == Shown.LIT && started) main.post(pollHeadUnit)
     }
 
-    private val location = LocationListener { fix: Location ->
-        speed = if (fix.hasSpeed()) {
-            val kmh = fix.speed * MS_TO_KMH
-            (if (mph) kmh / KMH_PER_MPH else kmh).roundToInt()
-        } else {
-            null
-        }
-        road = Roads.at(this, fix)
-    }
-
-    private val batteryChanged = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
-            if (level < 0) return
-            battery = Battery(
-                level * 100 / scale,
-                intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0,
-                intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10f,
-            )
-        }
-    }
-
-    private val thermalChanged = PowerManager.OnThermalStatusChangedListener { thermal = it }
-
-    private val pollWeather = object : Runnable {
-        override fun run() {
-            background.execute {
-                val now = Weather.now(this@DashboardActivity)
-                main.post { weather = now }
-            }
-            main.postDelayed(this, WEATHER_MS)
-        }
+    /** The display's slowest mode at its current size, or 0 for no preference. */
+    private fun slowestMode(): Int {
+        val display = display ?: return 0
+        val now = display.mode
+        return display.supportedModes
+            .filter { it.physicalWidth == now.physicalWidth && it.physicalHeight == now.physicalHeight }
+            .minByOrNull { it.refreshRate }?.modeId ?: 0
     }
 
     private val pollHeadUnit = object : Runnable {
@@ -333,44 +358,111 @@ class DashboardActivity : ComponentActivity() {
     @Composable
     private fun Dashboard() = LauncherTheme {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
-            if (covered) {
-                // Every touch taken here, and none acted on.
-                Box(Modifier.fillMaxSize().pointerInput(Unit) {
-                    awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
-                })
-                return@Box
-            }
             when {
                 pip -> Box(Modifier.fillMaxSize().padding(12.dp), contentAlignment = Alignment.Center) {
                     val pkg = headUnitPackage
                     DrawableImage(remember(pkg) { pkg?.let(::appIcon) }, Modifier.fillMaxSize(0.7f))
                 }
-                ride -> Ride()
+                covered || asleep -> Asleep()
                 else -> Controls()
             }
         }
     }
 
-    /** What's on the head unit, its back and home, and only what needs attention. */
+    /**
+     * Black, every touch taken: a touch lights it a moment, and, lit, a swipe up the hint's track
+     * wakes it, the dot following the finger.
+     */
+    @Composable
+    private fun Asleep() {
+        Box(
+            Modifier.fillMaxSize().pointerInput(Unit) {
+                awaitEachGesture {
+                    val start = awaitFirstDown(requireUnconsumed = false).position
+                    val onTrack = peeking && track?.inflate(TRACK_SLOP.toPx())?.contains(start) == true
+                    peek()
+                    while (true) {
+                        val change = awaitPointerEvent().changes.firstOrNull() ?: break
+                        change.consume()
+                        if (onTrack) {
+                            val up = ((start.y - change.position.y) / DOT_TRAVEL.toPx()).coerceIn(0f, 1f)
+                            drag = up
+                            if (up == 1f && !covered) {
+                                sleep(false)
+                                break
+                            }
+                        }
+                        if (!change.pressed) break
+                    }
+                    drag = null
+                }
+            },
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            if (peeking) SwipeHint(Modifier.padding(bottom = 72.dp))
+        }
+    }
+
+    /** A track with a dot rising up it, or following a swipe, over "swipe up". */
+    @Composable
+    private fun SwipeHint(modifier: Modifier) {
+        val rise by rememberInfiniteTransition(label = "swipe").animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(1_400, easing = LinearEasing), RepeatMode.Restart),
+            label = "rise",
+        )
+        val up = drag ?: rise
+        Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                Modifier
+                    .width(DOT + DOT_INSET * 2)
+                    .height(DOT + DOT_INSET * 2 + DOT_TRAVEL)
+                    .onGloballyPositioned { track = it.boundsInRoot() }
+                    .border(2.dp, primary.copy(alpha = 0.6f), CircleShape),
+                contentAlignment = Alignment.BottomCenter,
+            ) {
+                Box(
+                    Modifier
+                        .padding(bottom = DOT_INSET)
+                        .offset(y = -DOT_TRAVEL * up)
+                        .alpha(if (drag != null) 1f else 1f - rise * rise)
+                        .size(DOT)
+                        .background(tertiary, CircleShape),
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            Text("SWIPE UP", style = hudCaption().copy(color = onSurfaceVariant))
+        }
+    }
+
+    /**
+     * Slipstream's name; what's on the head unit, and its back and home, large; sleep, as large;
+     * then the phone's own buttons.
+     */
     @Composable
     private fun Controls() {
-        BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding().padding(24.dp)) {
+        BoxWithConstraints(
+            Modifier.fillMaxSize().background(surface).systemBarsPadding().padding(24.dp),
+        ) {
             if (maxWidth > maxHeight) {
                 Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
                     Column(
-                        Modifier.weight(1f),
+                        Modifier.weight(1f).fillMaxHeight(),
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.SpaceBetween,
                     ) {
+                        Header()
                         OnHeadUnit()
-                        Alerts()
+                        Spacer(Modifier.height(0.dp))
                     }
                     Column(
                         Modifier.weight(1f),
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(32.dp),
+                        verticalArrangement = Arrangement.spacedBy(28.dp),
                     ) {
-                        HeadUnitButtons(88.dp)
+                        HeadUnitButtons(96.dp)
+                        SleepButton()
                         PhoneButtons()
                     }
                 }
@@ -380,45 +472,45 @@ class DashboardActivity : ComponentActivity() {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Alerts()
+                    Header()
                     OnHeadUnit()
-                    HeadUnitButtons(88.dp)
-                    PhoneButtons()
-                }
-            }
-        }
-    }
-
-    @Composable
-    private fun OnHeadUnit() {
-        val pkg = headUnitPackage
-        val icon = remember(pkg) { pkg?.let(::appIcon) }
-        val label = remember(pkg) { pkg?.let(::appLabel) }
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            DrawableImage(icon, Modifier.size(112.dp))
-            Spacer(Modifier.height(16.dp))
-            Text(label.orEmpty(), style = hudText(34.sp, FontWeight.SemiBold), maxLines = 1)
-            Text("ON HEAD UNIT", style = hudCaption())
-        }
-    }
-
-    /** The phone's heat and a low battery, only once they matter. */
-    @Composable
-    private fun Alerts() {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            val (heat, hot) = heat()
-            if (thermal >= PowerManager.THERMAL_STATUS_LIGHT) {
-                Text(heat, style = hudText(26.sp, FontWeight.SemiBold, if (hot) WARN else Palette.text))
-            }
-            battery?.let { b ->
-                if (b.percent <= 15 && !b.charging) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        BatteryIcon(b.percent, false, Modifier.size(26.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("${b.percent}%", style = hudText(26.sp, FontWeight.SemiBold, WARN))
+                    HeadUnitButtons(120.dp)
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(28.dp),
+                    ) {
+                        SleepButton()
+                        PhoneButtons()
                     }
                 }
             }
+        }
+    }
+
+    @Composable
+    private fun Header() {
+        val logo = remember { getDrawable(R.mipmap.ic_sl_launcher) }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            DrawableImage(logo, Modifier.size(40.dp).clip(CircleShape))
+            Spacer(Modifier.width(12.dp))
+            Text(
+                "SLIPSTREAM",
+                style = hudText(26.sp, FontWeight.SemiBold, onSurface).copy(letterSpacing = 0.12.em),
+            )
+        }
+    }
+
+    /** Nothing where nothing's on the head unit: no session, or not yet asked. */
+    @Composable
+    private fun OnHeadUnit() {
+        val pkg = headUnitPackage ?: return
+        val icon = remember(pkg) { appIcon(pkg) }
+        val label = remember(pkg) { appLabel(pkg) }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            DrawableImage(icon, Modifier.size(96.dp))
+            Spacer(Modifier.height(16.dp))
+            Text(label, style = hudText(34.sp, FontWeight.SemiBold, onSurface), maxLines = 1)
+            Text("ON HEAD UNIT", style = hudCaption().copy(color = onSurfaceVariant))
         }
     }
 
@@ -434,30 +526,40 @@ class DashboardActivity : ComponentActivity() {
     /** Back and home on the head unit, and its launcher where home is another app. */
     @Composable
     private fun HeadUnitButtons(size: Dp) {
-        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            RoundButton(R.drawable.ic_sl_arrow_back, "Back", size) {
+        Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+            RoundButton(R.drawable.ic_sl_arrow_back, "Back", size, primaryContainer, onPrimaryContainer) {
                 background.execute { Variant.key(this@DashboardActivity, KeyEvent.KEYCODE_BACK) }
             }
-            RoundButton(R.drawable.ic_sl_home, "Home", size) {
+            RoundButton(R.drawable.ic_sl_home, "Home", size, primaryContainer, onPrimaryContainer) {
                 background.execute { Variant.goHome(this@DashboardActivity) }
             }
             if (!Variant.opensLauncher(this@DashboardActivity)) {
-                RoundButton(R.drawable.ic_apps, "Launcher", size) {
+                RoundButton(R.drawable.ic_apps, "Launcher", size, primaryContainer, onPrimaryContainer) {
                     background.execute { Variant.openLauncher() }
                 }
             }
         }
     }
 
-    /** The other layout; Slipstream's settings and the phone's apps, over this as picture-in-picture. */
+    /** The screen's other main action, so wide where the rest are round. */
+    @Composable
+    private fun SleepButton() {
+        Box(
+            Modifier
+                .width(200.dp)
+                .height(88.dp)
+                .tappable(CircleShape) { sleep(true) }
+                .background(primary),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(painterResource(R.drawable.ic_sl_dark), "Sleep", tint = onPrimary, modifier = Modifier.size(40.dp))
+        }
+    }
+
+    /** Slipstream's settings and the phone's apps, over this as picture-in-picture. */
     @Composable
     private fun PhoneButtons() {
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            RoundButton(
-                if (ride) R.drawable.ic_sl_dpad else R.drawable.ic_sl_speed,
-                if (ride) "Controls" else "Ride info",
-                56.dp,
-            ) { flip() }
+        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
             RoundButton(R.drawable.settings_24, "Slipstream settings", 56.dp) {
                 shrink()
                 startActivity(Intent(this@DashboardActivity, MainActivity::class.java))
@@ -468,170 +570,27 @@ class DashboardActivity : ComponentActivity() {
         }
     }
 
-    /** The ride's figures: speed against the limit, the road, the time, weather and the phone. */
     @Composable
-    private fun Ride() {
-        BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding().padding(24.dp)) {
-            if (maxWidth > maxHeight) {
-                Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) { Speed() }
-                    Spacer(Modifier.width(24.dp))
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                        Clock()
-                        Status()
-                        Buttons()
-                    }
-                }
-            } else {
-                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
-                    Clock()
-                    Speed()
-                    Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                        Status()
-                        Buttons()
-                    }
-                }
-            }
-        }
-    }
-
-    @Composable
-    private fun Clock() {
-        var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-        LaunchedEffect(Unit) {
-            while (true) {
-                delay(60_000 - System.currentTimeMillis() % 60_000)
-                now = System.currentTimeMillis()
-            }
-        }
-        val locale = Locale.getDefault()
-        val pattern = DateFormat.getBestDateTimePattern(locale, if (DateFormat.is24HourFormat(this)) "Hm" else "hm")
-        Column {
-            Text(SimpleDateFormat(pattern, locale).format(Date(now)), style = hudText(64.sp, FontWeight.SemiBold))
-            Text(
-                SimpleDateFormat(DateFormat.getBestDateTimePattern(locale, "EEEEdMMMM"), locale)
-                    .format(Date(now)).uppercase(locale),
-                style = hudCaption(),
-                maxLines = 1,
-            )
-        }
-    }
-
-    /** The speed, the limit beside it as signed, and the road beneath. */
-    @Composable
-    private fun Speed() {
-        val limit = road?.limit?.let { shown(it) }
-        val over = limit != null && speed != null && speed!! > limit
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f, fill = false)) {
-                Text(
-                    speed?.toString() ?: "–",
-                    style = hudText(144.sp, FontWeight.SemiBold, if (over) WARN else Palette.text),
-                    maxLines = 1,
-                )
-                Text(if (mph) "MPH" else "KM/H", style = hudCaption())
-            }
-            if (limit != null) {
-                Spacer(Modifier.width(28.dp))
-                Box(
-                    Modifier
-                        .size(116.dp)
-                        .background(Color.White, CircleShape)
-                        .border(12.dp, LIMIT_RING, CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        limit.toString(),
-                        style = TextStyle(fontFamily = Hud, fontWeight = FontWeight.SemiBold, fontSize = 48.sp),
-                        color = Color.Black,
-                    )
-                }
-            }
-        }
-        val r = road
-        val name = listOfNotNull(r?.ref, r?.name).joinToString("  ·  ")
-        if (name.isNotEmpty()) {
-            Spacer(Modifier.height(12.dp))
-            Text(name, style = hudText(30.sp), maxLines = 2, overflow = TextOverflow.Ellipsis)
-        }
-    }
-
-    /** In the units the speed's in. */
-    private fun shown(limit: Roads.Limit): Int = when {
-        limit.mph == mph -> limit.value
-        mph -> (limit.value / KMH_PER_MPH).roundToInt()
-        else -> (limit.value * KMH_PER_MPH).roundToInt()
-    }
-
-    /** Weather, battery and the phone's heat. */
-    @Composable
-    private fun Status() {
-        val locale = Locale.getDefault()
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            weather?.let { w ->
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(painterResource(w.icon), null, tint = Palette.accent, modifier = Modifier.size(30.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("${w.temperature}°", style = hudText(32.sp, FontWeight.SemiBold))
-                    }
-                    Text(w.sky.uppercase(locale), style = hudCaption(), maxLines = 1)
-                }
-            }
-            battery?.let { b ->
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        BatteryIcon(b.percent, b.charging, Modifier.size(30.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            "${b.percent}%",
-                            style = hudText(
-                                32.sp, FontWeight.SemiBold,
-                                if (b.percent <= 15 && !b.charging) WARN else Palette.text,
-                            ),
-                        )
-                    }
-                    Text(if (b.charging) "CHARGING" else "BATTERY", style = hudCaption())
-                }
-                val (heat, hot) = heat()
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(
-                        "${b.celsius.roundToInt()}°",
-                        style = hudText(32.sp, FontWeight.SemiBold, if (hot) WARN else Palette.text),
-                    )
-                    Text(heat, style = hudCaption())
-                }
-            }
-        }
-    }
-
-    /** The phone's own read of its heat, and whether it's slowing down for it. */
-    private fun heat(): Pair<String, Boolean> = when (thermal) {
-        PowerManager.THERMAL_STATUS_NONE -> "PHONE" to false
-        PowerManager.THERMAL_STATUS_LIGHT -> "PHONE WARM" to false
-        PowerManager.THERMAL_STATUS_MODERATE -> "PHONE HOT" to true
-        else -> "PHONE TOO HOT" to true
-    }
-
-    /** The head unit's back and home; Slipstream's settings and the phone's own apps. */
-    @Composable
-    private fun Buttons() {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            HeadUnitButtons(56.dp)
-            PhoneButtons()
-        }
-    }
-
-    @Composable
-    private fun RoundButton(icon: Int, description: String, size: Dp, onClick: () -> Unit) {
+    private fun RoundButton(
+        icon: Int,
+        description: String,
+        size: Dp,
+        fill: Color = neutral,
+        tint: Color = onSurface,
+        onClick: () -> Unit,
+    ) {
         Box(
-            Modifier.size(size).tappable(CircleShape, onClick = onClick).background(Palette.tonal),
+            Modifier.size(size).tappable(CircleShape, onClick = onClick).background(fill),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(painterResource(icon), description, tint = Palette.onTonal, modifier = Modifier.size(size * 0.44f))
+            Icon(painterResource(icon), description, tint = tint, modifier = Modifier.size(size * 0.44f))
         }
     }
 }
 
-private val WARN = Color(0xFFFFB4AB)
-private val LIMIT_RING = Color(0xFFD32F2F)
+/** The swipe hint's dot, its inset in the track, and how far up the track it travels. */
+private val DOT = 40.dp
+private val DOT_INSET = 8.dp
+private val DOT_TRAVEL = 104.dp
+/** How far outside the track a swipe may start. */
+private val TRACK_SLOP = 24.dp

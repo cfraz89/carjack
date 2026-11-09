@@ -45,6 +45,8 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
             (1 shl 6) or // SUPPORTS_TOUCH
             (1 shl 8) or // DESTROY_CONTENT_ON_REMOVAL
             (1 shl 10) or // TRUSTED
+            (1 shl 11) or // OWN_DISPLAY_GROUP: awake while the phone's screen is off
+            (1 shl 12) or // ALWAYS_UNLOCKED: no lock screen, so apps draw while the phone's locked
             (1 shl 14) // OWN_FOCUS: its own input focus, apart from the phone's
 
         /** Where the system log goes: Downloads, so it can be sent on without adb or a shell app. */

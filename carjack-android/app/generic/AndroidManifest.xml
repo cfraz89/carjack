@@ -27,9 +27,8 @@
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
     <!-- What the wallpaper service asks of an app reading the phone's wallpaper. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <!-- Roughly where the phone is, for the weather; exactly, for the dashboard's road and speed. -->
+    <!-- Roughly where the phone is, for the weather. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
     <!-- The apps the head unit can be given, for the picker and the launcher; and the home app. -->
     <queries>
@@ -69,16 +68,6 @@
         <activity
             android:name=".RemoteAppsActivity"
             android:exported="false" />
-        <!-- The head unit's screen while the phone is locked (LockWatcher). Exported so the shell can
-             start it on the head unit's display; over the lock screen, in a task of its own. -->
-        <activity
-            android:name=".LockedActivity"
-            android:exported="true"
-            android:theme="@style/SlipstreamTheme"
-            android:launchMode="singleTask"
-            android:taskAffinity="io.github.cfraz89.slipstream.locked"
-            android:excludeFromRecents="true"
-            android:showWhenLocked="true" />
         <!-- The phone's screen during a session, started by the shell; keeps the screen on. -->
         <activity
             android:name=".DashboardActivity"
@@ -86,7 +75,6 @@
             android:theme="@style/SlipstreamTheme"
             android:launchMode="singleTask"
             android:taskAffinity="io.github.cfraz89.slipstream.dashboard"
-            android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:screenOrientation="fullSensor"
             android:supportsPictureInPicture="true"

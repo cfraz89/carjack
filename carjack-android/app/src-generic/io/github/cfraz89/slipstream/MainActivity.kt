@@ -77,17 +77,16 @@ class MainActivity : ComponentActivity() {
             Manifest.permission.READ_MEDIA_IMAGES,
         )
 
-        /** Granted with the rest through Shizuku, but nothing waits on them: the weather, the dashboard's road. */
+        /** Granted with the rest through Shizuku, but nothing waits on it: the weather. */
         val OPTIONAL_PERMISSIONS = arrayOf(
             Manifest.permission.ACCESS_COARSE_LOCATION,
-            Manifest.permission.ACCESS_FINE_LOCATION,
         )
 
         /** Display densities offered, by name; 0 is automatic. */
         val SIZES = listOf("Default", "Smaller", "Larger", "Largest")
 
-        /** The dashboard's layouts, as [Variant.dashboardRide] picks. */
-        val PHONE_SCREENS = listOf("Controls", "Ride info")
+        /** How the dashboard starts a session, as [Variant.dashboardStartsAsleep] picks. */
+        val PHONE_SCREENS = listOf("Asleep", "Controls")
         val DENSITIES = intArrayOf(0, 160, 240, 280)
     }
 
@@ -209,9 +208,9 @@ class MainActivity : ComponentActivity() {
                 revision++
             }
             Dialog.PHONE_SCREEN -> ChoiceDialog(
-                "Phone screen", PHONE_SCREENS, if (Variant.dashboardRide(this)) 1 else 0, { dialog = null },
+                "Phone screen", PHONE_SCREENS, if (Variant.dashboardStartsAsleep(this)) 0 else 1, { dialog = null },
             ) {
-                Variant.prefs(this).edit().putString("dashboard", if (it == 1) "ride" else "controls").apply()
+                Variant.prefs(this).edit().putString("dashboard", if (it == 1) "controls" else "asleep").apply()
                 dialog = null
                 revision++
             }
@@ -426,7 +425,7 @@ class MainActivity : ComponentActivity() {
 
             ListRow(
                 Leading.Glyph(R.drawable.ic_sl_phone), "Phone screen",
-                PHONE_SCREENS[if (Variant.dashboardRide(context)) 1 else 0], trailing = { Chevron() },
+                PHONE_SCREENS[if (Variant.dashboardStartsAsleep(context)) 0 else 1], trailing = { Chevron() },
             ) { dialog = Dialog.PHONE_SCREEN }
 
             val navBar = Variant.setting(context, "nav_bar", "false").toBoolean()
