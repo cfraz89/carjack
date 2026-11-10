@@ -82,15 +82,11 @@ class MainActivity : ComponentActivity() {
             Manifest.permission.ACCESS_COARSE_LOCATION,
         )
 
-        /** Display densities offered, by name; 0 is automatic. */
-        val SIZES = listOf("Default", "Smaller", "Larger", "Largest")
-
         /** How the dashboard starts a session, as [Variant.dashboardStartsAsleep] picks. */
         val PHONE_SCREENS = listOf("Asleep", "Controls")
-        val DENSITIES = intArrayOf(0, 160, 240, 280)
     }
 
-    private enum class Dialog { UNIT, SIZE, PHONE_SCREEN, LOGS }
+    private enum class Dialog { PHONE_SCREEN, LOGS }
 
     /** A thing still to set up, with the button that sees to it and how to do it by hand. */
     private data class Step(
@@ -105,8 +101,6 @@ class MainActivity : ComponentActivity() {
     /** Bumped by [refresh]: the screen reads everything afresh from settings and the system. */
     private var revision by mutableIntStateOf(0)
     private var dialog by mutableStateOf<Dialog?>(null)
-    private var unitNames = listOf("Any")
-    private var unitAddresses = listOf("")
     private var settingUp = false
     private var optionalTried = false
 
@@ -164,7 +158,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refresh() {
-        findUnits()
         revision++
         autoSetUp()
     }
@@ -179,7 +172,7 @@ class MainActivity : ComponentActivity() {
                 SetupCard(steps)
             }
             // Pairing has a card of its own, once there's Bluetooth to pair with.
-            if (permissionsGranted() && bluetoothOn() && unitAddresses.size <= 1) {
+            if (permissionsGranted() && bluetoothOn() && pairedUnits(this@MainActivity).size <= 1) {
                 Spacer(Modifier.height(12.dp))
                 PairCard()
             }
@@ -191,23 +184,7 @@ class MainActivity : ComponentActivity() {
             HelpCard()
         }
         when (dialog) {
-            Dialog.UNIT -> ChoiceDialog(
-                "Head unit", unitNames, unitIndex(), { dialog = null },
-            ) {
-                Variant.prefs(this).edit().putString("target", unitAddresses[it]).apply()
-                dialog = null
-                revision++
-            }
-            Dialog.SIZE -> ChoiceDialog(
-                "Scale on the head unit", SIZES, densityIndex(), { dialog = null },
-            ) {
-                Variant.prefs(this).edit()
-                    .putString("density", if (DENSITIES[it] == 0) "" else DENSITIES[it].toString())
-                    .apply()
-                dialog = null
-                revision++
-            }
-            Dialog.PHONE_SCREEN -> ChoiceDialog(
+            Dialog.PHONE_SCREEN ->ChoiceDialog(
                 "Phone screen", PHONE_SCREENS, if (Variant.dashboardStartsAsleep(this)) 0 else 1, { dialog = null },
             ) {
                 Variant.prefs(this).edit().putString("dashboard", if (it == 1) "controls" else "asleep").apply()
@@ -398,30 +375,16 @@ class MainActivity : ComponentActivity() {
     private fun SettingsCard() {
         val context = this
         SectionCard(MaterialTheme.colorScheme.surfaceContainer) {
-            ListRow(Leading.Glyph(R.drawable.ic_sl_unit), "Head unit", unitNames[unitIndex()],
-                trailing = { Chevron() }) { dialog = Dialog.UNIT }
-
-            val app = Choices.current(context)
-            val glyph = app == Previews.HOME && Variant.homeApp(context) == null
-            ListRow(
-                Leading.Picture(Choices.icon(context, app), tinted = glyph),
-                "On connect", Choices.name(context, app), trailing = { Chevron() },
-            ) { startActivity(Intent(context, OnConnectActivity::class.java)) }
+            HeadUnitRow { revision++ }
+            OnConnectRow()
 
             ListRow(Leading.Glyph(R.drawable.ic_sl_home), "Preview the launcher",
                 "Try or arrange it here", trailing = { Chevron() }) {
                 startActivity(Intent().setClassName(context, "io.github.cfraz89.slipstream.LauncherOnPhone"))
             }
 
-            ListRow(Leading.Glyph(R.drawable.ic_sl_text_size), "Scale", SIZES[densityIndex()],
-                trailing = { Chevron() }) { dialog = Dialog.SIZE }
-
-            val remoteApps = Switchgear.apps(context).size
-            ListRow(
-                Leading.Glyph(R.drawable.ic_sl_remote), "Remote mode apps",
-                if (remoteApps == 1) "1 app" else "$remoteApps apps",
-                trailing = { Chevron() },
-            ) { startActivity(Intent(context, RemoteAppsActivity::class.java)) }
+            ScaleRow { revision++ }
+            RemoteAppsRow()
 
             ListRow(
                 Leading.Glyph(R.drawable.ic_sl_phone), "Phone screen",
@@ -568,34 +531,6 @@ class MainActivity : ComponentActivity() {
         val service = Intent(this, SlipstreamService::class.java)
         if (on) startForegroundService(service) else stopService(service)
         revision++
-    }
-
-    /** Automatic, then each paired head unit. */
-    private fun findUnits() {
-        val names = mutableListOf("Any")
-        val addresses = mutableListOf("")
-        val adapter = getSystemService(BluetoothManager::class.java).adapter
-        if (bluetoothOn() &&
-            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-        ) {
-            for (device in adapter.bondedDevices) {
-                if (Bluetooth.hostsIap(device.uuids)) {
-                    names += device.name ?: device.address
-                    addresses += device.address
-                }
-            }
-        }
-        unitNames = names
-        unitAddresses = addresses
-    }
-
-    private fun unitIndex() = unitAddresses
-        .indexOfFirst { it.equals(Variant.setting(this, "target", ""), ignoreCase = true) }
-        .coerceAtLeast(0)
-
-    private fun densityIndex(): Int {
-        val density = Variant.setting(this, "density", "")
-        return (1 until DENSITIES.size).firstOrNull { DENSITIES[it].toString() == density } ?: 0
     }
 
     private fun permissionsGranted() = granted(PERMISSIONS)

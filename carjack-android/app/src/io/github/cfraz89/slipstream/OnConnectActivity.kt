@@ -38,7 +38,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import io.github.cfraz89.slipstream.launcher.DrawableImage
+import io.github.cfraz89.slipstream.ui.R
 
 /**
  * What the head unit opens on connect, picked like a wallpaper: a large thumbnail per choice, the last
@@ -82,7 +82,7 @@ class OnConnectActivity : ComponentActivity() {
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
             )
             val current = Choices.current(this@OnConnectActivity)
-            val choices = listOf(Choices.LAUNCHER, Previews.HOME, current.takeIf(Choices::isApp))
+            val choices = Variant.ON_CONNECT + current.takeIf(Choices::isApp)
             choices.chunked(2).forEach { line ->
                 Row(Modifier.fillMaxWidth()) {
                     line.forEach { choice ->
@@ -190,7 +190,7 @@ class OnConnectActivity : ComponentActivity() {
             Icon(painterResource(R.drawable.ic_sl_apps), null, modifier, tint = primary)
             return
         }
-        val glyph = choice == Previews.HOME && Variant.homeApp(this) == null
+        val glyph = choice == Previews.HOME && Choices.homeApp(this) == null
         DrawableImage(Choices.icon(this, choice), modifier, tint = if (glyph) primary else null)
     }
 }

@@ -75,6 +75,12 @@ interface IDisplayService {
     /** Off its surface but kept, apps and all, for a session that comes back soon; released after a while. */
     void detach() = 26;
 
+    /**
+     * The app on top of the phone's screen moved onto the display, task and all; false where the
+     * top is the home screen, {@code exclude}'s, or can't be moved.
+     */
+    boolean bringFromPhone(String exclude) = 27;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

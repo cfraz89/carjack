@@ -1,16 +1,21 @@
 package io.github.cfraz89.slipstream
 
 import android.Manifest
+import android.app.ActivityTaskManager
 import android.app.PendingIntent
 import android.app.Service
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.drawable.Drawable
 import android.hardware.display.DisplayManager
 import android.os.Process
+import android.os.RemoteException
 import android.os.SystemClock
 import android.os.SystemProperties
 import android.os.UserHandle
@@ -85,14 +90,26 @@ object Variant {
     /** Stopped until the next boot. */
     fun onStopRequested(context: Context) {}
 
-    /** No app screen to open. */
-    fun openApp(context: Context): PendingIntent? = null
+    fun openApp(context: Context): PendingIntent? = PendingIntent.getActivity(
+        context, 0, Intent(context, SettingsActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
+    )
 
     fun onServiceDestroyed(service: Service) {}
 
-    /** `persist.carjack.<key>`. */
+    const val PREFS = "carjack"
+
+    /** As chosen in [SettingsActivity], else `persist.carjack.<key>`, which the product may set. */
     fun setting(context: Context, key: String, fallback: String): String =
-        SystemProperties.get("persist.carjack.$key", fallback)
+        prefs(context).getString(key, null) ?: SystemProperties.get("persist.carjack.$key", fallback)
+
+    fun prefs(context: Context): SharedPreferences =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /** What the head unit can open on connect besides an app, the first by default. */
+    val ON_CONNECT = listOf(Previews.HOME)
+
+    /** No built-in launcher on the board. */
+    fun launcherIcon(context: Context): Drawable? = null
 
     fun makeDiscoverable(adapter: BluetoothAdapter) {
         // Zero is "never times out".
@@ -138,9 +155,15 @@ object Variant {
 
     fun bluetoothAddress(context: Context, adapter: BluetoothAdapter): String? = adapter.address
 
+    /** How long the screen is left as a dropped session had it, rather than opened afresh. */
+    private const val KEEP_MS = 5 * 60_000L
+
+    /** When the last session's display closed, by elapsedRealtime; 0 for none yet. */
+    private var closedAt = 0L
+
     /**
      * The display the stream shows: the default one, resized to the part of the panel it gets and
-     * mirrored 1:1 into [target].
+     * mirrored 1:1 into [target], with what the head unit opens on connect.
      */
     fun openDisplay(context: Context, width: Int, height: Int, density: Int, target: Surface): Runnable {
         try {
@@ -154,26 +177,65 @@ object Variant {
             "carjack", width, height, density, target,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR or DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE,
         )
-        return Runnable { display.release() }
+        Switchgear.watch(context)
+        if (closedAt == 0L || SystemClock.elapsedRealtime() - closedAt > KEEP_MS) openOnConnect(context)
+        return Runnable {
+            Switchgear.stop()
+            display.release()
+            closedAt = SystemClock.elapsedRealtime()
+        }
+    }
+
+    /** The home screen, or the chosen app while it's installed. */
+    private fun openOnConnect(context: Context) {
+        val app = Choices.current(context)
+        val intent = if (Choices.isApp(app)) {
+            ComponentName.unflattenFromString(app)?.let { Intent(Intent.ACTION_MAIN).setComponent(it) }
+                ?: context.packageManager.getLaunchIntentForPackage(app)
+        } else {
+            null
+        }
+        if (intent == null) {
+            if (Choices.isApp(app)) Log.w(TAG, "$app isn't installed; the head unit gets the home screen")
+            goHome(context)
+            return
+        }
+        try {
+            context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Could not open $app", e)
+        }
     }
 
     /** Touches in the view rectangle land 1:1 on the resized default display. */
     fun touch(context: Context, viewX: Int, viewY: Int, viewWidth: Int, viewHeight: Int): Touch =
         TouchInjector(viewX, viewY, viewWidth, viewHeight)
 
-    /** A key from the head unit's switchgear, with back and select answered on the picture. */
+    /** A key from the head unit's switchgear, through its mode; see [Switchgear]. */
     fun switchgear(context: Context, code: Int, down: Boolean) {
-        if (down && (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_DPAD_CENTER)) {
-            ScreenStream.current?.cue(code == KeyEvent.KEYCODE_BACK)
-        }
-        key(context, code, down)
+        Switchgear.key(context, code, down)
+    }
+
+    /** The app in front on the board's display, for [Switchgear]. */
+    fun topPackage(): String? = try {
+        ActivityTaskManager.getService().focusedRootTaskInfo?.topActivity?.packageName
+    } catch (e: RemoteException) {
+        null
+    } catch (e: RuntimeException) {
+        Log.w(TAG, "No top app", e)
+        null
     }
 
     /** A key onto the board's own display, which is what the head unit mirrors; Home included. */
     fun key(context: Context, code: Int, down: Boolean) {
+        inject(code, down, 0)
+    }
+
+    /** A key going down or up, with KeyEvent meta state. */
+    fun inject(code: Int, down: Boolean, meta: Int) {
         val now = SystemClock.uptimeMillis()
         val event = KeyEvent(
-            now, now, if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP, code, 0, 0,
+            now, now, if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP, code, 0, meta,
             KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD,
         )
         try {

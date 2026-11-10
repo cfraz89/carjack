@@ -7,7 +7,7 @@ members = [
     "libcarjack",
     "cuda-dmabuf",
 ]
-# A bare `cargo build`/`cargo run` is the Linux app; the Android core builds through `just android`.
+# A bare `cargo build`/`cargo run` is the Linux app; the Android core builds with the apps (`just slipstream`, `just motopod`).
 default-members = ["carjack-linux"]
 
 [workspace.package]

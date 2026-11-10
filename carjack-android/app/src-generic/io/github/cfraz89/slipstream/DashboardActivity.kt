@@ -73,7 +73,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
-import io.github.cfraz89.slipstream.launcher.DrawableImage
 import io.github.cfraz89.slipstream.launcher.LauncherTheme
 import io.github.cfraz89.slipstream.launcher.hudCaption
 import io.github.cfraz89.slipstream.launcher.hudText

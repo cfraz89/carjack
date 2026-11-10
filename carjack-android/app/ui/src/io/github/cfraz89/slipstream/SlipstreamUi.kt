@@ -1,6 +1,7 @@
 package io.github.cfraz89.slipstream
 
 import android.graphics.drawable.Drawable
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -42,6 +43,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -49,9 +53,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import io.github.cfraz89.slipstream.launcher.DrawableImage
+import io.github.cfraz89.slipstream.ui.R
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 
-/** Material 3 in Slipstream's palette (res/values/colors.xml, dark in values-night). */
+/** Material 3 in Slipstream's palette (ui/res/values/colors.xml, dark in values-night). */
 @Composable
 fun SlipstreamTheme(content: @Composable () -> Unit) {
     val primary = colorResource(R.color.sl_primary)
@@ -233,6 +240,40 @@ fun ListRow(
             }
         }
         trailing?.invoke()
+    }
+}
+
+/**
+ * A [Drawable] - an app's icon, the wallpaper - drawn as it is: fitted inside, or with [crop]
+ * filling and centred. [tint] recolours it.
+ */
+@Composable
+fun DrawableImage(
+    drawable: Drawable?,
+    modifier: Modifier = Modifier,
+    crop: Boolean = false,
+    tint: Color? = null,
+) {
+    val tintArgb = tint?.toArgb()
+    Canvas(modifier) {
+        val d = drawable ?: return@Canvas
+        val dw = d.intrinsicWidth.takeIf { it > 0 }?.toFloat() ?: size.width
+        val dh = d.intrinsicHeight.takeIf { it > 0 }?.toFloat() ?: size.height
+        val scale = if (crop) max(size.width / dw, size.height / dh) else min(size.width / dw, size.height / dh)
+        val w = dw * scale
+        val h = dh * scale
+        val left = ((size.width - w) / 2).roundToInt()
+        val top = ((size.height - h) / 2).roundToInt()
+        drawIntoCanvas { canvas ->
+            val bounds = d.copyBounds()
+            d.setBounds(left, top, left + w.roundToInt(), top + h.roundToInt())
+            if (tintArgb != null) d.setTint(tintArgb)
+            canvas.nativeCanvas.save()
+            canvas.nativeCanvas.clipRect(0f, 0f, size.width, size.height)
+            d.draw(canvas.nativeCanvas)
+            canvas.nativeCanvas.restore()
+            d.bounds = bounds
+        }
     }
 }
 

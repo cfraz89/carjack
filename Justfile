@@ -113,24 +113,76 @@ test-proto +flags="":
 test-lib +flags="":
     {{toolbox_build}}cargo test -p libcarjack --lib {{flags}} < /dev/null
 
-# The Android app's native core (libcarjack_android.so), with the toolchain of a built Android tree.
+# Gradle tasks for the Android apps, in a container (carjack-android/Containerfile) with the SDK,
+# NDK and Rust: no Android tree needed.
+[private]
 [script('bash')]
-android tree=env('ANDROID_TREE', home_directory() + '/Projects/motopod/out/android'):
+_gradle +tasks:
     set -euo pipefail
-    cc={{justfile_directory()}}/carjack-android/toolchain/cc.sh
-    ar=$(ls -d {{tree}}/prebuilts/clang/host/linux-x86/clang-r* | sort | tail -1)/bin/llvm-ar
-    export ANDROID_TREE={{tree}} CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$cc \
-        CC_aarch64_linux_android=$cc CXX_aarch64_linux_android=$cc AR_aarch64_linux_android=$ar \
-        RANLIB_aarch64_linux_android=${ar%-ar}-ranlib \
-        CMAKE={{tree}}/prebuilts/cmake/linux-x86/bin/cmake \
-        CMAKE_TOOLCHAIN_FILE_aarch64_linux_android={{justfile_directory()}}/carjack-android/toolchain/android.cmake
-    cargo build --release --target aarch64-linux-android -p carjack-android
-    ls -l target/aarch64-linux-android/release/libcarjack_android.so
+    python3 carjack-android/check-builds.py
+    podman build -q -t localhost/carjack-android-build carjack-android >/dev/null
+    keys=~/.config/slipstream
+    mkdir -p ~/.gradle ~/.cargo
+    podman run --rm --userns=keep-id --security-opt label=disable \
+        -v {{justfile_directory()}}:/src -w /src/carjack-android \
+        -v ~/.gradle:/gradle -e GRADLE_USER_HOME=/gradle -v ~/.cargo:/cargo -e CARGO_HOME=/cargo \
+        $([ -d $keys ] && echo "-v $keys:/keys:ro -e SLIPSTREAM_KEYS=/keys") -e SENTRY_DSN \
+        localhost/carjack-android-build gradle --no-daemon -q {{tasks}}
     # Symbols for Sentry's native crash reports, where sentry-cli is set up (~/.sentryclirc).
     if command -v sentry-cli >/dev/null && [ -f ~/.sentryclirc ]; then
-        sentry-cli debug-files upload target/aarch64-linux-android/release/libcarjack_android.so \
+        sentry-cli debug-files upload target/gradle-cargo/aarch64-linux-android/release/libcarjack_android.so \
             || echo "Symbols not uploaded to Sentry" >&2
     fi
+
+# Slipstream, the generic Android app, into target/Slipstream.apk; signed with the release key
+# (~/.config/slipstream) where there is one, so local builds and releases update each other.
+[script('bash')]
+slipstream: (_gradle ":slipstream:assembleRelease")
+    set -euo pipefail
+    cp target/gradle/slipstream/outputs/apk/release/slipstream-release.apk target/Slipstream.apk
+    ls -l target/Slipstream.apk
+    [ -n "${SENTRY_DSN:-}" ] || echo "No SENTRY_DSN: crash reports off in this build" >&2
+
+# Motopod, the app in motopod's image, into target/Motopod.apk. Needs motopod's `just platform-sdk`
+# once, for the framework and platform key. Installs over the image's copy: adb install -r.
+motopod: (_gradle ":motopod:motopodApk")
+    cp target/gradle/motopod/outputs/Motopod.apk target/Motopod.apk
+    ls -l target/Motopod.apk
+
+# Slipstream built, signed with the release key (~/.config/slipstream) and published as a GitHub
+# release, where Obtainium picks it up. Bump versionCode and versionName in
+# carjack-android/gradle/slipstream/build.gradle.kts first; commit and push.
+# prerelease=true marks it a pre-release (Obtainium installs those only when told to).
+[script('bash')]
+slipstream-release prerelease="false": slipstream
+    set -euo pipefail
+    repo=cfraz89/carjack
+    [ -z "$(git status --porcelain)" ] || { echo "carjack has uncommitted changes" >&2; exit 1; }
+    commit=$(git rev-parse HEAD)
+    git branch -r --contains "$commit" | grep -q . || { echo "HEAD isn't pushed" >&2; exit 1; }
+    tools="podman run --rm --security-opt label=disable -v {{justfile_directory()}}:/src -w /src \
+        localhost/carjack-android-build /opt/android-sdk/build-tools/36.0.0"
+    version=$($tools/aapt2 dump badging target/Slipstream.apk \
+        | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+    tag=slipstream-v$version
+    if gh release view "$tag" -R $repo >/dev/null 2>&1; then
+        echo "$tag is already released: bump the version" >&2
+        exit 1
+    fi
+    signed=target/Slipstream-$version.apk
+    cp target/Slipstream.apk $signed
+    $tools/apksigner verify --print-certs $signed | grep -q "CN=Slipstream" \
+        || { echo "Not signed with the release key (~/.config/slipstream)" >&2; exit 1; }
+    # The app's changes since the last release, for the notes.
+    last=$(git tag -l 'slipstream-v*' --sort=-creatordate | head -1)
+    notes=""
+    if [ -n "$last" ]; then
+        notes=$(git log --format='- %s' $last..$commit -- carjack-android libcarjack)
+    fi
+    notes="${notes:-First release}"$'\n\n'"$(cat carjack-android/known-to-work.md)"
+    gh release create "$tag" $signed -R $repo --target "$commit" --title "Slipstream $version" \
+        --notes "$notes" {{ if prerelease == "true" { "--prerelease" } else { "" } }}
+    git fetch --tags -q
 
 install-cuda-dmabuf-deps:
     {{toolbox_build}}sudo dnf install -y libEGL-devel libgbm-devel gstreamer1-plugins-bad-free-devel

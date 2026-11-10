@@ -5,12 +5,12 @@ import android.app.PendingIntent
 import android.app.Service
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.drawable.Drawable
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
@@ -170,11 +170,16 @@ object Variant {
     /** The built-in launcher's home screen, which the head unit gets unless another app is chosen. */
     private const val LAUNCHER = "$APP_ID/$APP_ID.launcher.HomeActivity"
 
+    /** What the head unit can open on connect besides an app, the first by default. */
+    val ON_CONNECT = listOf(Choices.LAUNCHER, Previews.HOME)
+
+    fun launcherIcon(context: Context): Drawable? = context.getDrawable(R.drawable.ic_launcher)
+
     /** The chosen app while it's still installed, else the launcher. */
     private fun appFor(context: Context): String {
         val app = setting(context, "app", "")
         if (app.isEmpty()) return LAUNCHER
-        if (app == Previews.HOME) return homeApp(context)?.flattenToString() ?: LAUNCHER
+        if (app == Previews.HOME) return Choices.homeApp(context)?.flattenToString() ?: LAUNCHER
         return try {
             context.packageManager.getPackageInfo(app.substringBefore('/'), 0)
             app
@@ -182,18 +187,6 @@ object Variant {
             Log.w(TAG, "$app isn't installed; the head unit gets the launcher")
             LAUNCHER
         }
-    }
-
-    /** The phone's own home app, or null where none is set as the default. */
-    fun homeApp(context: Context): ComponentName? {
-        val info = context.packageManager.resolveActivity(
-            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
-            PackageManager.MATCH_DEFAULT_ONLY,
-        )
-        // With no default, the chooser resolves; it isn't a home app.
-        val activity = info?.activityInfo ?: return null
-        if (activity.packageName == "android") return null
-        return ComponentName(activity.packageName, activity.name)
     }
 
     /** A display of the head unit's own size with the chosen app on it, or null without Shizuku. */
@@ -222,6 +215,9 @@ object Variant {
                 Log.w(TAG, "Touch lost", e)
             }
         }
+
+    /** The app showing on the head unit's display, for [Switchgear]. */
+    fun topPackage() = ShizukuDisplay.topPackage()
 
     private const val KEYCODE_HOME = 3
 

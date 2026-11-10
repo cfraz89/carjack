@@ -32,7 +32,7 @@ object ShizukuDisplay {
         .daemon(false)
         .processNameSuffix("display")
         .debuggable(false)
-        .version(40)
+        .version(41)
 
     @Volatile private var service: IDisplayService? = null
     private var bound = CountDownLatch(1)
@@ -71,8 +71,8 @@ object ShizukuDisplay {
 
     /**
      * A display drawing into [target]: the last session's, as it was left, if it's still kept,
-     * else a new one with [app] (a component or package) on it. Returns what detaches it, or null
-     * where Shizuku can't make one.
+     * else a new one with the app open on the phone moved onto it, or [app] (a component or
+     * package) where there's none. Returns what detaches it, or null where Shizuku can't make one.
      */
     fun open(target: Surface, width: Int, height: Int, density: Int, app: String): Runnable? {
         val s = bind() ?: return null
@@ -81,7 +81,7 @@ object ShizukuDisplay {
                 Log.i(TAG, "Display back as the last session left it")
             } else {
                 if (s.create(target, width, height, density) < 0) return null
-                s.launch(app)
+                if (!s.bringFromPhone(Variant.APP_ID)) s.launch(app)
                 Log.i(TAG, "Display up")
             }
             active = s

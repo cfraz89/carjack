@@ -1,4 +1,8 @@
 /target
+/carjack-android/.gradle
+/carjack-android/.kotlin
+# From motopod's `just platform-sdk`.
+/carjack-android/platform
 /armbian/build
 /armbian/cache
 /armbian/output

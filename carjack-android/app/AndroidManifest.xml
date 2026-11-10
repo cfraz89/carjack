@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.carjack">
-    <!-- motopod's preinstalled build keeps this ID; the classes are the generic app's. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- motopod's preinstalled build (gradle/motopod/build.gradle.kts); the classes are the
+         generic app's. -->
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -35,10 +35,34 @@
     <uses-permission android:name="android.permission.CAPTURE_SECURE_VIDEO_OUTPUT" />
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
     <uses-permission android:name="android.permission.INJECT_EVENTS" />
+    <!-- The app in front, for the switchgear's mode; and the on-connect app, opened from the service. -->
+    <uses-permission android:name="android.permission.MANAGE_ACTIVITY_TASKS" />
+    <uses-permission android:name="android.permission.START_ACTIVITIES_FROM_BACKGROUND" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <application
-        android:label="carjack"
+        android:label="Motopod"
+        android:theme="@style/SlipstreamApp"
         android:extractNativeLibs="false">
+
+        <activity
+            android:name="io.github.cfraz89.slipstream.SettingsActivity"
+            android:label="Motopod"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name="io.github.cfraz89.slipstream.OnConnectActivity"
+            android:exported="false" />
+        <activity
+            android:name="io.github.cfraz89.slipstream.AppPickerActivity"
+            android:exported="false" />
+        <activity
+            android:name="io.github.cfraz89.slipstream.RemoteAppsActivity"
+            android:exported="false" />
 
         <receiver
             android:name="io.github.cfraz89.slipstream.BootReceiver"

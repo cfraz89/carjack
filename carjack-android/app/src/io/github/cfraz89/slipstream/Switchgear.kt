@@ -60,7 +60,7 @@ object Switchgear {
     private val poll = object : Runnable {
         override fun run() {
             val ctx = context ?: return
-            val app = ShizukuDisplay.topPackage()
+            val app = Variant.topPackage()
             if (app != null && app != lastApp) {
                 lastApp = app
                 setRemote(app in apps(ctx))

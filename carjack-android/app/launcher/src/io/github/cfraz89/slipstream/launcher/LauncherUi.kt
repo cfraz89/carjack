@@ -1,6 +1,5 @@
 package io.github.cfraz89.slipstream.launcher
 
-import android.graphics.drawable.Drawable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -38,9 +37,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.em
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.roundToInt
 
 /** Rajdhani, the instrument-cluster face the launcher is set in (res/font, OFL). */
 val Hud = FontFamily(
@@ -156,39 +152,5 @@ fun BatteryIcon(percent: Int, charging: Boolean, modifier: Modifier) {
         drawable.setTint(tint)
         drawable.setBounds(0, 0, size.width.toInt(), size.height.toInt())
         drawIntoCanvas { drawable.draw(it.nativeCanvas) }
-    }
-}
-
-/**
- * A [Drawable] - an app's icon, the wallpaper - drawn as it is: fitted inside, or with [crop]
- * filling and centred. [tint] recolours it.
- */
-@Composable
-fun DrawableImage(
-    drawable: Drawable?,
-    modifier: Modifier = Modifier,
-    crop: Boolean = false,
-    tint: Color? = null,
-) {
-    val tintArgb = tint?.toArgb()
-    Canvas(modifier) {
-        val d = drawable ?: return@Canvas
-        val dw = d.intrinsicWidth.takeIf { it > 0 }?.toFloat() ?: size.width
-        val dh = d.intrinsicHeight.takeIf { it > 0 }?.toFloat() ?: size.height
-        val scale = if (crop) max(size.width / dw, size.height / dh) else min(size.width / dw, size.height / dh)
-        val w = dw * scale
-        val h = dh * scale
-        val left = ((size.width - w) / 2).roundToInt()
-        val top = ((size.height - h) / 2).roundToInt()
-        drawIntoCanvas { canvas ->
-            val bounds = d.copyBounds()
-            d.setBounds(left, top, left + w.roundToInt(), top + h.roundToInt())
-            if (tintArgb != null) d.setTint(tintArgb)
-            canvas.nativeCanvas.save()
-            canvas.nativeCanvas.clipRect(0f, 0f, size.width, size.height)
-            d.draw(canvas.nativeCanvas)
-            canvas.nativeCanvas.restore()
-            d.bounds = bounds
-        }
     }
 }

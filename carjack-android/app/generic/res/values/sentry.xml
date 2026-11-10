@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Sentry's DSN, written over at build time from SENTRY_DSN (see motopod's `just carjack`).
+<!-- Sentry's DSN, overridden at build time from SENTRY_DSN (gradle/slipstream/build.gradle.kts).
      Empty leaves crash reports off. -->
 <resources>
     <string name="sentry_dsn" translatable="false"></string>

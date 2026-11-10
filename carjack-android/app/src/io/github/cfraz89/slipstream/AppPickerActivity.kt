@@ -15,6 +15,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import io.github.cfraz89.slipstream.ui.R
 
 /** Every app with a launcher icon, by name, for the head unit to open on connect. */
 class AppPickerActivity : ComponentActivity() {

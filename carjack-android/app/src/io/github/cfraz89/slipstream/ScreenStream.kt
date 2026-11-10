@@ -202,7 +202,7 @@ class ScreenStream(
     private val preview = object : Runnable {
         override fun run() {
             val r = relay ?: return
-            val app = Variant.setting(context, "app", "")
+            val app = Choices.current(context)
             r.capture { Previews.save(context, app, it) }
             watchdogHandler.postDelayed(this, PREVIEW_INTERVAL_MS)
         }

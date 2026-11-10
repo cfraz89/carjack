@@ -370,6 +370,41 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
         }
     }
 
+    /**
+     * The phone's topmost root task moved over, as `am display move-stack` would: only an ordinary
+     * app's (activity type standard), full screen, so never the home screen, the recents, a
+     * picture-in-picture or a split. The phone's screen needn't be on: that's still the app the
+     * user left it in.
+     */
+    @Synchronized
+    override fun bringFromPhone(exclude: String): Boolean {
+        val id = displayId ?: return false
+        return try {
+            val atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
+            val tasks = atm.javaClass
+                .getMethod("getAllRootTaskInfosOnDisplay", Int::class.javaPrimitiveType)
+                .invoke(atm, 0 /* DEFAULT_DISPLAY */) as List<*>
+            val top = tasks.firstOrNull() ?: return false
+            val app = (top.javaClass.getField("topActivity").get(top) as? ComponentName)?.packageName
+            val type = top.javaClass.getField("topActivityType").getInt(top)
+            val mode = top.javaClass.getMethod("getWindowingMode").invoke(top) as Int
+            // ACTIVITY_TYPE_STANDARD; WINDOWING_MODE_UNDEFINED or FULLSCREEN.
+            if (app == null || app == exclude || type != 1 || mode > 1) return false
+            val task = top.javaClass.getField("taskId").getInt(top)
+            atm.javaClass
+                .getMethod("moveRootTaskToDisplay", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+                .invoke(atm, task, id)
+            Log.i(TAG, "Moved $app over from the phone")
+            true
+        } catch (e: ReflectiveOperationException) {
+            Log.w(TAG, "Couldn't move the phone's app over", e)
+            false
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Couldn't move the phone's app over", e)
+            false
+        }
+    }
+
     override fun cycleBluetooth() {
         run("cmd", "bluetooth_manager", "disable")
         run("cmd", "bluetooth_manager", "wait-for-state:STATE_OFF")

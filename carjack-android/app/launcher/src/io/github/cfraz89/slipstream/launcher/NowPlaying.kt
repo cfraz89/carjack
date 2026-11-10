@@ -32,6 +32,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import io.github.cfraz89.slipstream.DrawableImage
 
 /**
  * The home screen's now-playing panel: whichever app is playing (else the most recent session),
