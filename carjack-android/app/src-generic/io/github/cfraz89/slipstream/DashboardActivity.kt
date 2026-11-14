@@ -1,5 +1,6 @@
 package io.github.cfraz89.slipstream
 
+import android.app.KeyguardManager
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
@@ -18,6 +19,7 @@ import android.hardware.SensorManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Rational
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -25,6 +27,7 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.addCallback
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -69,6 +72,7 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
@@ -81,18 +85,28 @@ import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
 
 /**
- * The phone's screen during a session: asleep, for the least power, like the phone's own lock
- * screen - a tap lights it a moment, and a swipe up brings back what's on the head unit, with its
- * back and home. It keeps the screen on, so the phone neither sleeps (dropping the head unit's
- * touches) nor locks; covered (in a pocket), it sleeps too, and a tap can't light it.
+ * The phone's screen while activated ([Activation]), through head unit sessions and the waits
+ * between them: what's on the head unit, with its back and home, and the swipe that ends it all
+ * (to the user, the session). Put to sleep by its
+ * button or by a pocket, it's black for the least power, like the phone's own lock screen - a tap
+ * lights it a moment, and a swipe up wakes it; in the pocket, a tap can't light it. It keeps the
+ * screen on, so the phone neither sleeps (blanking the head unit) nor locks. Locked anyway, by the
+ * power button, the swipe up unlocks.
  */
 class DashboardActivity : ComponentActivity() {
     companion object {
+        /** A session is up, its display on the head unit. */
+        var connected by mutableStateOf(false)
+        /** Where things are up to, as the service says, and whether it's given up until a retry. */
+        var status by mutableStateOf(SlipstreamService.WAITING)
+        var retryable by mutableStateOf(false)
+
         private const val HEAD_UNIT_MS = 2_000L
         /** Near for this long, untouched, before it goes black: a hand reaching for it isn't a pocket. */
         private const val COVER_MS = 1_500L
         /** Uncovered for this long before it lights again: a pocket's jostling isn't uncovering. */
         private const val UNCOVER_MS = 1_000L
+        private const val LOCK_POLL_MS = 500L
         /** How long a tap lights the sleeping screen, from the last touch. */
         private const val PEEK_MS = 4_000L
         private const val ACTION_BACK = "io.github.cfraz89.slipstream.dashboard.BACK"
@@ -113,10 +127,12 @@ class DashboardActivity : ComponentActivity() {
 
     /** In a pocket, by the proximity sensor. */
     private var covered by mutableStateOf(false)
-    /** Asleep: from the start ([Variant.dashboardStartsAsleep]), or put to sleep. */
-    private var asleep by mutableStateOf(true)
+    /** Asleep: put to sleep by its button, a pocket or the lock screen. */
+    private var asleep by mutableStateOf(false)
     /** Lit a moment by a tap, asleep still. */
     private var peeking by mutableStateOf(false)
+    /** Shown over the lock screen: waking means unlocking first. */
+    private var locked by mutableStateOf(false)
     /** Where the swipe hint's track is, in the window, once it's been shown. */
     private var track: Rect? = null
     /** How far up the track a swipe has the dot, while one's under way. */
@@ -148,7 +164,6 @@ class DashboardActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         current = WeakReference(this)
-        asleep = Variant.dashboardStartsAsleep(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.setDecorFitsSystemWindows(false)
         setPictureInPictureParams(pipParams())
@@ -160,12 +175,18 @@ class DashboardActivity : ComponentActivity() {
             },
             RECEIVER_NOT_EXPORTED,
         )
+        // Leaving is home or picture-in-picture, never back: without this screen the phone sleeps.
+        onBackPressedDispatcher.addCallback(this) { sleep(true) }
         setContent { Dashboard() }
     }
 
     override fun onStart() {
         super.onStart()
         started = true
+        val now = keyguard().isKeyguardLocked
+        if (locked && !now) asleep = false
+        locked = now
+        if (locked) asleep = true
         sensors()?.let { sm ->
             sm.getDefaultSensor(Sensor.TYPE_PROXIMITY)?.let {
                 sm.registerListener(proximity, it, SensorManager.SENSOR_DELAY_NORMAL)
@@ -182,6 +203,10 @@ class DashboardActivity : ComponentActivity() {
         main.removeCallbacks(uncover)
         main.removeCallbacks(covering)
         main.removeCallbacks(endPeek)
+        main.removeCallbacks(watchLock)
+        // Stopped by the screen going off: taken as locked, so it wakes if it comes back unlocked,
+        // the keyguard often gone already (an unlock from the screen off) by onStart.
+        if (!getSystemService(PowerManager::class.java).isInteractive) locked = true
         covered = false
         peeking = false
         super.onStop()
@@ -245,6 +270,45 @@ class DashboardActivity : ComponentActivity() {
 
     private fun sensors() = getSystemService(SensorManager::class.java)
 
+    private fun keyguard() = getSystemService(KeyguardManager::class.java)
+
+    /**
+     * While asleep, the lock screen watched: unlocked, however it was, it wakes, unless it's in a
+     * pocket. Polled: the system's unlock broadcast doesn't come for an unlock over this screen.
+     */
+    private val watchLock = object : Runnable {
+        override fun run() {
+            val now = keyguard().isKeyguardLocked
+            if (locked && !now && !covered) sleep(false)
+            locked = now
+            if (started && asleep) main.postDelayed(this, LOCK_POLL_MS)
+        }
+    }
+
+    /** Out of sleep, by way of the phone's own unlock where it's locked. */
+    private fun wake() {
+        if (!keyguard().isKeyguardLocked) {
+            locked = false
+            sleep(false)
+            return
+        }
+        keyguard().requestDismissKeyguard(
+            this,
+            object : KeyguardManager.KeyguardDismissCallback() {
+                override fun onDismissSucceeded() {
+                    locked = false
+                    sleep(false)
+                }
+            },
+        )
+    }
+
+    /** All over: the service stopped, and this screen with it. */
+    private fun end() {
+        Activation.stop(this)
+        finish()
+    }
+
     private val proximity = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             val near = event.values[0] < event.sensor.maximumRange
@@ -272,10 +336,19 @@ class DashboardActivity : ComponentActivity() {
         return super.dispatchTouchEvent(event)
     }
 
+    /**
+     * Covered, it goes to sleep, and stays asleep uncovered, lit a moment as by a tap: out of a
+     * pocket takes a swipe.
+     */
     private fun cover(value: Boolean) {
         if (covered == value || (value && pip)) return
         covered = value
-        if (value) peeking = false
+        if (value) {
+            peeking = false
+            asleep = true
+        } else if (asleep) {
+            peek()
+        }
         applyShown()
     }
 
@@ -303,6 +376,8 @@ class DashboardActivity : ComponentActivity() {
      * animation, the bars still away. Lit: all of it back.
      */
     private fun applyShown() {
+        main.removeCallbacks(watchLock)
+        if (started && asleep) main.postDelayed(watchLock, LOCK_POLL_MS)
         val value = when {
             pip || !(covered || asleep) -> Shown.LIT
             peeking -> Shown.PEEK
@@ -387,7 +462,7 @@ class DashboardActivity : ComponentActivity() {
                             val up = ((start.y - change.position.y) / DOT_TRAVEL.toPx()).coerceIn(0f, 1f)
                             drag = up
                             if (up == 1f && !covered) {
-                                sleep(false)
+                                wake()
                                 break
                             }
                         }
@@ -398,13 +473,24 @@ class DashboardActivity : ComponentActivity() {
             },
             contentAlignment = Alignment.BottomCenter,
         ) {
-            if (peeking) SwipeHint(Modifier.padding(bottom = 72.dp))
+            if (peeking) {
+                Column(Modifier.padding(bottom = 72.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        if (connected) "ON HEAD UNIT" else status,
+                        style = hudCaption().copy(color = onSurfaceVariant),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 24.dp),
+                    )
+                    Spacer(Modifier.height(32.dp))
+                    SwipeHint()
+                }
+            }
         }
     }
 
     /** A track with a dot rising up it, or following a swipe, over "swipe up". */
     @Composable
-    private fun SwipeHint(modifier: Modifier) {
+    private fun SwipeHint(modifier: Modifier = Modifier) {
         val rise by rememberInfiniteTransition(label = "swipe").animateFloat(
             initialValue = 0f,
             targetValue = 1f,
@@ -431,13 +517,14 @@ class DashboardActivity : ComponentActivity() {
                 )
             }
             Spacer(Modifier.height(16.dp))
-            Text("SWIPE UP", style = hudCaption().copy(color = onSurfaceVariant))
+            Text(if (locked) "SWIPE UP TO UNLOCK" else "SWIPE UP", style = hudCaption().copy(color = onSurfaceVariant))
         }
     }
 
     /**
-     * Slipstream's name; what's on the head unit, and its back and home, large; sleep, as large;
-     * then the phone's own buttons.
+     * Slipstream's name; what's on the head unit, and its back and home, large, or between
+     * sessions where things are up to; sleep, as large; the phone's own buttons; then ending it
+     * all.
      */
     @Composable
     private fun Controls() {
@@ -460,9 +547,10 @@ class DashboardActivity : ComponentActivity() {
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(28.dp),
                     ) {
-                        HeadUnitButtons(96.dp)
+                        if (connected) HeadUnitButtons(96.dp)
                         SleepButton()
                         PhoneButtons()
+                        EndSwipe()
                     }
                 }
             } else {
@@ -473,13 +561,14 @@ class DashboardActivity : ComponentActivity() {
                 ) {
                     Header()
                     OnHeadUnit()
-                    HeadUnitButtons(120.dp)
+                    if (connected) HeadUnitButtons(120.dp)
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(28.dp),
                     ) {
                         SleepButton()
                         PhoneButtons()
+                        EndSwipe()
                     }
                 }
             }
@@ -499,9 +588,33 @@ class DashboardActivity : ComponentActivity() {
         }
     }
 
-    /** Nothing where nothing's on the head unit: no session, or not yet asked. */
+    /** Between sessions, where things are up to; nothing while the head unit's app isn't known yet. */
     @Composable
     private fun OnHeadUnit() {
+        if (!connected) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(status, style = hudText(26.sp, FontWeight.SemiBold, onSurfaceVariant), textAlign = TextAlign.Center)
+                if (retryable) {
+                    Spacer(Modifier.height(16.dp))
+                    Box(
+                        Modifier
+                            .width(160.dp)
+                            .height(64.dp)
+                            .tappable(CircleShape) {
+                                startService(
+                                    Intent(this@DashboardActivity, SlipstreamService::class.java)
+                                        .setAction(SlipstreamService.ACTION_RETRY),
+                                )
+                            }
+                            .background(primaryContainer),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("RETRY", style = hudText(20.sp, FontWeight.SemiBold, onPrimaryContainer))
+                    }
+                }
+            }
+            return
+        }
         val pkg = headUnitPackage ?: return
         val icon = remember(pkg) { appIcon(pkg) }
         val label = remember(pkg) { appLabel(pkg) }
@@ -561,11 +674,55 @@ class DashboardActivity : ComponentActivity() {
         Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
             RoundButton(R.drawable.settings_24, "Slipstream settings", 56.dp) {
                 shrink()
-                startActivity(Intent(this@DashboardActivity, MainActivity::class.java))
+                startActivity(Intent(this@DashboardActivity, SettingsActivity::class.java))
             }
             RoundButton(R.drawable.ic_sl_phone, "Phone apps", 56.dp) {
                 if (!shrink()) startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME))
             }
+        }
+    }
+
+    /** Ends it all: a dot dragged the length of its track, from its start, which a pocket won't. */
+    @Composable
+    private fun EndSwipe() {
+        var progress by remember { mutableStateOf(0f) }
+        Box(
+            Modifier
+                .width(END_TRACK)
+                .height(DOT + DOT_INSET * 2)
+                .border(2.dp, tertiary.copy(alpha = 0.6f), CircleShape)
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        val start = awaitFirstDown().position
+                        if (start.x > (DOT + DOT_INSET * 2 + TRACK_SLOP).toPx()) return@awaitEachGesture
+                        while (true) {
+                            val change = awaitPointerEvent().changes.firstOrNull() ?: break
+                            change.consume()
+                            progress = ((change.position.x - start.x) / END_TRAVEL.toPx()).coerceIn(0f, 1f)
+                            if (progress == 1f) {
+                                end()
+                                break
+                            }
+                            if (!change.pressed) break
+                        }
+                        progress = 0f
+                    }
+                },
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Box(
+                Modifier.fillMaxSize().padding(start = DOT + DOT_INSET * 2).alpha(1f - progress),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("SWIPE TO END SESSION", style = hudCaption().copy(color = onSurfaceVariant))
+            }
+            Box(
+                Modifier
+                    .padding(start = DOT_INSET)
+                    .offset(x = END_TRAVEL * progress)
+                    .size(DOT)
+                    .background(tertiary, CircleShape),
+            )
         }
     }
 
@@ -593,3 +750,6 @@ private val DOT_INSET = 8.dp
 private val DOT_TRAVEL = 104.dp
 /** How far outside the track a swipe may start. */
 private val TRACK_SLOP = 24.dp
+/** The end swipe's track length, and how far along it the dot travels. */
+private val END_TRACK = 280.dp
+private val END_TRAVEL = END_TRACK - DOT - DOT_INSET * 2

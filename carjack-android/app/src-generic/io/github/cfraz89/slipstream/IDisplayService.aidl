@@ -72,7 +72,7 @@ interface IDisplayService {
      */
     int resume(in Surface surface, int width, int height, int density) = 25;
 
-    /** Off its surface but kept, apps and all, for a session that comes back soon; released after a while. */
+    /** Off its surface but kept, apps and all, for the next session; released with the service. */
     void detach() = 26;
 
     /**
@@ -80,6 +80,12 @@ interface IDisplayService {
      * top is the home screen, {@code exclude}'s, or can't be moved.
      */
     boolean bringFromPhone(String exclude) = 27;
+
+    /**
+     * {@code component} started on the display as a launcher starts it, brought over from the
+     * phone where it's running there already. Blocks.
+     */
+    void bringOver(String component) = 28;
 
     /** Shizuku's teardown call. */
     void destroy() = 16777114;

@@ -17,7 +17,6 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -47,25 +46,21 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.Font
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import rikka.shizuku.Shizuku
 
-/** On/off, what's left to set up, and the few choices there are. */
-class MainActivity : ComponentActivity() {
+/** What's left to set up, and the few choices there are; opened from [StartActivity]. */
+class SettingsActivity : ComponentActivity() {
 
-    private companion object {
-        const val REQUEST_PERMISSIONS = 1
-        const val REQUEST_SHIZUKU = 4
-        const val DISCOVERABLE_SECONDS = 300
-        const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
-        const val TAILSCALE_PACKAGE = "com.tailscale.ipn"
+    companion object {
+        private const val REQUEST_PERMISSIONS = 1
+        private const val REQUEST_SHIZUKU = 4
+        private const val DISCOVERABLE_SECONDS = 300
+        private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
+        private const val TAILSCALE_PACKAGE = "com.tailscale.ipn"
 
         val PERMISSIONS = arrayOf(
             Manifest.permission.BLUETOOTH_CONNECT,
@@ -78,15 +73,12 @@ class MainActivity : ComponentActivity() {
         )
 
         /** Granted with the rest through Shizuku, but nothing waits on it: the weather. */
-        val OPTIONAL_PERMISSIONS = arrayOf(
+        private val OPTIONAL_PERMISSIONS = arrayOf(
             Manifest.permission.ACCESS_COARSE_LOCATION,
         )
-
-        /** How the dashboard starts a session, as [Variant.dashboardStartsAsleep] picks. */
-        val PHONE_SCREENS = listOf("Asleep", "Controls")
     }
 
-    private enum class Dialog { PHONE_SCREEN, LOGS }
+    private enum class Dialog { LOGS }
 
     /** A thing still to set up, with the button that sees to it and how to do it by hand. */
     private data class Step(
@@ -110,28 +102,14 @@ class MainActivity : ComponentActivity() {
         Shizuku.addRequestPermissionResultListener(shizukuResult)
         Variant.prefs(this).registerOnSharedPreferenceChangeListener(prefsChanged)
         setContent { SlipstreamTheme { Screen() } }
-        if (savedInstanceState == null && toDashboard(intent)) finish()
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        if (toDashboard(intent)) moveTaskToBack(true)
-    }
-
-    /** The app's icon during a session opens the dashboard; its settings button still opens this. */
-    private fun toDashboard(intent: Intent): Boolean {
-        val fromIcon = intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_LAUNCHER)
-        if (!fromIcon || ShizukuDisplay.active == null) return false
-        startActivity(Intent(this, DashboardActivity::class.java))
-        return true
     }
 
     private val shizukuResult =
         Shizuku.OnRequestPermissionResultListener { _, _ -> runOnUiThread(::refresh) }
 
-    /** The service's status, and the switch flipped from the notification. */
+    /** Whether a unit's link is up, for the Bluetooth shortcut. */
     private val prefsChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key in setOf("status", "on", "retryable", "linked")) {
+        if (key == "linked") {
             runOnUiThread { revision++ }
         }
     }
@@ -165,57 +143,26 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun Screen() = key(revision) {
         Page {
-            Header()
+            TopBar("Settings", ::finish)
             val steps = setupSteps()
             if (steps.isNotEmpty()) {
-                Spacer(Modifier.height(12.dp))
                 SetupCard(steps)
             }
             // Pairing has a card of its own, once there's Bluetooth to pair with.
-            if (permissionsGranted() && bluetoothOn() && pairedUnits(this@MainActivity).size <= 1) {
+            if (permissionsGranted() && bluetoothOn() && pairedUnits(this@SettingsActivity).size <= 1) {
                 Spacer(Modifier.height(12.dp))
                 PairCard()
             }
-            Spacer(Modifier.height(12.dp))
-            PowerCard()
             Heading("Connection")
             SettingsCard()
             Heading("Help")
             HelpCard()
         }
         when (dialog) {
-            Dialog.PHONE_SCREEN ->ChoiceDialog(
-                "Phone screen", PHONE_SCREENS, if (Variant.dashboardStartsAsleep(this)) 0 else 1, { dialog = null },
-            ) {
-                Variant.prefs(this).edit().putString("dashboard", if (it == 1) "controls" else "asleep").apply()
-                dialog = null
-                revision++
-            }
             Dialog.LOGS -> SendLogsDialog()
             null -> {}
         }
         help?.let { HelpScreen(it) { help = null } }
-    }
-
-    @Composable
-    private fun Header() {
-        Row(
-            Modifier.padding(start = 8.dp, end = 8.dp, top = 24.dp, bottom = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Image(painterResource(R.drawable.ic_sl_app), null, Modifier.size(56.dp))
-            Spacer(Modifier.width(16.dp))
-            // Yellowtail (Apache 2.0, res/font): a fast script, shaded pink into blue like a trail.
-            val colors = MaterialTheme.colorScheme
-            Text(
-                "Slipstream",
-                style = TextStyle(
-                    fontFamily = FontFamily(Font(R.font.yellowtail)),
-                    fontSize = 40.sp,
-                    brush = Brush.horizontalGradient(listOf(colors.tertiary, colors.primary)),
-                ),
-            )
-        }
     }
 
     /** One line per thing still missing; the card goes when nothing is. */
@@ -345,31 +292,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Composable
-    private fun PowerCard() {
-        val on = BootReceiver.isOn(this)
-        val colors = MaterialTheme.colorScheme
-        SectionCard(if (on) colors.primaryContainer else colors.surfaceContainerHigh) {
-            ListRow(
-                Leading.Glyph(R.drawable.ic_sl_cast),
-                "Enabled",
-                if (on) Variant.setting(this@MainActivity, "status", SlipstreamService.WAITING) else "Off",
-                titleSize = 20,
-                trailing = { RowSwitch(on) },
-            ) { setOn(!on) }
-            if (on && Variant.prefs(this@MainActivity).getBoolean("retryable", false)) {
-                Row(Modifier.padding(start = 72.dp, end = 16.dp, bottom = 8.dp)) {
-                    FilledButton("Retry") {
-                        startService(
-                            Intent(this@MainActivity, SlipstreamService::class.java)
-                                .setAction(SlipstreamService.ACTION_RETRY),
-                        )
-                    }
-                }
-            }
-        }
-    }
-
     /** Each a row showing its current value, opening its choices. */
     @Composable
     private fun SettingsCard() {
@@ -385,11 +307,6 @@ class MainActivity : ComponentActivity() {
 
             ScaleRow { revision++ }
             RemoteAppsRow()
-
-            ListRow(
-                Leading.Glyph(R.drawable.ic_sl_phone), "Phone screen",
-                PHONE_SCREENS[if (Variant.dashboardStartsAsleep(context)) 0 else 1], trailing = { Chevron() },
-            ) { dialog = Dialog.PHONE_SCREEN }
 
             val navBar = Variant.setting(context, "nav_bar", "false").toBoolean()
             ListRow(
@@ -518,19 +435,6 @@ class MainActivity : ComponentActivity() {
                 refresh()
             }
         }, "slipstream-setup").start()
-    }
-
-    private fun setOn(wanted: Boolean) {
-        var on = wanted
-        // A connected-device foreground service can't start before Bluetooth is granted.
-        if (on && !permissionsGranted()) {
-            requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS)
-            on = false
-        }
-        BootReceiver.setOn(this, on)
-        val service = Intent(this, SlipstreamService::class.java)
-        if (on) startForegroundService(service) else stopService(service)
-        revision++
     }
 
     private fun permissionsGranted() = granted(PERMISSIONS)

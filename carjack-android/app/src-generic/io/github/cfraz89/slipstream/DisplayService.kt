@@ -21,9 +21,6 @@ import android.view.Surface
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledFuture
-import java.util.concurrent.TimeUnit
 
 /**
  * Runs in a process Shizuku starts as the shell user, which may create trusted displays and inject
@@ -62,9 +59,6 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
             // DMD2's rescaling when it moves between the phone and the head unit.
             "DisplayMetricsGuard", "DisplayUtils",
         )
-
-        /** How long a detached display waits for its session to come back. */
-        const val KEEP_MS = 5 * 60_000L
 
         const val PRIMARY_JOIN_MS = 20_000L
         const val PRIMARY_POLL_MS = 500L
@@ -135,9 +129,6 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     private var display: VirtualDisplay? = null
     /** The display's width, height and density. */
     private var size = Triple(0, 0, 0)
-    private val timer = Executors.newSingleThreadScheduledExecutor()
-    /** A detached display's release, unless its session comes back first. */
-    private var expiry: ScheduledFuture<*>? = null
     /** The phone kept awake while the display is up. */
     private var awake: StayAwake? = null
     private var fingers = Fingers()
@@ -244,8 +235,6 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     @Synchronized
     override fun resume(surface: Surface, width: Int, height: Int, density: Int): Int {
         val d = display ?: return -1
-        expiry?.cancel(false)
-        expiry = null
         return try {
             if (size != Triple(width, height, density)) {
                 d.resize(width, height, density)
@@ -263,17 +252,14 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
         }
     }
 
+    /** Keeps the display for the next session; released when the activation ends. */
     @Synchronized
     override fun detach() {
         val d = display ?: return
         d.surface = null
         awake?.stop()
         awake = null
-        expiry = timer.schedule({
-            Log.i(TAG, "No session came back for the detached display; releasing it")
-            release()
-        }, KEEP_MS, TimeUnit.MILLISECONDS)
-        Log.i(TAG, "Display ${d.display.displayId} detached, kept for ${KEEP_MS}ms")
+        Log.i(TAG, "Display ${d.display.displayId} detached, kept for the next session")
     }
 
     @Synchronized
@@ -405,6 +391,42 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
         }
     }
 
+    /**
+     * An app launched on the display finds its running task left where it is, on the phone: so
+     * its full-screen tasks are moved over first, and the launch, full screen and onto the display,
+     * takes one out of picture-in-picture.
+     */
+    @Synchronized
+    override fun bringOver(component: String) {
+        val id = displayId ?: return
+        val app = ComponentName.unflattenFromString(component)?.packageName ?: return
+        try {
+            val atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
+            val tasks = atm.javaClass
+                .getMethod("getAllRootTaskInfosOnDisplay", Int::class.javaPrimitiveType)
+                .invoke(atm, 0 /* DEFAULT_DISPLAY */) as List<*>
+            for (task in tasks.filterNotNull()) {
+                val base = (task.javaClass.getField("baseActivity").get(task) as? ComponentName)?.packageName
+                val mode = task.javaClass.getMethod("getWindowingMode").invoke(task) as Int
+                // WINDOWING_MODE_UNDEFINED or FULLSCREEN.
+                if (base != app || mode > 1) continue
+                atm.javaClass
+                    .getMethod("moveRootTaskToDisplay", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+                    .invoke(atm, task.javaClass.getField("taskId").getInt(task), id)
+                Log.i(TAG, "Moved $app over from the phone")
+            }
+        } catch (e: ReflectiveOperationException) {
+            Log.w(TAG, "Couldn't move $app over", e)
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Couldn't move $app over", e)
+        }
+        // NEW_TASK | RESET_TASK_IF_NEEDED, as a launcher starts an app; windowing mode fullscreen.
+        run(
+            "am", "start", "--display", id.toString(), "--windowingMode", "1", "-f", "0x10200000",
+            "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-n", component,
+        )
+    }
+
     override fun cycleBluetooth() {
         run("cmd", "bluetooth_manager", "disable")
         run("cmd", "bluetooth_manager", "wait-for-state:STATE_OFF")
@@ -519,8 +541,6 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
 
     @Synchronized
     override fun release() {
-        expiry?.cancel(false)
-        expiry = null
         awake?.stop()
         awake = null
         display?.release()

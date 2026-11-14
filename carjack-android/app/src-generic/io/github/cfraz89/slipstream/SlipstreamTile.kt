@@ -1,15 +1,13 @@
 package io.github.cfraz89.slipstream
 
-import android.Manifest
 import android.app.ForegroundServiceStartNotAllowedException
-import android.content.Intent
+import android.app.PendingIntent
 import android.content.SharedPreferences
-import android.content.pm.PackageManager
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.util.Log
 
-/** Slipstream on or off from Quick Settings, with where it's up to beneath. */
+/** Slipstream activated or ended from Quick Settings, with where it's up to beneath. */
 class SlipstreamTile : TileService() {
     private companion object {
         const val TAG = "carjack"
@@ -28,34 +26,40 @@ class SlipstreamTile : TileService() {
         Variant.prefs(this).unregisterOnSharedPreferenceChangeListener(changed)
     }
 
+    /** Activating needs the phone unlocked, and opens the dashboard; ending doesn't. */
     override fun onClick() {
-        val on = !BootReceiver.isOn(this)
-        // A connected-device service can't start before Bluetooth is granted: the app asks.
-        if (on && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
+        if (Activation.isOn(this)) {
+            Activation.stop(this)
+            show()
+        } else if (isLocked) {
+            unlockAndRun(::start)
+        } else {
+            start()
+        }
+    }
+
+    private fun start() {
+        // Until it's set up, the app's start screen takes over: it leads to settings.
+        if (!Activation.ready(this)) {
             Variant.openApp(this)?.let { startActivityAndCollapse(it) }
             return
         }
-        val service = Intent(this, SlipstreamService::class.java)
-        if (on) {
-            try {
-                startForegroundService(service)
-            } catch (e: ForegroundServiceStartNotAllowedException) {
-                Log.w(TAG, "Not allowed to start from the tile; opening the app", e)
-                Variant.openApp(this)?.let { startActivityAndCollapse(it) }
-                return
-            }
-        } else {
-            stopService(service)
+        try {
+            Activation.startService(this)
+        } catch (e: ForegroundServiceStartNotAllowedException) {
+            Log.w(TAG, "Not allowed to start from the tile; opening the app", e)
+            Variant.openApp(this)?.let { startActivityAndCollapse(it) }
+            return
         }
-        BootReceiver.setOn(this, on)
+        startActivityAndCollapse(
+            PendingIntent.getActivity(this, 0, Activation.dashboard(this), PendingIntent.FLAG_IMMUTABLE),
+        )
         show()
     }
 
     private fun show() {
         val tile = qsTile ?: return
-        val on = BootReceiver.isOn(this)
+        val on = Activation.isOn(this)
         tile.state = if (on) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
         tile.subtitle = if (on) Variant.setting(this, "status", SlipstreamService.WAITING) else "Off"
         tile.updateTile()

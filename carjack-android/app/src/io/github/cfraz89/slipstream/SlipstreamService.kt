@@ -31,6 +31,8 @@ class SlipstreamService : Service() {
         /** Try again after giving up on a unit. */
         const val ACTION_RETRY = "io.github.cfraz89.slipstream.RETRY"
         const val WAITING = "Waiting for the head unit"
+        private const val BLOCKED_CHANNEL = "blocked"
+        private const val BLOCKED_ID = 4
 
         /** How often to page an absent unit, and how long to wait before cycling a link that is up. */
         private const val OFFER_WAIT_MS = 20_000L
@@ -40,7 +42,9 @@ class SlipstreamService : Service() {
         /** How long a session on a channel we dialled is still setting up iAP2, and can give way. */
         private const val DIALLED_SETUP_MS = 6_000L
         private const val MAX_CYCLES = 2
-        private const val MAX_FAILURES = 3
+        /** At most this many relinks after sessions in any window this long. */
+        private const val MAX_RELINKS = 3
+        private const val RELINK_WINDOW_MS = 30_000L
 
         fun createChannel(context: Context) {
             context.getSystemService(NotificationManager::class.java).createNotificationChannel(
@@ -70,10 +74,11 @@ class SlipstreamService : Service() {
     private var waitingSince = 0L
     /** Bluetooth cycles left before only dialling; refilled by a session. */
     private var cyclesLeft = MAX_CYCLES
-    /** Sessions in a row that never got to video. */
-    private var failures = 0
     /** The head unit given up on, for Retry. */
     private var gaveUpOn: BluetoothDevice? = null
+    /** When the relinks in the last [RELINK_WINDOW_MS] went, oldest first. */
+    private val relinks = ArrayDeque<Long>()
+    private var pendingRelink: Runnable? = null
     private lateinit var stopAction: Notification.Action
     private lateinit var retryAction: Notification.Action
 
@@ -110,7 +115,7 @@ class SlipstreamService : Service() {
                 offerWait = OFFER_WAIT_MS
                 if (session == null) status("${name(unit)} connected")
                 handler.postDelayed({
-                    if (session == null) {
+                    if (session == null && !blocked(unit)) {
                         status("Calling ${name(unit)}")
                         bluetooth.dial(unit)
                     }
@@ -148,9 +153,38 @@ class SlipstreamService : Service() {
         }
     }
 
-    /** A fresh start with the head unit given up on: the failure count cleared, its link renewed. */
+    /**
+     * Whether [Variant.blocker] keeps [unit] from a session. If so, says so in a notification that
+     * alerts: the connection one is silent.
+     */
+    private fun blocked(unit: BluetoothDevice): Boolean {
+        val manager = getSystemService(NotificationManager::class.java)
+        val blocker = Variant.blocker(this)
+        if (blocker == null) {
+            manager.cancel(BLOCKED_ID)
+            return false
+        }
+        status("$blocker; can't connect to ${name(unit)}", true)
+        manager.createNotificationChannel(
+            NotificationChannel(BLOCKED_CHANNEL, "Can't connect", NotificationManager.IMPORTANCE_HIGH),
+        )
+        manager.notify(
+            BLOCKED_ID,
+            Notification.Builder(this, BLOCKED_CHANNEL)
+                .setSmallIcon(Variant.NOTIFICATION_ICON)
+                .setContentTitle("Can't connect to ${name(unit)}")
+                .setContentText("$blocker. Start it, then retry.")
+                .setOnlyAlertOnce(true)
+                .setContentIntent(Variant.openApp(this))
+                .setActions(retryAction)
+                .build(),
+        )
+        gaveUpOn = unit
+        return true
+    }
+
+    /** A fresh start with the head unit given up on: its link renewed. */
     private fun retry() {
-        failures = 0
         cyclesLeft = MAX_CYCLES
         val unit = gaveUpOn ?: bluetooth.headUnit()
         gaveUpOn = null
@@ -160,6 +194,7 @@ class SlipstreamService : Service() {
         }
         status("Trying ${name(unit)} again")
         waitingSince = now()
+        pendingRelink?.let(handler::removeCallbacks)
         bluetooth.relink(unit)
     }
 
@@ -204,6 +239,7 @@ class SlipstreamService : Service() {
     private fun renewLink(unit: BluetoothDevice) {
         if (now() - waitingSince < offerWait) return
         waitingSince = now()
+        if (blocked(unit)) return
         if (cyclesLeft > 0) status("Renewing the link to ${name(unit)}")
         if (cyclesLeft > 0 && Variant.cycleBluetooth()) {
             cyclesLeft--
@@ -217,6 +253,10 @@ class SlipstreamService : Service() {
 
     private fun accept(socket: BluetoothSocket) {
         val dialled = bluetooth.wasDialled(socket)
+        if (session == null && blocked(socket.remoteDevice)) {
+            Bluetooth.closeQuietly(socket)
+            return
+        }
         session?.let { current ->
             // A unit carries iAP2 on the channel it opened over one we dialled, if it opens one.
             if (sessionDialled && !dialled && now() - sessionStarted < DIALLED_SETUP_MS) {
@@ -238,21 +278,10 @@ class SlipstreamService : Service() {
             if (session !== ended) return@Session
             session = null
             waitingSince = now()
-            if (ended.streamed) {
-                failures = 0
-                cyclesLeft = MAX_CYCLES
-            } else {
-                failures++
-            }
+            if (ended.streamed) cyclesLeft = MAX_CYCLES
             // The head unit only dials iAP on a fresh link, and stays connected after a session
-            // ends; cycle it so the next one can start - unless they keep failing, when it
-            // waits for the head unit to reconnect by itself.
-            if (failures < MAX_FAILURES) {
-                bluetooth.relink(unit)
-            } else {
-                gaveUpOn = unit
-                status("Sessions keep failing with ${name(unit)}", true)
-            }
+            // ends; cycle it so the next one can start, however many have failed.
+            relinkAfterSession(unit)
         }
         session = started
         try {
@@ -262,6 +291,21 @@ class SlipstreamService : Service() {
             Bluetooth.closeQuietly(socket)
             session = null
         }
+    }
+
+    /** [Bluetooth.relink], held back so sessions that fail fast can't cycle the link nonstop. */
+    private fun relinkAfterSession(unit: BluetoothDevice) {
+        while (relinks.isNotEmpty() && now() - relinks.first() >= RELINK_WINDOW_MS) relinks.removeFirst()
+        val delay = if (relinks.size < MAX_RELINKS) 0L else relinks.first() + RELINK_WINDOW_MS - now()
+        if (delay > 0) status("Trying ${name(unit)} again in ${(delay + 999) / 1000} s")
+        val relink = Runnable {
+            pendingRelink = null
+            if (session != null) return@Runnable
+            relinks.addLast(now())
+            bluetooth.relink(unit)
+        }
+        pendingRelink = relink
+        handler.postDelayed(relink, delay)
     }
 
     private fun codec() = when (Variant.setting(this, "codec", "auto")) {
@@ -289,6 +333,7 @@ class SlipstreamService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacks(watch)
+        pendingRelink?.let(handler::removeCallbacks)
         handler.post {
             // Cleared first, so the session's end isn't taken for a dropped one and relinked.
             val stopping = session

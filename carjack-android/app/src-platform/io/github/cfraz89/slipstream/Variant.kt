@@ -155,6 +155,8 @@ object Variant {
 
     fun bluetoothAddress(context: Context, adapter: BluetoothAdapter): String? = adapter.address
 
+    fun blocker(context: Context): String? = null
+
     /** How long the screen is left as a dropped session had it, rather than opened afresh. */
     private const val KEEP_MS = 5 * 60_000L
 

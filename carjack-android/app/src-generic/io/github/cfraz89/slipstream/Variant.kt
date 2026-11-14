@@ -59,40 +59,45 @@ object Variant {
 
     fun foregroundServiceTypes() = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
 
-    fun onStartCommand(service: Service, intent: Intent?) = Service.START_STICKY
+    /** Not restarted: Slipstream is only ever activated by hand ([Activation]). */
+    fun onStartCommand(service: Service, intent: Intent?) = Service.START_NOT_STICKY
 
-    /** For [MainActivity] to show beside the switch, with Retry where it applies. */
+    /** For the tile and the dashboard, with Retry where it applies. */
     fun onStatus(context: Context, text: String, retryable: Boolean) {
         prefs(context).edit().putString("status", text).putBoolean("retryable", retryable).apply()
+        DashboardActivity.status = text
+        DashboardActivity.retryable = retryable
     }
 
-    /** Whether a unit's link is up, for [MainActivity]'s Bluetooth shortcut. */
+    /** Whether a unit's link is up, for [SettingsActivity]'s Bluetooth shortcut. */
     fun onLinked(context: Context, linked: Boolean) {
         prefs(context).edit().putBoolean("linked", linked).apply()
     }
 
-    /** The phone's screen during a session. */
+    /** The phone's screen while activated. */
     private const val DASHBOARD = "$APP_ID/$APP_ID.DashboardActivity"
 
-    /** The notification's Turn off flips the app's own switch. */
+    /** The notification's Turn off ends the activation. */
     fun onStopRequested(context: Context) {
-        BootReceiver.setOn(context, false)
+        Activation.setOn(context, false)
     }
 
     fun openApp(context: Context): PendingIntent? = PendingIntent.getActivity(
-        context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
+        context, 0, Intent(context, StartActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
     )
 
     /** How long the service's own teardown gets before the process goes. */
     private const val STOP_GRACE_MS = 1500L
 
     /**
-     * Stop means stopped: once the teardown has had its moment the process ends, taking the
-     * native session, the listeners and any network request with it - unless one of its screens
-     * is up, which would look like a crash. Shizuku goes only once the WiFi is handed back.
+     * Stop means stopped: the activation ends with its dashboard, and once the teardown has had its
+     * moment the process ends, taking the native session, the listeners and any network request
+     * with it - unless one of its screens is up, which would look like a crash. Shizuku goes only
+     * once the WiFi is handed back.
      */
     fun onServiceDestroyed(service: Service) {
-        val app = service.applicationContext
+        Activation.setOn(service, false)
+        DashboardActivity.close()
         AccessoryWifi.afterShell {
             ShizukuDisplay.unbind()
             Handler(Looper.getMainLooper()).postDelayed({
@@ -113,7 +118,7 @@ object Variant {
     fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    /** Asked for from [MainActivity], for as long as Android allows. */
+    /** Asked for from [SettingsActivity], for as long as Android allows. */
     fun makeDiscoverable(adapter: BluetoothAdapter) {}
 
     /** The user answers the system's dialog. */
@@ -148,6 +153,12 @@ object Variant {
         Log.w(TAG, "No Bluetooth address from Shizuku; the head unit gets a placeholder")
         return adapter.address
     }
+
+    /**
+     * What keeps a session from starting, or null: without Shizuku there's no display, and units
+     * that check the Bluetooth address (the CFMOTO) never answer.
+     */
+    fun blocker(context: Context) = ShizukuDisplay.problem()
 
     /**
      * The MAC [iface] joined with, which apps can't read and the head unit may check against the
@@ -197,10 +208,11 @@ object Variant {
             return null
         }
         Switchgear.watch(context)
+        DashboardActivity.connected = true
         ShizukuDisplay.launchOnPhone(DASHBOARD)
         return Runnable {
             Switchgear.stop()
-            DashboardActivity.close()
+            DashboardActivity.connected = false
             close.run()
         }
     }
@@ -269,9 +281,6 @@ object Variant {
     fun openLauncher() {
         ShizukuDisplay.launch(LAUNCHER)
     }
-
-    /** Whether the phone's dashboard starts a session asleep, or with its controls lit. */
-    fun dashboardStartsAsleep(context: Context) = setting(context, "dashboard", "asleep") != "controls"
 
     /** What the head unit opens on connect, brought back to the front. */
     fun goHome(context: Context) {

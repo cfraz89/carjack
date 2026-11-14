@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.util.Log
+import android.view.Display
 
 /** One launchable activity, resolved for display. */
 data class AppEntry(
@@ -17,6 +18,13 @@ data class AppEntry(
 object AppRepository {
 
     private const val TAG = "SlipstreamLauncher"
+
+    /**
+     * Set by the app: starts an app on the head unit's display, bringing it over from the phone
+     * where it's running there already, which a launch from here leaves it on; false where it can't.
+     */
+    @JvmStatic
+    var bringOver: ((ComponentName) -> Boolean)? = null
 
     /** Every launchable activity except our own, sorted by label. */
     fun launchableApps(context: Context): List<AppEntry> {
@@ -53,6 +61,10 @@ object AppRepository {
     }
 
     fun launch(context: Context, component: ComponentName): Boolean {
+        if (context.display?.displayId != Display.DEFAULT_DISPLAY && bringOver?.invoke(component) == true) {
+            RecentsStore.record(context, component)
+            return true
+        }
         val intent = Intent(Intent.ACTION_MAIN)
             .addCategory(Intent.CATEGORY_LAUNCHER)
             .setComponent(component)

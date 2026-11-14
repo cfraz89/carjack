@@ -32,7 +32,7 @@ object ShizukuDisplay {
         .daemon(false)
         .processNameSuffix("display")
         .debuggable(false)
-        .version(41)
+        .version(43)
 
     @Volatile private var service: IDisplayService? = null
     private var bound = CountDownLatch(1)
@@ -57,6 +57,18 @@ object ShizukuDisplay {
         Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
     } catch (e: RuntimeException) {
         false
+    }
+
+    /** What keeps Slipstream from Shizuku, for the user; null where nothing does. */
+    fun problem(): String? = try {
+        when {
+            !Shizuku.pingBinder() -> "Shizuku isn't running"
+            Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED ->
+                "Shizuku hasn't let Slipstream in"
+            else -> null
+        }
+    } catch (e: RuntimeException) {
+        "Shizuku isn't running"
     }
 
     /** [call] on the service where Shizuku is up; [fallback] where it isn't, or the call fails. */
@@ -112,6 +124,18 @@ object ShizukuDisplay {
             active?.launch(component)
         } catch (ignored: RemoteException) {
         }
+    }
+
+    /** [IDisplayService.bringOver], while there's a display: false where there's none. */
+    fun bringOver(component: ComponentName): Boolean {
+        val s = active ?: return false
+        Thread {
+            try {
+                s.bringOver(component.flattenToString())
+            } catch (ignored: RemoteException) {
+            }
+        }.start()
+        return true
     }
 
     /** [IDisplayService.launchOnPhone], while there's a display. */
