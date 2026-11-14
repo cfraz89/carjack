@@ -171,7 +171,8 @@ slipstream-release prerelease="false": slipstream
     fi
     signed=target/Slipstream-$version.apk
     cp target/Slipstream.apk $signed
-    $tools/apksigner verify --print-certs $signed | grep -q "CN=Slipstream" \
+    # Not grep -q: quitting early kills apksigner with SIGPIPE, which pipefail counts as failure.
+    $tools/apksigner verify --print-certs $signed | grep "CN=Slipstream" >/dev/null \
         || { echo "Not signed with the release key (~/.config/slipstream)" >&2; exit 1; }
     # The app's changes since the last release, for the notes.
     last=$(git tag -l 'slipstream-v*' --sort=-creatordate | head -1)
