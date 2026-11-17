@@ -1,0 +1,71 @@
+// Android Auto's protocol, trimmed to what Slipstream's receiver uses. From headunit-revived
+// (AGPL-3.0), app/src/main/proto; field numbers are Android Auto's own.
+syntax = "proto2";
+
+package aap.input;
+option java_package = "io.github.cfraz89.slipstream.aa.proto";
+option java_outer_classname = "Input";
+
+import "common.proto";
+
+enum MsgType
+{
+    EVENT = 0x8001;
+    BINDINGREQUEST = 0x8002;
+    BINDINGRESPONSE = 0x8003;
+}
+
+message Key
+{
+    required uint32 keycode = 1;
+    required bool down = 2;
+    optional uint32 metastate = 3;
+    optional bool longpress = 4;
+}
+
+message KeyEvent
+{
+    repeated Key keys = 1;
+}
+
+message TouchEvent
+{
+    enum PointerAction
+    {
+        TOUCH_ACTION_DOWN = 0;
+        TOUCH_ACTION_UP = 1;
+        TOUCH_ACTION_MOVE = 2;
+        TOUCH_ACTION_CANCEL = 3;
+        TOUCH_ACTION_OUTSIDE = 4;
+        TOUCH_ACTION_POINTER_DOWN = 5;
+        TOUCH_ACTION_POINTER_UP = 6;
+    }
+
+    message Pointer
+    {
+        required uint32 x = 1;
+        required uint32 y = 2;
+        required uint32 pointer_id = 3;
+    }
+    repeated Pointer pointer_data = 1;
+    optional uint32 action_index = 2;
+    required PointerAction action = 3;
+}
+
+message InputReport
+{
+    required uint64 timestamp = 1;
+    optional int32 disp_channel_id = 2;
+    optional TouchEvent touch_event = 3;
+    optional KeyEvent key_event = 4;
+}
+
+message KeyBindingRequest
+{
+    repeated int32 keycodes = 1;
+}
+
+message BindingResponse
+{
+    required MessageStatus status = 1;
+}

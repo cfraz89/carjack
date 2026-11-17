@@ -55,6 +55,12 @@ class ScreenStream(
         const val SAMPLE_BUFFERS = 60
         const val KEPT_SAMPLES = 6
 
+        /** The display's density for a view this size: the `density` setting, else [SMALLEST_WIDTH_DP]. */
+        fun density(context: Context, viewWidth: Int, viewHeight: Int): Int {
+            val fallback = maxOf(120, minOf(viewWidth, viewHeight) * 160 / SMALLEST_WIDTH_DP)
+            return Variant.setting(context, "density", fallback.toString()).toIntOrNull() ?: fallback
+        }
+
         /**
          * Ask for what head units decode: HEVC Main at a variable bitrate, as the Linux build
          * sends it, and H.264 Constrained Baseline (else Baseline) at a constant one, rather than
@@ -127,9 +133,7 @@ class ScreenStream(
         width: Int, height: Int, fps: Int, viewX: Int, viewY: Int, viewWidth: Int,
         viewHeight: Int, barHeight: Int, hevc: Boolean,
     ) {
-        val density = intSetting(
-            "density", maxOf(120, minOf(viewWidth, viewHeight) * 160 / SMALLEST_WIDTH_DP),
-        )
+        val density = density(context, viewWidth, viewHeight)
 
         val mime = if (hevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
         val format = MediaFormat.createVideoFormat(mime, width, height).apply {
@@ -177,11 +181,28 @@ class ScreenStream(
         backCue = Cues.back(cueSize)
         selectCue = Cues.select(cueSize)
         labelHeight = (viewHeight * LABEL_FRACTION).roundToInt()
-        closeDisplay = Variant.openDisplay(context, viewWidth, viewHeight, density, target)
+        reopen = {
+            closeDisplay?.run()
+            r.crop(1f, 1f)
+            closeDisplay = Variant.openDisplay(context, viewWidth, viewHeight, density, target)
+        }
+        reopen?.invoke()
         current = this
         lastOutput = SystemClock.uptimeMillis()
         watchdogHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS)
         watchdogHandler.postDelayed(preview, FIRST_PREVIEW_MS)
+    }
+
+    private var reopen: (() -> Unit)? = null
+
+    /** Closes what the [Variant] shows and opens whatever it picks. Off the caller's thread. */
+    fun reopen() {
+        Handler(thread.looper).post { reopen?.invoke() }
+    }
+
+    /** See [Relay.crop]. */
+    fun crop(width: Float, height: Float) {
+        relay?.crop(width, height)
     }
 
     /** Answers the switchgear's back and select on the picture itself; see [Cues]. */
@@ -239,6 +260,7 @@ class ScreenStream(
         if (current === this) current = null
         watchdogHandler.removeCallbacks(watchdog)
         watchdogHandler.removeCallbacks(preview)
+        reopen = null
         closeDisplay?.run()
         closeDisplay = null
         relay?.stop()

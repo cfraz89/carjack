@@ -115,6 +115,9 @@ void main() { gl_FragColor = texture2D(cue, uv) * alpha; }
     /** GL reads the vertices from here at every draw, so it must outlive setUp. */
     private lateinit var quad: FloatBuffer
     private val matrix = FloatArray(16)
+    /** The middle of the frame that's drawn, in texture coordinates; see [crop]. */
+    private val crop = FloatArray(16).also { android.opengl.Matrix.setIdentityM(it, 0) }
+    private val drawn = FloatArray(16)
     private var haveFrame = false
     private var lastDrawMs = 0L
     private var lastTimestampNs = 0L
@@ -267,6 +270,18 @@ void main() { gl_FragColor = texture2D(cue, uv) * alpha; }
         }
     }
 
+    /**
+     * Only the middle [width] by [height] of each frame drawn, as fractions of it, filling the view:
+     * for a source that letterboxes its picture in a frame of another shape. 1, 1 for all of it.
+     */
+    fun crop(width: Float, height: Float) {
+        handler.post {
+            android.opengl.Matrix.setIdentityM(crop, 0)
+            android.opengl.Matrix.translateM(crop, 0, (1 - width) / 2, (1 - height) / 2, 0f)
+            android.opengl.Matrix.scaleM(crop, 0, width, height, 1f)
+        }
+    }
+
     /** The picture as the head unit next gets it, [CAPTURE_WIDTH] wide, to [sink]. */
     fun capture(sink: (Bitmap) -> Unit) {
         handler.post {
@@ -304,8 +319,9 @@ void main() { gl_FragColor = texture2D(cue, uv) * alpha; }
         if (haveFrame) {
             // GL's origin is bottom left; the view's is top left.
             GLES20.glViewport(viewX, height - viewY - viewHeight, viewWidth, viewHeight)
+            android.opengl.Matrix.multiplyMM(drawn, 0, matrix, 0, crop, 0)
             GLES20.glUniformMatrix4fv(
-                GLES20.glGetUniformLocation(program, "tex"), 1, false, matrix, 0,
+                GLES20.glGetUniformLocation(program, "tex"), 1, false, drawn, 0,
             )
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }

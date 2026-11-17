@@ -1,0 +1,43 @@
+// Android Auto's protocol, trimmed to what Slipstream's receiver uses. From headunit-revived
+// (AGPL-3.0), app/src/main/proto; field numbers are Android Auto's own.
+syntax = "proto2";
+
+package aap;
+option java_package = "io.github.cfraz89.slipstream.aa.proto";
+option java_outer_classname = "Common";
+
+enum MessageStatus
+{
+    STATUS_SUCCESS = 0;
+    STATUS_UNSOLICITED_MESSAGE = 1;
+    STATUS_NO_COMPATIBLE_VERSION = -1;
+    STATUS_CERTIFICATE_ERROR = -2;
+    STATUS_AUTHENTICATION_FAILURE = -3;
+    STATUS_INVALID_SERVICE = -4;
+    STATUS_INVALID_CHANNEL = -5;
+    STATUS_INVALID_PRIORITY = -6;
+    STATUS_INTERNAL_ERROR = -7;
+    STATUS_MEDIA_CONFIG_MISMATCH = -8;
+    STATUS_INVALID_SENSOR = -9;
+    STATUS_KEYCODE_NOT_BOUND = -18;
+    STATUS_INVALID_INPUT = -20;
+    STATUS_PING_TIMEOUT = -25;
+    STATUS_COMMAND_NOT_SUPPORTED = -250;
+    STATUS_FRAMING_ERROR = -251;
+    STATUS_UNEXPECTED_MESSAGE = -253;
+    STATUS_BUSY = -254;
+    STATUS_OUT_OF_MEMORY = -255;
+}
+
+message HeadUnitInfo {
+    optional string make = 1;
+    optional string model = 2;
+    optional string year = 3;
+    optional string vehicle_id = 4;
+    optional string head_unit_make = 5;
+    optional string head_unit_model = 6;
+    optional string head_unit_software_build = 7;
+    optional string head_unit_software_version = 8;
+    // 0 unspecified, 1 car, 2 truck, 3 motorcycle.
+    optional int32 vehicle_type = 9;
+}

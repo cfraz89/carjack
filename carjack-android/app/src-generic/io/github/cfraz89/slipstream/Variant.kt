@@ -18,6 +18,7 @@ import android.os.RemoteException
 import android.util.Log
 import android.view.KeyEvent
 import android.view.Surface
+import io.github.cfraz89.slipstream.aa.AndroidAuto
 import java.io.File
 import java.io.IOException
 
@@ -59,8 +60,8 @@ object Variant {
 
     fun foregroundServiceTypes() = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
 
-    /** Not restarted: Slipstream is only ever activated by hand ([Activation]). */
-    fun onStartCommand(service: Service, intent: Intent?) = Service.START_NOT_STICKY
+    /** Restarted: it listens until turned off ([OpenMode]). */
+    fun onStartCommand(service: Service, intent: Intent?) = Service.START_STICKY
 
     /** For the tile and the dashboard, with Retry where it applies. */
     fun onStatus(context: Context, text: String, retryable: Boolean) {
@@ -74,29 +75,28 @@ object Variant {
         prefs(context).edit().putBoolean("linked", linked).apply()
     }
 
-    /** The phone's screen while activated. */
+    /** The phone's screen in Open mode. */
     private const val DASHBOARD = "$APP_ID/$APP_ID.DashboardActivity"
 
-    /** The notification's Turn off ends the activation. */
+    /** The notification's Turn off stops the listening. */
     fun onStopRequested(context: Context) {
-        Activation.setOn(context, false)
+        OpenMode.setListening(context, false)
     }
 
     fun openApp(context: Context): PendingIntent? = PendingIntent.getActivity(
-        context, 0, Intent(context, StartActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
+        context, 0, Intent(context, SettingsActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
     )
 
     /** How long the service's own teardown gets before the process goes. */
     private const val STOP_GRACE_MS = 1500L
 
     /**
-     * Stop means stopped: the activation ends with its dashboard, and once the teardown has had its
+     * Stop means stopped: the dashboard closes, and once the teardown has had its
      * moment the process ends, taking the native session, the listeners and any network request
      * with it - unless one of its screens is up, which would look like a crash. Shizuku goes only
      * once the WiFi is handed back.
      */
     fun onServiceDestroyed(service: Service) {
-        Activation.setOn(service, false)
         DashboardActivity.close()
         AccessoryWifi.afterShell {
             ShizukuDisplay.unbind()
@@ -146,19 +146,38 @@ object Variant {
 
     /**
      * Apps only see a placeholder for their own address; Shizuku reads the real one, which some
-     * units (the CFMOTO) need in CarPlayAvailability.
+     * units (the CFMOTO) need in CarPlayAvailability. Kept, so Android Auto can do without Shizuku.
      */
     fun bluetoothAddress(context: Context, adapter: BluetoothAdapter): String? {
-        ShizukuDisplay.bluetoothAddress()?.let { return it }
+        rememberBluetoothAddress(context)?.let { return it }
         Log.w(TAG, "No Bluetooth address from Shizuku; the head unit gets a placeholder")
         return adapter.address
     }
 
+    /** The real Bluetooth address, read through Shizuku where it's up, else as last read. Blocks. */
+    fun rememberBluetoothAddress(context: Context): String? {
+        val read = ShizukuDisplay.bluetoothAddress()
+        if (read != null) {
+            prefs(context).edit().putString("bluetooth_address", read).apply()
+            return read
+        }
+        return prefs(context).getString("bluetooth_address", null)
+    }
+
+    fun knowsBluetoothAddress(context: Context) = prefs(context).contains("bluetooth_address")
+
     /**
-     * What keeps a session from starting, or null: without Shizuku there's no display, and units
-     * that check the Bluetooth address (the CFMOTO) never answer.
+     * What keeps a session from starting, or null: without Shizuku Open mode has no display, and
+     * units that check the Bluetooth address (the CFMOTO) never answer until it's been read once.
      */
-    fun blocker(context: Context) = ShizukuDisplay.problem()
+    fun blocker(context: Context): String? {
+        val problem = ShizukuDisplay.problem() ?: return null
+        return when {
+            OpenMode.isOn(context) -> problem
+            knowsBluetoothAddress(context) -> null
+            else -> "$problem, and Slipstream hasn't read the phone's Bluetooth address yet"
+        }
+    }
 
     /**
      * The MAC [iface] joined with, which apps can't read and the head unit may check against the
@@ -200,8 +219,12 @@ object Variant {
         }
     }
 
-    /** A display of the head unit's own size with the chosen app on it, or null without Shizuku. */
+    /**
+     * In Open mode a display of the head unit's own size with the chosen app on it, or null
+     * without Shizuku; otherwise Android Auto.
+     */
     fun openDisplay(context: Context, width: Int, height: Int, density: Int, target: Surface): Runnable? {
+        if (!OpenMode.isOn(context)) return AndroidAuto.open(context, width, height, target)
         val close = ShizukuDisplay.open(target, width, height, density, appFor(context))
         if (close == null) {
             Log.e(TAG, "No display: Shizuku isn't running or hasn't let Slipstream in")
@@ -217,9 +240,17 @@ object Variant {
         }
     }
 
-    /** Onto the display, 1:1. */
+    /** Open mode's display as a session would have it, for [PreviewActivity]; null without Shizuku. */
+    fun openPreview(context: Context, width: Int, height: Int, density: Int, target: Surface): Runnable? =
+        ShizukuDisplay.open(target, width, height, density, appFor(context))
+
+    /** Onto the display, 1:1, or to Android Auto, whichever is showing. */
     fun touch(context: Context, viewX: Int, viewY: Int, viewWidth: Int, viewHeight: Int) =
         Touch { action, pointer, panelX, panelY ->
+            if (AndroidAuto.active) {
+                AndroidAuto.touch(action, pointer, panelX, panelY, viewX, viewY, viewWidth, viewHeight)
+                return@Touch
+            }
             val display = ShizukuDisplay.active ?: return@Touch
             try {
                 display.touch(action, pointer, panelX - viewX, panelY - viewY)
@@ -233,9 +264,9 @@ object Variant {
 
     private const val KEYCODE_HOME = 3
 
-    /** A key from the head unit's switchgear, through its mode; see [Switchgear]. */
+    /** A key from the head unit's switchgear, through its mode ([Switchgear]), or to Android Auto. */
     fun switchgear(context: Context, code: Int, down: Boolean) {
-        Switchgear.key(context, code, down)
+        if (AndroidAuto.active) AndroidAuto.key(code, down) else Switchgear.key(context, code, down)
     }
 
     /**

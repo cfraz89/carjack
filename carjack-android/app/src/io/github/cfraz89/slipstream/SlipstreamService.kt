@@ -30,6 +30,11 @@ class SlipstreamService : Service() {
         const val ACTION_STOP = "io.github.cfraz89.slipstream.STOP"
         /** Try again after giving up on a unit. */
         const val ACTION_RETRY = "io.github.cfraz89.slipstream.RETRY"
+        /**
+         * End the session by hand. The unit is then left alone, as one given up on is: until it
+         * links afresh, or Retry.
+         */
+        const val ACTION_DISCONNECT = "io.github.cfraz89.slipstream.DISCONNECT"
         const val WAITING = "Waiting for the head unit"
         private const val BLOCKED_CHANNEL = "blocked"
         private const val BLOCKED_ID = 4
@@ -67,6 +72,10 @@ class SlipstreamService : Service() {
     private lateinit var bluetooth: Bluetooth
     private lateinit var wifi: AccessoryWifi
     private var session: Session? = null
+    /** The session ending is [disconnect]'s doing. */
+    private var disconnecting = false
+    /** The head unit disconnected by hand, refused until it links afresh or Retry. */
+    private var disconnected: BluetoothDevice? = null
     private var sessionDialled = false
     private var sessionStarted = 0L
     /** Where we can't page, a unit already linked at start gets only the dial grace. */
@@ -111,6 +120,7 @@ class SlipstreamService : Service() {
             bluetooth.setOnUnitLinked { unit ->
                 // A fresh link: give it the full wait before renewing it.
                 gaveUpOn = null
+                disconnected = null
                 waitingSince = now()
                 offerWait = OFFER_WAIT_MS
                 if (session == null) status("${name(unit)} connected")
@@ -188,6 +198,7 @@ class SlipstreamService : Service() {
         cyclesLeft = MAX_CYCLES
         val unit = gaveUpOn ?: bluetooth.headUnit()
         gaveUpOn = null
+        disconnected = null
         if (session != null || unit == null) {
             status(if (session != null) "Already in a session" else WAITING)
             return
@@ -253,6 +264,11 @@ class SlipstreamService : Service() {
 
     private fun accept(socket: BluetoothSocket) {
         val dialled = bluetooth.wasDialled(socket)
+        if (session == null && socket.remoteDevice == disconnected) {
+            Log.i(TAG, "Disconnected by hand; refusing ${socket.remoteDevice}")
+            Bluetooth.closeQuietly(socket)
+            return
+        }
         if (session == null && blocked(socket.remoteDevice)) {
             Bluetooth.closeQuietly(socket)
             return
@@ -278,6 +294,13 @@ class SlipstreamService : Service() {
             if (session !== ended) return@Session
             session = null
             waitingSince = now()
+            if (disconnecting) {
+                disconnecting = false
+                disconnected = unit
+                gaveUpOn = unit
+                status("Disconnected from ${name(unit)}", true)
+                return@Session
+            }
             if (ended.streamed) cyclesLeft = MAX_CYCLES
             // The head unit only dials iAP on a fresh link, and stays connected after a session
             // ends; cycle it so the next one can start, however many have failed.
@@ -291,6 +314,12 @@ class SlipstreamService : Service() {
             Bluetooth.closeQuietly(socket)
             session = null
         }
+    }
+
+    private fun disconnect() {
+        val current = session ?: return
+        disconnecting = true
+        current.stop()
     }
 
     /** [Bluetooth.relink], held back so sessions that fail fast can't cycle the link nonstop. */
@@ -322,6 +351,7 @@ class SlipstreamService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_RETRY -> handler.post(::retry)
+            ACTION_DISCONNECT -> handler.post(::disconnect)
         }
         return Variant.onStartCommand(this, intent)
     }

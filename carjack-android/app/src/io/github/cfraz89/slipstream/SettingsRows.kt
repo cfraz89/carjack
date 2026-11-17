@@ -60,7 +60,7 @@ fun OnConnectRow() {
     val glyph = app == Previews.HOME && Choices.homeApp(context) == null
     ListRow(
         Leading.Picture(Choices.icon(context, app), tinted = glyph),
-        "On connect", Choices.name(context, app), trailing = { Chevron() },
+        "Home screen", Choices.name(context, app), trailing = { Chevron() },
     ) { context.startActivity(Intent(context, OnConnectActivity::class.java)) }
 }
 

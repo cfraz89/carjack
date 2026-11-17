@@ -127,6 +127,8 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     }
 
     private var display: VirtualDisplay? = null
+    /** Closes the VirtualDevice the display came from, where it did. */
+    private var closeDevice: (() -> Unit)? = null
     /** The display's width, height and density. */
     private var size = Triple(0, 0, 0)
     /** The phone kept awake while the display is up. */
@@ -136,37 +138,6 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
 
     init {
         startSystemLog()
-        restoreDarkScreen()
-    }
-
-    /**
-     * Puts back the screen timeout, power button press and brightness mode that the old dark
-     * screen mode held, where a session ended without restoring them.
-     */
-    private fun restoreDarkScreen() {
-        val saved = File("/data/local/tmp/slipstream-panel")
-        if (!saved.exists()) return
-        try {
-            val lines = saved.readText().split("\n")
-            listOf("system" to "screen_off_timeout", "global" to "power_button_short_press",
-                "system" to "screen_brightness_mode").forEachIndexed { i, (namespace, key) ->
-                val value = lines.getOrNull(i)
-                if (value.isNullOrEmpty()) {
-                    if (i < 2) run("settings", "delete", namespace, key)
-                } else {
-                    run("settings", "put", namespace, key, value)
-                }
-            }
-            // Left dark; power-reset alone is refused while the panel is taken as on.
-            if (!lines.getOrNull(2).isNullOrEmpty()) {
-                run("cmd", "display", "power-off", "0")
-                run("cmd", "display", "power-reset", "0")
-            }
-            Log.i(TAG, "Put back the screen settings the dark screen left held")
-        } catch (e: IOException) {
-            Log.w(TAG, "Couldn't read $saved", e)
-        }
-        saved.delete()
     }
 
     private val displayId get() = display?.display?.displayId
@@ -212,9 +183,13 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     override fun create(surface: Surface, width: Int, height: Int, density: Int): Int {
         release()
         return try {
-            val dm = DisplayManager::class.java.getDeclaredConstructor(Context::class.java)
+            // A VirtualDevice's where it can: awake and unlocked apart from the phone's screen.
+            val device = VirtualDevices(shellContext()).create("slipstream", width, height, density, surface, FLAGS)
+            closeDevice = device?.close
+            val created = device?.display ?: DisplayManager::class.java.getDeclaredConstructor(Context::class.java)
                 .newInstance(shellContext())
-            val created = dm.createVirtualDisplay("slipstream", width, height, density, surface, FLAGS)
+                .createVirtualDisplay("slipstream", width, height, density, surface, FLAGS)
+            Log.i(TAG, if (device != null) "Display from a VirtualDevice" else "Display in the phone's display group")
             display = created
             size = Triple(width, height, density)
             fingers = Fingers()
@@ -545,6 +520,14 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
         awake = null
         display?.release()
         display = null
+        try {
+            closeDevice?.invoke()
+        } catch (e: ReflectiveOperationException) {
+            Log.w(TAG, "Couldn't close the VirtualDevice", e)
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Couldn't close the VirtualDevice", e)
+        }
+        closeDevice = null
     }
 
     override fun destroy() {

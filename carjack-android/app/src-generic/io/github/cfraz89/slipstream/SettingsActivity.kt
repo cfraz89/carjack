@@ -29,14 +29,25 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import io.github.cfraz89.slipstream.aa.AndroidAuto
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -52,14 +63,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import rikka.shizuku.Shizuku
 
-/** What's left to set up, and the few choices there are; opened from [StartActivity]. */
+/**
+ * The app's screen: the mode, what's left to set up, and the choices; the dashboard instead during
+ * an Open mode session. Opening it restarts the listening.
+ */
 class SettingsActivity : ComponentActivity() {
 
     companion object {
         private const val REQUEST_PERMISSIONS = 1
         private const val REQUEST_SHIZUKU = 4
         private const val DISCOVERABLE_SECONDS = 300
-        private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
+        const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         private const val TAILSCALE_PACKAGE = "com.tailscale.ipn"
 
         val PERMISSIONS = arrayOf(
@@ -102,6 +116,10 @@ class SettingsActivity : ComponentActivity() {
         Shizuku.addRequestPermissionResultListener(shizukuResult)
         Variant.prefs(this).registerOnSharedPreferenceChangeListener(prefsChanged)
         setContent { SlipstreamTheme { Screen() } }
+        if (savedInstanceState == null && OpenMode.isOn(this) && DashboardActivity.connected) {
+            startActivity(Intent(this, DashboardActivity::class.java))
+            finish()
+        }
     }
 
     private val shizukuResult =
@@ -123,6 +141,9 @@ class SettingsActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refresh()
+        OpenMode.setListening(this, true)
+        OpenMode.listen(this)
+        Thread { Variant.rememberBluetoothAddress(this) }.start()
     }
 
     @Deprecated("Deprecated in Java")
@@ -143,7 +164,8 @@ class SettingsActivity : ComponentActivity() {
     @Composable
     private fun Screen() = key(revision) {
         Page {
-            TopBar("Settings", ::finish)
+            Header()
+            ModeCard()
             val steps = setupSteps()
             if (steps.isNotEmpty()) {
                 SetupCard(steps)
@@ -155,6 +177,10 @@ class SettingsActivity : ComponentActivity() {
             }
             Heading("Connection")
             SettingsCard()
+            if (OpenMode.isOn(this@SettingsActivity)) {
+                Heading("Open mode")
+                OpenModeCard()
+            }
             Heading("Help")
             HelpCard()
         }
@@ -163,6 +189,61 @@ class SettingsActivity : ComponentActivity() {
             null -> {}
         }
         help?.let { HelpScreen(it) { help = null } }
+    }
+
+    @Composable
+    private fun Header() {
+        Row(
+            Modifier.padding(start = 24.dp, top = 24.dp, bottom = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Image(painterResource(R.drawable.ic_sl_app), null, Modifier.size(56.dp))
+            Spacer(Modifier.width(16.dp))
+            // Yellowtail (Apache 2.0, res/font): a fast script, shaded pink into blue like a trail.
+            val colors = MaterialTheme.colorScheme
+            Text(
+                "Slipstream",
+                style = TextStyle(
+                    fontFamily = FontFamily(Font(R.font.yellowtail)),
+                    fontSize = 40.sp,
+                    brush = Brush.horizontalGradient(listOf(colors.tertiary, colors.primary)),
+                ),
+            )
+        }
+    }
+
+    /** What the head unit gets; a change takes effect mid-session. */
+    @Composable
+    private fun ModeCard() {
+        val open = OpenMode.isOn(this)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Heading("Mode")
+            Icon(
+                painterResource(R.drawable.ic_sl_info),
+                contentDescription = "About the modes",
+                tint = MaterialTheme.colorScheme.tertiary,
+                // Level with the heading's text, which sits low in its padding.
+                modifier = Modifier
+                    .padding(top = 12.dp)
+                    .clip(CircleShape)
+                    .clickable { help = SetupHelp.modes }
+                    .padding(4.dp)
+                    .size(18.dp),
+            )
+        }
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            listOf("Open", "Android Auto").forEachIndexed { index, label ->
+                SegmentedButton(
+                    selected = open == (index == 0),
+                    onClick = {
+                        OpenMode.setOn(this@SettingsActivity, index == 0)
+                        revision++
+                    },
+                    shape = SegmentedButtonDefaults.itemShape(index, 2),
+                ) { Text(label) }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
     }
 
     /** One line per thing still missing; the card goes when nothing is. */
@@ -201,12 +282,23 @@ class SettingsActivity : ComponentActivity() {
         val steps = mutableListOf<Step>()
         val shizuku = packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
         if (shizuku == null) {
-            steps += Step("Slipstream needs Shizuku", "Install", SetupHelp.installShizuku, ::installShizuku)
+            steps += Step("Shizuku not installed", "Install", SetupHelp.installShizuku, ::installShizuku)
         } else if (!pingShizuku()) {
-            steps += Step("Start Shizuku", "Open", SetupHelp.startShizuku) { startActivity(shizuku) }
+            steps += Step("Shizuku not running", "Open", SetupHelp.shizukuStopped) { startActivity(shizuku) }
         } else if (!ShizukuDisplay.available()) {
-            steps += Step("Slipstream needs Shizuku", "Allow", SetupHelp.allowShizuku) {
+            steps += Step("Shizuku not allowed", "Allow", SetupHelp.allowShizuku) {
                 Shizuku.requestPermission(REQUEST_SHIZUKU)
+            }
+        }
+        if (!OpenMode.isOn(this)) {
+            if (!AndroidAuto.installed(this)) {
+                steps += Step("Android Auto not installed", "Install", SetupHelp.installAndroidAuto) {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=${AndroidAuto.PACKAGE}")))
+                }
+            } else if (AndroidAuto.serverFound(this) == false) {
+                steps += Step("Android Auto server not running", "Open", SetupHelp.headUnitServer) {
+                    startActivity(AndroidAuto.settings())
+                }
             }
         }
         // With Shizuku, autoSetUp sees to these.
@@ -298,24 +390,26 @@ class SettingsActivity : ComponentActivity() {
         val context = this
         SectionCard(MaterialTheme.colorScheme.surfaceContainer) {
             HeadUnitRow { revision++ }
+        }
+    }
+
+    /** What only Open mode uses: the head unit's screen, its apps and its controls. */
+    @Composable
+    private fun OpenModeCard() {
+        val context = this
+        SectionCard(MaterialTheme.colorScheme.surfaceContainer) {
             OnConnectRow()
-
-            ListRow(Leading.Glyph(R.drawable.ic_sl_home), "Preview the launcher",
-                "Try or arrange it here", trailing = { Chevron() }) {
-                startActivity(Intent().setClassName(context, "io.github.cfraz89.slipstream.LauncherOnPhone"))
-            }
-
             ScaleRow { revision++ }
             RemoteAppsRow()
 
             val navBar = Variant.setting(context, "nav_bar", "false").toBoolean()
-            ListRow(
-                Leading.Glyph(R.drawable.ic_sl_home), "Back and home bar",
-                "Along the bottom of the head unit. From next session", trailing = { RowSwitch(navBar) },
-            ) {
+            ListRow(Leading.Glyph(R.drawable.ic_sl_home), "Show navigation bar", trailing = { RowSwitch(navBar) }) {
                 Variant.prefs(context).edit().putString("nav_bar", (!navBar).toString()).apply()
                 revision++
             }
+        }
+        Row(Modifier.padding(start = 16.dp, top = 12.dp)) {
+            FilledButton("Preview Display") { startActivity(Intent(context, PreviewActivity::class.java)) }
         }
     }
 

@@ -20,6 +20,23 @@ sentryRes.resolve("values/sentry.xml").writeText(
     |""".trimMargin(),
 )
 
+// Android Auto's protocol (app/aa-proto), as protobuf-lite Java, by protoc from Maven Central.
+val protoc: Configuration by configurations.creating
+val aaProtoOut = layout.buildDirectory.dir("generated/aa-proto").get().asFile
+val aaProto = tasks.register<Exec>("aaProto") {
+    val src = app.resolve("aa-proto")
+    inputs.dir(src)
+    outputs.dir(aaProtoOut)
+    doFirst {
+        aaProtoOut.mkdirs()
+        val exe = protoc.singleFile.apply { setExecutable(true) }
+        commandLine(
+            listOf(exe.path, "--proto_path=$src", "--java_out=lite:$aaProtoOut") +
+                src.listFiles { f -> f.extension == "proto" }!!.map { it.path },
+        )
+    }
+}
+
 // The release key (release.jks, its password in keystore.pass), where there is one, so local
 // builds and GitHub releases update each other.
 val keys = File(System.getenv("SLIPSTREAM_KEYS") ?: "${System.getProperty("user.home")}/.config/slipstream")
@@ -33,18 +50,21 @@ android {
         applicationId = "io.github.cfraz89.slipstream"
         minSdk = 33
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
         ndk.abiFilters += "arm64-v8a"
     }
     buildFeatures {
         compose = true
         aidl = true
     }
+    // raw/aa_privkey is the head unit key every open Android Auto receiver ships, public already.
+    lint { disable += "PackagedPrivateKey" }
     sourceSets["main"].apply {
         manifest.srcFile(app.resolve("generic/AndroidManifest.xml"))
         kotlin.directories += listOf(app.resolve("src").path, app.resolve("src-generic").path)
         aidl.directories += app.resolve("src-generic").path
+        java.directories += aaProtoOut.path
         res.directories += app.resolve("generic/res").path
         jniLibs.directories += (rootProject.extra["nativeLibs"] as File).path
     }
@@ -70,7 +90,7 @@ android {
     }
 }
 
-tasks.named("preBuild") { dependsOn(":cargoNdk") }
+tasks.named("preBuild") { dependsOn(":cargoNdk", aaProto) }
 
 // The androidx versions ask for SDK 37; both apps compile against 36.1, motopod's.
 tasks.matching { it.name.matches(Regex("check.*AarMetadata")) }.configureEach { enabled = false }
@@ -86,4 +106,6 @@ dependencies {
     implementation(libs.androidx.core.core)
     implementation(libs.androidx.lifecycle.lifecycle.common.java8)
     implementation(libs.androidx.lifecycle.lifecycle.process)
+    implementation(libs.protobuf.javalite)
+    protoc("com.google.protobuf:protoc:${libs.versions.protobuf.get()}:linux-x86_64@exe")
 }

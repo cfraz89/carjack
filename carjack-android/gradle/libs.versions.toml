@@ -5,6 +5,8 @@ kotlin = "2.4.21"
 compose = "1.10.0-alpha01"
 material3 = "1.4.0-alpha17"
 lifecycle = "2.10.0-alpha04"
+# protoc and its runtime, which must match.
+protobuf = "4.29.3"
 
 [libraries]
 androidx-compose-runtime_runtime = { module = "androidx.compose.runtime:runtime", version.ref = "compose" }
@@ -17,6 +19,7 @@ androidx-annotation_annotation = { module = "androidx.annotation:annotation", ve
 androidx-core_core = { module = "androidx.core:core", version = "1.19.0-alpha01" }
 androidx-lifecycle_lifecycle-common-java8 = { module = "androidx.lifecycle:lifecycle-common-java8", version.ref = "lifecycle" }
 androidx-lifecycle_lifecycle-process = { module = "androidx.lifecycle:lifecycle-process", version.ref = "lifecycle" }
+protobuf-javalite = { module = "com.google.protobuf:protobuf-javalite", version.ref = "protobuf" }
 
 [bundles]
 compose = [

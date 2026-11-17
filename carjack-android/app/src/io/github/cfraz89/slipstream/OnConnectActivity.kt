@@ -74,7 +74,7 @@ class OnConnectActivity : ComponentActivity() {
     @Composable
     private fun Screen() {
         Page {
-            TopBar("On connect") { finish() }
+            TopBar("Home screen") { finish() }
             Text(
                 "What the head unit shows when a session starts",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

@@ -1,0 +1,76 @@
+// Android Auto's protocol, trimmed to what Slipstream's receiver uses. From headunit-revived
+// (AGPL-3.0), app/src/main/proto; field numbers are Android Auto's own.
+syntax = "proto2";
+
+package aap.sensors;
+option java_package = "io.github.cfraz89.slipstream.aa.proto";
+option java_outer_classname = "Sensors";
+
+import "common.proto";
+
+enum SensorsMsgType {
+    SENSOR_STARTREQUEST = 0x8001;
+    SENSOR_STARTRESPONSE = 0x8002;
+    SENSOR_EVENT = 0x8003;
+}
+
+enum SensorType
+{
+    LOCATION = 1;
+    COMPASS = 2;
+    CAR_SPEED = 3;
+    RPM = 4;
+    ODOMETER = 5;
+    FUEL_LEVEL = 6;
+    PARKING_BRAKE = 7;
+    GEAR = 8;
+    DIAGNOSTICS = 9;
+    NIGHT = 10;
+    ENVIRONMENT = 11;
+    HVAC = 12;
+    DRIVING_STATUS = 13;
+    DEAD_RECONING = 14;
+    PASSENGER = 15;
+    DOOR = 16;
+    LIGHT = 17;
+    TIRE = 18;
+    ACCEL = 19;
+    GYRO = 20;
+    GPS = 21;
+}
+
+message SensorBatch
+{
+    message NightData
+    {
+        required bool is_night_mode = 1;
+    }
+    message DrivingStatusData
+    {
+        enum Status
+        {
+            UNRESTRICTED = 0;
+            NO_VIDEO = 1;
+            NO_KEYBOARD_INPUT = 2;
+            NO_VOICE_INPUT = 4;
+            NO_CONFIG = 8;
+            LIMIT_MESSAGE_LEN = 16;
+            FULLY_RESTRICTED = 31;
+        }
+        required int32 status = 1;
+    }
+
+    repeated NightData night_mode = 10;
+    repeated DrivingStatusData driving_status = 13;
+}
+
+message SensorRequest
+{
+    required SensorType type = 1;
+    required int64 min_update_period = 2;
+}
+
+message SensorResponse
+{
+    required MessageStatus status = 1;
+}

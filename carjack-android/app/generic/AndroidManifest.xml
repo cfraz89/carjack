@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Android Auto runs with the screen off. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
@@ -36,6 +39,8 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.HOME" />
         </intent>
+        <!-- Android Auto, for the start screen's hint where it's missing. -->
+        <package android:name="com.google.android.projection.gearhead" />
     </queries>
 
     <application
@@ -47,16 +52,13 @@
         android:extractNativeLibs="false">
 
         <activity
-            android:name=".StartActivity"
+            android:name=".SettingsActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity
-            android:name=".SettingsActivity"
-            android:exported="false" />
         <activity
             android:name=".OnConnectActivity"
             android:exported="false" />
@@ -66,17 +68,18 @@
         <activity
             android:name=".RemoteAppsActivity"
             android:exported="false" />
-        <!-- The phone's screen while activated (Activation), brought forward by the shell when a
-             head unit session starts; keeps the screen on. Shown when locked, so a phone locked
-             by its power button meanwhile comes back to it. In the app's task, which
-             StartActivity gives over to it: the icon brings it back. -->
+        <activity
+            android:name=".PreviewActivity"
+            android:exported="false"
+            android:theme="@style/SlipstreamTheme" />
+        <!-- The phone's screen in Open mode (OpenMode), brought forward by the shell when a
+             head unit session starts. In the app's task, which SettingsActivity gives over to it:
+             the icon brings it back. -->
         <activity
             android:name=".DashboardActivity"
             android:exported="true"
             android:theme="@style/SlipstreamTheme"
             android:launchMode="singleTask"
-            android:turnScreenOn="true"
-            android:showWhenLocked="true"
             android:screenOrientation="sensor"
             android:supportsPictureInPicture="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
@@ -127,7 +130,16 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
-        <!-- On and off from Quick Settings. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- The mode switched from Quick Settings. -->
         <service
             android:name=".SlipstreamTile"
             android:exported="true"

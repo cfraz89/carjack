@@ -119,8 +119,8 @@ fun Page(content: @Composable ColumnScope.() -> Unit) {
     }
 }
 
-/** A setup step's explanation: what it's for, then what to do, step by step. */
-class Help(val title: String, val why: String, val steps: List<String>)
+/** A setup step's explanation: what it's for, what to do step by step, then what to heed. */
+class Help(val title: String, val why: String, val steps: List<String>, val warning: String? = null)
 
 /** [help] as a screen of its own, over whatever opened it. */
 @Composable
@@ -150,6 +150,22 @@ fun HelpScreen(help: Help, onClose: () -> Unit) {
                         )
                         Spacer(Modifier.width(12.dp))
                         Text(step, fontSize = 15.sp)
+                    }
+                }
+            }
+            help.warning?.let { warning ->
+                SectionCard(
+                    MaterialTheme.colorScheme.errorContainer,
+                    Modifier.padding(top = 12.dp),
+                    padding = PaddingValues(16.dp),
+                ) {
+                    Row {
+                        Icon(
+                            painterResource(R.drawable.ic_sl_warning), contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(warning, color = MaterialTheme.colorScheme.onErrorContainer, fontSize = 15.sp)
                     }
                 }
             }

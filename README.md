@@ -47,6 +47,15 @@ Other phones and head units may well work, but haven't been tried.
 It needs [Shizuku](https://shizuku.rikka.app/) installed and running; Slipstream walks you through
 the rest when it opens.
 
+Once set up, Slipstream listens for the head unit all the time. What it gives the head unit is a
+setting at the top of the app's screen:
+
+- **Android Auto**, which works with the phone locked and in a pocket. Start Android Auto's head
+  unit server once after each reboot or Android Auto update: in Android Auto's settings tap
+  **Version** ten times, then **⋮ → Start head unit server**.
+- **Open mode**: the phone's own apps, also with the phone locked and in a pocket. Needs Shizuku
+  running.
+
 The easiest way to install it and keep it updated is [Obtainium](https://obtainium.imranr.dev/),
 which installs apps straight from GitHub releases:
 
@@ -64,7 +73,12 @@ See [`carjack-linux/README.md`](carjack-linux/README.md).
 ## License
 
 Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your
-option.
+option, except Slipstream's Android Auto receiver (`carjack-android/app/aa-proto` and
+`carjack-android/app/src-generic/io/github/cfraz89/slipstream/aa`), which is adapted from
+[OpenCfMoto](https://github.com/zanderp/open-cfmoto) and
+[headunit-revived](https://github.com/andreknieriem/headunit-revived) and licensed under the
+[GNU AGPL v3](https://www.gnu.org/licenses/agpl-3.0.html). The Slipstream APK, which includes it, is
+distributed under the AGPL v3.
 
 carjack isn't affiliated with or endorsed by Apple. CarPlay and AirPlay are trademarks of Apple
 Inc.

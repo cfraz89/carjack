@@ -1,8 +1,48 @@
 # Where things stand
 
-**Last updated: 2026-10-19.** This is the living document - if it disagrees with
+**Last updated: 2026-11-17.** This is the living document - if it disagrees with
 [investigation-log.md](investigation-log.md), this one wins. Durable facts about how the code
 works belong in `CLAUDE.md`, not here.
+
+## A VirtualDevice's display stays awake and unlocked with the phone locked (2026-11-17)
+
+Open mode now works with the phone locked and its screen off. Every earlier head unit display -
+public, private, with `OWN_DISPLAY_GROUP` and `ALWAYS_UNLOCKED` - ended up in the phone's display
+group (`displayGroupId 0`): asleep with the phone's screen (touches dropped, activities stopped)
+and, without `ALWAYS_UNLOCKED`, blanked by its lock screen. The reason, from MoonClicker's
+write-up (`docs/research/vd-display-group-android17.md` in kuomartin/MoonClicker, MIT): with the
+`separate_timeouts` flag on, as it is on Android 17, `DisplayGroupAllocator` puts every virtual
+display in the primary group, overriding `OWN_DISPLAY_GROUP`. The shell can't change the flag.
+
+The way out is the display a VirtualDevice makes (`VirtualDevices.kt`): `cmd companiondevice
+associate 0 com.android.shell <MAC> android.app.role.COMPANION_DEVICE_APP_STREAMING false` gives
+the shell a companion association, `IVirtualDeviceManager.createVirtualDevice` a device with
+`LOCK_STATE_ALWAYS_UNLOCKED`, and `IVirtualDevice.createVirtualDisplay` its display, without
+`OWN_DISPLAY_GROUP`. On the Pixel 10 (API 37) the display got a group of its own
+(`displayGroupId 4`, `FLAG_ALWAYS_UNLOCKED`), and the bike's launcher and apps kept drawing and
+taking touches with the phone locked and its screen off. The ordinary virtual display is the
+fallback where this fails.
+
+Side effects: the shell holds the `COMPANION_DEVICE_APP_STREAMING` role; a "virtual device" row
+appears under connection preferences, and clearing it closes the display at once; apps on the
+display have a clipboard of their own. Whether the association survives a reboot isn't yet known.
+
+So the dashboard's sleep mode, proximity blanking, keep-screen-on and lock screen handling are
+gone; it's an ordinary screen.
+
+## The bike checks the Bluetooth address on every connection, from pairing on (2026-11-17)
+
+Settles the first open question below. A Pixel 10 on the generic build, forgotten and paired
+afresh with the CFMOTO (`CFMOTO-G2Y70E`), sent the placeholder `02:00:00:00:00:00` in
+`CarPlayAvailability` (`0x4300`) and in AirPlay setup instead of its real address. Three sessions
+in a row went the same way: iAP2 link, identification ("Motorcycle Media Players") and
+authentication all completed, `0x4300` went out, and the bike sent nothing back - no
+`CarPlayStartSession` (`0x4301`), no icon - until the session ended with `NoPacket` 27-48 s later.
+With the real address the same bike answers `0x4300` with `0x4301` in under a second.
+
+So no verdict is kept from bonding: the address in each `CarPlayAvailability` must be the phone's
+real one. Slipstream reads it through Shizuku and keeps the last one read, so Android Auto mode
+works without Shizuku only once it has run with it.
 
 ## The CarPlay icon needs the real Bluetooth address, not `0x1101` (2026-10-19)
 

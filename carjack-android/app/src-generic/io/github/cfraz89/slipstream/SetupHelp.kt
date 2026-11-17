@@ -26,6 +26,52 @@ object SetupHelp {
         ),
     )
 
+    /** On the start screen, where it says what Shizuku is still for. */
+    val shizukuStopped = Help(
+        "Start Shizuku",
+        "Open mode needs Shizuku, to give the head unit a screen of its own. Android Auto doesn't, " +
+            "once Slipstream has read the phone's Bluetooth address through it. Shizuku stops " +
+            "whenever the phone restarts.",
+        startShizuku.steps,
+    )
+
+    val installAndroidAuto = Help(
+        "Install Android Auto",
+        "Outside Open mode, the head unit gets Android Auto, which comes from Google's Android Auto app.",
+        listOf(
+            "Tap Install to open Android Auto in the Play Store, and install it.",
+            "Open it once and accept what it asks.",
+        ),
+    )
+
+    val headUnitServer = Help(
+        "Start Android Auto's head unit server",
+        "Outside Open mode, Slipstream gets Android Auto through the head unit server it runs on the " +
+            "phone, and found it wasn't running when the head unit last connected. Android Auto only " +
+            "runs it when asked, and stops it when the phone restarts or Android Auto updates.",
+        listOf(
+            "Tap Open to open Android Auto's settings.",
+            "The first time only: scroll to the bottom, tap Version ten times, and confirm, to turn " +
+                "on developer settings.",
+            "Tap ⋮ at the top right, then Start head unit server. If it's running already, stop it " +
+                "and start it again.",
+            "Leave its notification be. The warning goes once the head unit next connects.",
+        ),
+    )
+
+    val modes = Help(
+        "Modes",
+        "What the head unit gets when it connects. A change takes effect straight away, mid-session too.",
+        listOf(
+            "Android Auto: Google's car apps - maps, music, messages - driven from the head unit's " +
+                "screen. Works with the phone locked and in a pocket. Needs Android Auto's head unit " +
+                "server running.",
+            "Open mode: any app on the phone, on a screen of the head unit's own size, with the " +
+                "built-in launcher or the phone's home screen to pick from. Works with the phone " +
+                "locked and in a pocket too. Needs Shizuku running.",
+        ),
+    )
+
     val allowShizuku = Help(
         "Let Slipstream use Shizuku",
         "Shizuku asks before an app may use it.",
