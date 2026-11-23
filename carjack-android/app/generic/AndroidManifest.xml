@@ -28,6 +28,8 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <!-- Roughly where the phone is, for the weather. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- The mobile data network's type, for the system bar. -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 
     <!-- The apps the head unit can be given, for the picker and the launcher; and the home app. -->
     <queries>
@@ -66,20 +68,19 @@
             android:name=".AppPickerActivity"
             android:exported="false" />
         <activity
-            android:name=".RemoteAppsActivity"
-            android:exported="false" />
-        <activity
             android:name=".PreviewActivity"
             android:exported="false"
             android:theme="@style/SlipstreamTheme" />
-        <!-- The phone's screen in Open mode (OpenMode), brought forward by the shell when a
-             head unit session starts. In the app's task, which SettingsActivity gives over to it:
-             the icon brings it back. -->
+        <!-- The phone's screen during a head unit session, brought forward when one starts. A
+             task of its own, gone from recents once closed: closing it at the session's end goes
+             back to whatever was showing before, settings only if that's what it was. -->
         <activity
-            android:name=".DashboardActivity"
+            android:name=".PhoneRemoteActivity"
             android:exported="true"
             android:theme="@style/SlipstreamTheme"
             android:launchMode="singleTask"
+            android:taskAffinity=".remote"
+            android:autoRemoveFromRecents="true"
             android:screenOrientation="sensor"
             android:supportsPictureInPicture="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
@@ -100,19 +101,6 @@
             android:configChanges="keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode" />
         <!-- The launcher keeps a task of its own (taskAffinity): sharing the app's, the app's
              icon would bring the launcher forward rather than the app. -->
-        <!-- The same launcher from the phone's own app drawer, to try it out or set it up
-             away from the head unit. -->
-        <activity-alias
-            android:name="io.github.cfraz89.slipstream.LauncherOnPhone"
-            android:targetActivity="io.github.cfraz89.slipstream.launcher.HomeActivity"
-            android:label="Slipstream Launcher"
-            android:icon="@mipmap/ic_sl_launcher"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity-alias>
         <activity
             android:name="io.github.cfraz89.slipstream.launcher.AllAppsActivity"
             android:exported="false"

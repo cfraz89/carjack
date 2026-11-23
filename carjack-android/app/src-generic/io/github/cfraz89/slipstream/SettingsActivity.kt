@@ -57,6 +57,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -64,8 +65,8 @@ import androidx.compose.ui.unit.sp
 import rikka.shizuku.Shizuku
 
 /**
- * The app's screen: the mode, what's left to set up, and the choices; the dashboard instead during
- * an Open mode session. Opening it restarts the listening.
+ * The app's screen: the mode, what's left to set up, and the choices; the phone remote instead during
+ * a session. Opening it restarts the listening.
  */
 class SettingsActivity : ComponentActivity() {
 
@@ -74,6 +75,8 @@ class SettingsActivity : ComponentActivity() {
         private const val REQUEST_SHIZUKU = 4
         private const val DISCOVERABLE_SECONDS = 300
         const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
+        /** Opened from the phone remote: stays, rather than going back to it mid-session. */
+        const val EXTRA_STAY = "stay"
         private const val TAILSCALE_PACKAGE = "com.tailscale.ipn"
 
         val PERMISSIONS = arrayOf(
@@ -86,9 +89,13 @@ class SettingsActivity : ComponentActivity() {
             Manifest.permission.READ_MEDIA_IMAGES,
         )
 
-        /** Granted with the rest through Shizuku, but nothing waits on it: the weather. */
+        /**
+         * Granted with the rest through Shizuku, but nothing waits on them: the weather, and the
+         * system bar's mobile data network type.
+         */
         private val OPTIONAL_PERMISSIONS = arrayOf(
             Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.READ_PHONE_STATE,
         )
     }
 
@@ -107,6 +114,7 @@ class SettingsActivity : ComponentActivity() {
     /** Bumped by [refresh]: the screen reads everything afresh from settings and the system. */
     private var revision by mutableIntStateOf(0)
     private var dialog by mutableStateOf<Dialog?>(null)
+    private var profilesOpen by mutableStateOf(false)
     private var settingUp = false
     private var optionalTried = false
 
@@ -114,10 +122,21 @@ class SettingsActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.setDecorFitsSystemWindows(false)
         Shizuku.addRequestPermissionResultListener(shizukuResult)
-        Variant.prefs(this).registerOnSharedPreferenceChangeListener(prefsChanged)
-        setContent { SlipstreamTheme { Screen() } }
-        if (savedInstanceState == null && OpenMode.isOn(this) && DashboardActivity.connected) {
-            startActivity(Intent(this, DashboardActivity::class.java))
+        Profiles.global(this).registerOnSharedPreferenceChangeListener(prefsChanged)
+        setContent {
+            SlipstreamTheme {
+                Screen()
+                // Outside the screen, which a change to the profiles rebuilds.
+                if (profilesOpen) {
+                    ProfilesScreen(this) {
+                        profilesOpen = false
+                        revision++
+                    }
+                }
+            }
+        }
+        if (savedInstanceState == null && PhoneRemoteActivity.connected && !intent.getBooleanExtra(EXTRA_STAY, false)) {
+            startActivity(Intent(this, PhoneRemoteActivity::class.java))
             finish()
         }
     }
@@ -127,22 +146,23 @@ class SettingsActivity : ComponentActivity() {
 
     /** Whether a unit's link is up, for the Bluetooth shortcut. */
     private val prefsChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == "linked") {
+        // And the selected profile, which a connecting head unit can change.
+        if (key == "linked" || key == "vehicle" || key == "vehicles") {
             runOnUiThread { revision++ }
         }
     }
 
     override fun onDestroy() {
         Shizuku.removeRequestPermissionResultListener(shizukuResult)
-        Variant.prefs(this).unregisterOnSharedPreferenceChangeListener(prefsChanged)
+        Profiles.global(this).unregisterOnSharedPreferenceChangeListener(prefsChanged)
         super.onDestroy()
     }
 
     override fun onResume() {
         super.onResume()
         refresh()
-        OpenMode.setListening(this, true)
-        OpenMode.listen(this)
+        SlipstreamMode.setListening(this, true)
+        SlipstreamMode.listen(this)
         Thread { Variant.rememberBluetoothAddress(this) }.start()
     }
 
@@ -157,6 +177,7 @@ class SettingsActivity : ComponentActivity() {
     }
 
     private fun refresh() {
+        Profiles.settle(this)
         revision++
         autoSetUp()
     }
@@ -165,21 +186,37 @@ class SettingsActivity : ComponentActivity() {
     private fun Screen() = key(revision) {
         Page {
             Header()
-            ModeCard()
             val steps = setupSteps()
+            // Pairing has a card of its own, once there's Bluetooth to pair with.
+            val unpaired = permissionsGranted() && bluetoothOn() && pairedDevices(this@SettingsActivity).isEmpty()
+            if (steps.isEmpty() && !unpaired) ReadyCard()
+            ProfileBar(this@SettingsActivity, onEdit = { profilesOpen = true }) { revision++ }
+            ModeCard()
             if (steps.isNotEmpty()) {
                 SetupCard(steps)
             }
-            // Pairing has a card of its own, once there's Bluetooth to pair with.
-            if (permissionsGranted() && bluetoothOn() && pairedUnits(this@SettingsActivity).size <= 1) {
+            if (unpaired) {
                 Spacer(Modifier.height(12.dp))
                 PairCard()
             }
             Heading("Connection")
+            HeadingNote("The Bluetooth device to connect to")
             SettingsCard()
-            if (OpenMode.isOn(this@SettingsActivity)) {
-                Heading("Open mode")
-                OpenModeCard()
+            Heading("Phone Remote")
+            HeadingNote("What controls to show on the phone during a session")
+            RemoteCard()
+            Heading("Switchgear")
+            HeadingNote("How vehicle switchgear is mapped")
+            SwitchgearCard(this@SettingsActivity)
+            if (SlipstreamMode.isOn(this@SettingsActivity)) {
+                Heading("Slipstream mode")
+                SlipstreamModeCard()
+                Heading("System bar")
+                HeadingNote("A bar along the bottom of the head unit's screen")
+                SystemBarCard()
+            } else if (AndroidAuto.installed(this@SettingsActivity)) {
+                Heading("Android Auto")
+                AndroidAutoCard()
             }
             Heading("Help")
             HelpCard()
@@ -215,7 +252,7 @@ class SettingsActivity : ComponentActivity() {
     /** What the head unit gets; a change takes effect mid-session. */
     @Composable
     private fun ModeCard() {
-        val open = OpenMode.isOn(this)
+        val slipstream = SlipstreamMode.isOn(this)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Heading("Mode")
             Icon(
@@ -232,11 +269,11 @@ class SettingsActivity : ComponentActivity() {
             )
         }
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-            listOf("Open", "Android Auto").forEachIndexed { index, label ->
+            listOf("Slipstream", "Android Auto").forEachIndexed { index, label ->
                 SegmentedButton(
-                    selected = open == (index == 0),
+                    selected = slipstream == (index == 0),
                     onClick = {
-                        OpenMode.setOn(this@SettingsActivity, index == 0)
+                        SlipstreamMode.setOn(this@SettingsActivity, index == 0)
                         revision++
                     },
                     shape = SegmentedButtonDefaults.itemShape(index, 2),
@@ -244,6 +281,25 @@ class SettingsActivity : ComponentActivity() {
             }
         }
         Spacer(Modifier.height(16.dp))
+    }
+
+    /** Nothing left to set up. */
+    @Composable
+    private fun ReadyCard() {
+        val on = colorResource(R.color.sl_on_ready_container)
+        SectionCard(
+            colorResource(R.color.sl_ready_container),
+            padding = PaddingValues(start = 20.dp, end = 16.dp, top = 16.dp, bottom = 16.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(painterResource(R.drawable.ic_sl_check), null, Modifier.size(24.dp), tint = on)
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text("Ready to stream", color = on, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Text("Turn on the head unit and accept CarPlay", color = on, fontSize = 14.sp)
+                }
+            }
+        }
     }
 
     /** One line per thing still missing; the card goes when nothing is. */
@@ -290,7 +346,7 @@ class SettingsActivity : ComponentActivity() {
                 Shizuku.requestPermission(REQUEST_SHIZUKU)
             }
         }
-        if (!OpenMode.isOn(this)) {
+        if (!SlipstreamMode.isOn(this)) {
             if (!AndroidAuto.installed(this)) {
                 steps += Step("Android Auto not installed", "Install", SetupHelp.installAndroidAuto) {
                     startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=${AndroidAuto.PACKAGE}")))
@@ -389,27 +445,85 @@ class SettingsActivity : ComponentActivity() {
     private fun SettingsCard() {
         val context = this
         SectionCard(MaterialTheme.colorScheme.surfaceContainer) {
-            HeadUnitRow { revision++ }
+            DeviceRow { revision++ }
         }
     }
 
-    /** What only Open mode uses: the head unit's screen, its apps and its controls. */
+    /** Which controls the phone remote shows during a session, in either mode. */
     @Composable
-    private fun OpenModeCard() {
+    private fun RemoteCard() {
+        val context = this
+        SectionCard(MaterialTheme.colorScheme.surfaceContainer) {
+            for (control in RemoteControl.entries) {
+                if (control == RemoteControl.APPS && !SlipstreamMode.isOn(context)) continue
+                val shown = control.shown(context)
+                ListRow(Leading.Glyph(control.icon), control.title, trailing = { RowSwitch(shown) }) {
+                    control.setShown(context, !shown)
+                    revision++
+                }
+            }
+        }
+        Row(Modifier.padding(start = 16.dp, top = 12.dp)) {
+            FilledButton("Preview Phone Remote") { PhoneRemoteActivity.preview(context) }
+        }
+    }
+
+    /** What only Slipstream mode uses: the head unit's screen, its apps and its controls. */
+    @Composable
+    private fun SlipstreamModeCard() {
         val context = this
         SectionCard(MaterialTheme.colorScheme.surfaceContainer) {
             OnConnectRow()
             ScaleRow { revision++ }
-            RemoteAppsRow()
-
-            val navBar = Variant.setting(context, "nav_bar", "false").toBoolean()
-            ListRow(Leading.Glyph(R.drawable.ic_sl_home), "Show navigation bar", trailing = { RowSwitch(navBar) }) {
-                Variant.prefs(context).edit().putString("nav_bar", (!navBar).toString()).apply()
-                revision++
-            }
         }
         Row(Modifier.padding(start = 16.dp, top = 12.dp)) {
             FilledButton("Preview Display") { startActivity(Intent(context, PreviewActivity::class.java)) }
+        }
+    }
+
+    /** Whether the [SystemBar] shows, and what's on it. */
+    @Composable
+    private fun SystemBarCard() {
+        val context = this
+        fun changed() {
+            Session.current?.systemBarChanged()
+            revision++
+        }
+        val on = SystemBar.isOn(context)
+        SectionCard(MaterialTheme.colorScheme.surfaceContainer) {
+            ListRow(Leading.Glyph(R.drawable.ic_sl_screen), "Show system bar", trailing = { RowSwitch(on) }) {
+                SystemBar.setOn(context, !on)
+                changed()
+            }
+            for (part in SystemBar.Part.entries) {
+                val shown = part.shown(context)
+                val icon = when (part) {
+                    SystemBar.Part.BUTTONS -> R.drawable.ic_sl_home
+                    SystemBar.Part.SIGNAL -> R.drawable.ic_sl_signal
+                    SystemBar.Part.BATTERY -> R.drawable.ic_sl_battery
+                    SystemBar.Part.TEMPERATURE -> R.drawable.ic_sl_thermometer
+                }
+                ListRow(Leading.Glyph(icon), part.title, trailing = { RowSwitch(shown) }, enabled = on) {
+                    part.setShown(context, !shown)
+                    changed()
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun AndroidAutoCard() {
+        val icon = remember {
+            try {
+                packageManager.getApplicationIcon(AndroidAuto.PACKAGE)
+            } catch (e: PackageManager.NameNotFoundException) {
+                null
+            }
+        }
+        SectionCard(MaterialTheme.colorScheme.surfaceContainer) {
+            ListRow(Leading.Picture(icon), "Android Auto settings", "Where its head unit server starts") {
+                startActivity(AndroidAuto.settings())
+            }
         }
     }
 
@@ -421,12 +535,12 @@ class SettingsActivity : ComponentActivity() {
                 dialog = Dialog.LOGS
             }
             if (Reports.configured(context)) {
-                val reports = Variant.prefs(context).getBoolean(Reports.PREF, true)
+                val reports = Profiles.global(context).getBoolean(Reports.PREF, true)
                 ListRow(
                     Leading.Glyph(R.drawable.ic_sl_shield), "Send crash reports",
                     "Automatically, through Sentry", trailing = { RowSwitch(reports) },
                 ) {
-                    Variant.prefs(context).edit().putBoolean(Reports.PREF, !reports).apply()
+                    Profiles.global(context).edit().putBoolean(Reports.PREF, !reports).apply()
                     Reports.apply(context)
                     revision++
                 }

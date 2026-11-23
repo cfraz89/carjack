@@ -55,7 +55,7 @@ varying vec2 uv;
 void main() { gl_FragColor = texture2D(frame, uv); }
 """
         val QUAD = floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
-        /** The [NavBar]: a plain bitmap texture, rows top down as a Bitmap has them. */
+        /** The [SystemBar]: a plain bitmap texture, rows top down as a Bitmap has them. */
         const val BAR_VERTEX = """
 attribute vec2 pos;
 varying vec2 uv;
@@ -111,6 +111,7 @@ void main() { gl_FragColor = texture2D(cue, uv) * alpha; }
     private lateinit var eglSurface: EGLSurface
     private var texture: SurfaceTexture? = null
     private var input: Surface? = null
+    private var frameTexture = 0
     private var program = 0
     /** GL reads the vertices from here at every draw, so it must outlive setUp. */
     private lateinit var quad: FloatBuffer
@@ -171,15 +172,7 @@ void main() { gl_FragColor = texture2D(cue, uv) * alpha; }
         EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
 
         program = link(VERTEX, FRAGMENT)
-        val tex = IntArray(1)
-        GLES20.glGenTextures(1, tex, 0)
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, tex[0])
-        linearTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES)
-        val surfaceTexture = SurfaceTexture(tex[0])
-        surfaceTexture.setDefaultBufferSize(viewWidth, viewHeight)
-        surfaceTexture.setOnFrameAvailableListener({ draw() }, handler)
-        texture = surfaceTexture
-        input = Surface(surfaceTexture)
+        newInput()
 
         quad = ByteBuffer.allocateDirect(QUAD.size * 4)
             .order(ByteOrder.nativeOrder()).asFloatBuffer().put(QUAD)
@@ -216,10 +209,60 @@ void main() { gl_FragColor = texture2D(cue, uv) * alpha; }
         GLES20.glUseProgram(program)
     }
 
+    /**
+     * A new surface to draw from, the last one dropped: a source that's let go of its surface,
+     * such as a released decoder, may still hold it, and another can't connect to it.
+     */
+    fun newInputSurface(): Surface {
+        val ready = CountDownLatch(1)
+        handler.post {
+            newInput()
+            ready.countDown()
+        }
+        try {
+            ready.await()
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        return input!!
+    }
+
+    private fun newInput() {
+        texture?.let { old ->
+            old.release()
+            input?.release()
+            GLES20.glDeleteTextures(1, intArrayOf(frameTexture), 0)
+            haveFrame = false
+        }
+        val tex = IntArray(1)
+        GLES20.glGenTextures(1, tex, 0)
+        frameTexture = tex[0]
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, frameTexture)
+        linearTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES)
+        val surfaceTexture = SurfaceTexture(frameTexture)
+        surfaceTexture.setDefaultBufferSize(viewWidth, viewHeight)
+        surfaceTexture.setOnFrameAvailableListener({ if (texture === it) draw() }, handler)
+        texture = surfaceTexture
+        input = Surface(surfaceTexture)
+    }
+
     private fun attachQuad(program: Int) {
         val pos = GLES20.glGetAttribLocation(program, "pos")
         GLES20.glEnableVertexAttribArray(pos)
         GLES20.glVertexAttribPointer(pos, 2, GLES20.GL_FLOAT, false, 0, quad)
+    }
+
+    /** The bar redrawn as [image], of the same size: one of its buttons shown pressed, say. */
+    fun bar(image: Bitmap) {
+        handler.post {
+            if (texture == null || bar == null) return@post
+            // Unit 1 keeps the bar's texture bound from setUp.
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, image, 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            render(System.nanoTime())
+        }
     }
 
     /** Flashes [badge] low in the middle of the view, fading out over [ms]. */

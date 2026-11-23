@@ -50,11 +50,11 @@ the rest when it opens.
 Once set up, Slipstream listens for the head unit all the time. What it gives the head unit is a
 setting at the top of the app's screen:
 
-- **Android Auto**, which works with the phone locked and in a pocket. Start Android Auto's head
-  unit server once after each reboot or Android Auto update: in Android Auto's settings tap
-  **Version** ten times, then **⋮ → Start head unit server**.
-- **Open mode**: the phone's own apps, also with the phone locked and in a pocket. Needs Shizuku
-  running.
+- **Android Auto**: Google's car-centric infotainment UI. Only some apps support it. Start Android
+  Auto's head unit server once after each reboot or Android Auto update: in Android Auto's settings
+  tap **Version** ten times, then **⋮ → Start head unit server**.
+- **Slipstream mode**: projects all your apps, the same as on your phone, with a custom
+  launcher. Needs Shizuku running.
 
 The easiest way to install it and keep it updated is [Obtainium](https://obtainium.imranr.dev/),
 which installs apps straight from GitHub releases:

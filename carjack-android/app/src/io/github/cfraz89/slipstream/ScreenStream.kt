@@ -17,6 +17,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
+import android.view.Surface
 import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -51,6 +52,10 @@ class ScreenStream(
         /** A flashed label's height, likewise, and how long it shows. */
         const val LABEL_FRACTION = 0.09f
         const val FLASH_MS = 1200L
+        /** The least a system bar button shows pressed. */
+        const val BAR_LIT_MS = 150L
+        /** How often the system bar's signal, battery and temperature are read again. */
+        const val BAR_REFRESH_MS = 10_000L
         /** How much of each session's start is kept, in encoder buffers: the config and ~6 s. */
         const val SAMPLE_BUFFERS = 60
         const val KEPT_SAMPLES = 6
@@ -126,7 +131,7 @@ class ScreenStream(
     private var sample: FileOutputStream? = null
 
     /**
-     * The panel is [width]x[height]; the display shows in the view rectangle, with [NavBar]
+     * The panel is [width]x[height]; the display shows in the view rectangle, with [SystemBar]
      * [barHeight] high under it (0 for none).
      */
     fun start(
@@ -145,7 +150,9 @@ class ScreenStream(
             )
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, fps.toFloat())
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, if (hevc) 2 else 10)
+            // The accessory asks for a keyframe when it needs one; a busy picture makes each a
+            // quarter megabyte, which every two seconds swamps the link.
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10)
             // A still screen still has to answer keyframe requests.
             setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, REPEAT_FRAME_US)
             setInteger(MediaFormat.KEY_PRIORITY, 0)
@@ -173,21 +180,27 @@ class ScreenStream(
         // Always through the relay: besides placing the view, it keeps a still screen sending.
         val r = Relay(
             input, width, height, viewX, viewY, viewWidth, viewHeight,
-            if (barHeight == 0) null else NavBar.render(viewWidth, barHeight),
+            if (barHeight == 0) null else SystemBar.render(viewWidth, barHeight, SystemBar.parts(context), SystemBar.status(context)),
         )
         relay = r
-        val target = r.start()
+        this.barWidth = viewWidth
+        this.barHeight = barHeight
+        r.start()
+        if (barHeight != 0) watchdogHandler.post(refreshBar)
         val cueSize = (viewHeight * CUE_FRACTION).roundToInt()
         backCue = Cues.back(cueSize)
         selectCue = Cues.select(cueSize)
         labelHeight = (viewHeight * LABEL_FRACTION).roundToInt()
         reopen = {
             closeDisplay?.run()
+            closeDisplay = null
             r.crop(1f, 1f)
-            closeDisplay = Variant.openDisplay(context, viewWidth, viewHeight, density, target)
+            // Android Auto's decoder may not let go of the last surface in time for the display.
+            closeDisplay = Variant.openDisplay(context, viewWidth, viewHeight, density, r.newInputSurface())
         }
-        reopen?.invoke()
+        // Before the display opens: Android Auto crops through it as soon as it's connected.
         current = this
+        reopen?.invoke()
         lastOutput = SystemClock.uptimeMillis()
         watchdogHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS)
         watchdogHandler.postDelayed(preview, FIRST_PREVIEW_MS)
@@ -199,6 +212,9 @@ class ScreenStream(
     fun reopen() {
         Handler(thread.looper).post { reopen?.invoke() }
     }
+
+    /** [Relay.newInputSurface], while streaming. */
+    fun newInputSurface(): Surface? = relay?.newInputSurface()
 
     /** See [Relay.crop]. */
     fun crop(width: Float, height: Float) {
@@ -212,6 +228,65 @@ class ScreenStream(
     }
 
     private var labelHeight = 0
+    private var barWidth = 0
+    private var barHeight = 0
+    private var barLitAt = 0L
+    /** The button the system bar shows pressed, and what it last reported; main thread. */
+    private var barPressed = SystemBar.NONE
+    private var barStatus: SystemBar.Status? = null
+
+    private fun drawBar() {
+        if (barHeight == 0) return
+        val status = barStatus ?: SystemBar.status(context).also { barStatus = it }
+        relay?.bar(SystemBar.render(barWidth, barHeight, SystemBar.parts(context), status, barPressed))
+    }
+
+    private val unlightBar = Runnable {
+        barPressed = SystemBar.NONE
+        drawBar()
+    }
+
+    /** The battery and temperature, read again and drawn; the temperature off this thread. */
+    private val refreshBar = object : Runnable {
+        override fun run() {
+            barStatus = SystemBar.status(context)
+            drawBar()
+            if (SystemBar.Part.TEMPERATURE in SystemBar.parts(context)) {
+                Thread({
+                    SystemBar.refreshTemperature(context)
+                    watchdogHandler.post {
+                        barStatus = SystemBar.status(context)
+                        drawBar()
+                    }
+                }, "slipstream-temperature").start()
+            }
+            watchdogHandler.postDelayed(this, BAR_REFRESH_MS)
+        }
+    }
+
+    /** After a change to what the system bar shows. */
+    fun redrawBar() {
+        watchdogHandler.post(refreshBar.also { watchdogHandler.removeCallbacks(it) })
+    }
+
+    /**
+     * The system bar with [button] lit, or none: held lit a moment after a quick tap, which would
+     * otherwise come and go between frames.
+     */
+    fun showBar(button: Int) {
+        watchdogHandler.post {
+            if (barHeight == 0) return@post
+            watchdogHandler.removeCallbacks(unlightBar)
+            if (button == SystemBar.NONE) {
+                val left = BAR_LIT_MS - (SystemClock.uptimeMillis() - barLitAt)
+                watchdogHandler.postDelayed(unlightBar, maxOf(0L, left))
+                return@post
+            }
+            barLitAt = SystemClock.uptimeMillis()
+            barPressed = button
+            drawBar()
+        }
+    }
 
     /** [text] in a pill low on the picture, for a moment. */
     fun flash(text: String) {
@@ -260,6 +335,8 @@ class ScreenStream(
         if (current === this) current = null
         watchdogHandler.removeCallbacks(watchdog)
         watchdogHandler.removeCallbacks(preview)
+        watchdogHandler.removeCallbacks(unlightBar)
+        watchdogHandler.removeCallbacks(refreshBar)
         reopen = null
         closeDisplay?.run()
         closeDisplay = null

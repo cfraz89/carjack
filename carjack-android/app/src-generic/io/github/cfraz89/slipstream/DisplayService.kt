@@ -272,7 +272,12 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     }
 
     @Synchronized
-    override fun launch(component: String) {
+    override fun launch(component: String) = start(component)
+
+    override fun launchExitingOnBack(component: String) =
+        start(component, "--ez", "io.github.cfraz89.slipstream.EXIT_ON_BACK", "true")
+
+    private fun start(component: String, vararg extras: String) {
         val id = displayId ?: return
         var target = component
         if ("/" !in target) {
@@ -287,7 +292,38 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
                 return
             }
         }
-        run("am", "start", "--display", id.toString(), "-n", target)
+        // A task of the app's left on the phone, as one is when its display goes, takes the launch
+        // there instead.
+        ComponentName.unflattenFromString(target)?.let { moveOver(it.packageName, id) }
+        val out = run("am", "start", "--display", id.toString(), "-n", target, *extras)
+        if ("Error" in out || "Warning" in out) Log.w(TAG, "Launching $target: ${out.trim()}")
+    }
+
+    /** [app]'s full-screen tasks on the phone, onto the display. */
+    private fun moveOver(app: String, id: Int) {
+        // Slipstream's own tasks are its settings, the phone remote, a preview: the phone's.
+        if (app == Variant.APP_ID) return
+        try {
+            val atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
+            val tasks = atm.javaClass
+                .getMethod("getAllRootTaskInfosOnDisplay", Int::class.javaPrimitiveType)
+                .invoke(atm, 0 /* DEFAULT_DISPLAY */) as List<*>
+            for (task in tasks.filterNotNull()) {
+                val base = (task.javaClass.getField("baseActivity").get(task) as? ComponentName)?.packageName
+                val mode = task.javaClass.getMethod("getWindowingMode").invoke(task) as Int
+                val type = task.javaClass.getField("topActivityType").getInt(task)
+                // WINDOWING_MODE_UNDEFINED or FULLSCREEN; ACTIVITY_TYPE_STANDARD, never the phone's home.
+                if (base != app || mode > 1 || type != 1) continue
+                atm.javaClass
+                    .getMethod("moveRootTaskToDisplay", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+                    .invoke(atm, task.javaClass.getField("taskId").getInt(task), id)
+                Log.i(TAG, "Moved $app over from the phone")
+            }
+        } catch (e: ReflectiveOperationException) {
+            Log.w(TAG, "Couldn't move $app over", e)
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Couldn't move $app over", e)
+        }
     }
 
     override fun launchOnPhone(component: String) {
@@ -375,26 +411,7 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
     override fun bringOver(component: String) {
         val id = displayId ?: return
         val app = ComponentName.unflattenFromString(component)?.packageName ?: return
-        try {
-            val atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
-            val tasks = atm.javaClass
-                .getMethod("getAllRootTaskInfosOnDisplay", Int::class.javaPrimitiveType)
-                .invoke(atm, 0 /* DEFAULT_DISPLAY */) as List<*>
-            for (task in tasks.filterNotNull()) {
-                val base = (task.javaClass.getField("baseActivity").get(task) as? ComponentName)?.packageName
-                val mode = task.javaClass.getMethod("getWindowingMode").invoke(task) as Int
-                // WINDOWING_MODE_UNDEFINED or FULLSCREEN.
-                if (base != app || mode > 1) continue
-                atm.javaClass
-                    .getMethod("moveRootTaskToDisplay", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
-                    .invoke(atm, task.javaClass.getField("taskId").getInt(task), id)
-                Log.i(TAG, "Moved $app over from the phone")
-            }
-        } catch (e: ReflectiveOperationException) {
-            Log.w(TAG, "Couldn't move $app over", e)
-        } catch (e: RuntimeException) {
-            Log.w(TAG, "Couldn't move $app over", e)
-        }
+        moveOver(app, id)
         // NEW_TASK | RESET_TASK_IF_NEEDED, as a launcher starts an app; windowing mode fullscreen.
         run(
             "am", "start", "--display", id.toString(), "--windowingMode", "1", "-f", "0x10200000",

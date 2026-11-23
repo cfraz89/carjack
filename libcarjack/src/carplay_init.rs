@@ -5,6 +5,7 @@ use iap2_proto::{
     ops::{
         control::{
             ControlMessage, ControlMessageId, ControlMessageSet, GetParam, Parameter, ParameterId,
+            TryFromParam,
         },
         ea::EaFrame,
     },
@@ -76,6 +77,35 @@ pub struct WifiCredentials {
     /// HomeKit pairing id when named; the invitation equivalent, and the only route to
     /// pair-verify with an accessory that never invites.
     pub pairing_id: Option<Uuid>,
+    /// What the accessory identified itself as, which arrives first.
+    pub accessory: Accessory,
+}
+
+/// The accessory's own name, model and maker, as `IdentificationInformation` gives them, and the
+/// vehicle's name where it gives one.
+#[derive(Debug, Clone, Default)]
+pub struct Accessory {
+    pub name: Option<String>,
+    pub model: Option<String>,
+    pub manufacturer: Option<String>,
+    pub vehicle: Option<String>,
+}
+
+/// A string among a group parameter's own parameters.
+fn group_string(data: &[u8], id: ParameterId) -> Option<String> {
+    let mut rest = data;
+    while rest.len() >= 4 {
+        let len = u16::from_be_bytes([rest[0], rest[1]]) as usize;
+        let pid = u16::from_be_bytes([rest[2], rest[3]]);
+        if len < 4 || len > rest.len() {
+            return None;
+        }
+        if pid == id.0 {
+            return String::try_from_param(&rest[4..len]);
+        }
+        rest = &rest[len..];
+    }
+    None
 }
 
 /// Port to reach AirPlay on when the accessory named an address but no port.
@@ -102,6 +132,7 @@ pub struct CarplayInit<S: Stream> {
     pub iap2: Iap2<S>,
     pub wifi_tx: mpsc::Sender<WifiCredentials>,
     identity: DeviceIdentity,
+    accessory: Accessory,
     phase: SessionPhase,
     ea_session_id: u8,
     /// Messages the accessory declared it receives; empty means fall back to the older dialect.
@@ -126,6 +157,7 @@ impl<S: Stream> CarplayInit<S> {
             iap2,
             wifi_tx,
             identity,
+            accessory: Accessory::default(),
             phase: SessionPhase::Auth,
             ea_session_id: 0,
             accepted_messages: Vec::new(),
@@ -273,7 +305,16 @@ impl<S: Stream> CarplayInit<S> {
                             .get_param::<String>(ParameterId::DISPLAY_NAME)
                     })
                     .unwrap_or_else(|| String::from("Unknown"));
-                tracing::info!("Accessory identified: {}", name);
+                let model = msg.parameters.get_param::<String>(ParameterId::MODEL_IDENTIFIER);
+                let manufacturer = msg.parameters.get_param::<String>(ParameterId::MANUFACTURER);
+                let vehicle = msg
+                    .parameters
+                    .iter()
+                    .find(|p| p.id == ParameterId::VEHICLE_INFORMATION)
+                    .and_then(|p| group_string(&p.data, ParameterId::VEHICLE_DISPLAY_NAME));
+                let ids: Vec<u16> = msg.parameters.iter().map(|p| p.id.0).collect();
+                tracing::info!(?model, ?manufacturer, ?vehicle, ?ids, "Accessory identified: {}", name);
+                self.accessory = Accessory { name: Some(name), model, manufacturer, vehicle };
                 // An empty list means the flat 0x5702 dialect.
                 self.accepted_messages = msg
                     .parameters
@@ -436,6 +477,7 @@ impl<S: Stream> CarplayInit<S> {
                                 .get_param::<String>(ParameterId::WIFI_CONFIG_MAC),
                             airplay,
                             pairing_id,
+                            accessory: self.accessory.clone(),
                         })
                 } else {
                     // 0x5703: flat. Parameters 3/4 are one byte each and not a BSSID; nothing
@@ -449,6 +491,7 @@ impl<S: Stream> CarplayInit<S> {
                             // No address in this dialect; the receiver gets discovered over mDNS.
                             airplay: None,
                             pairing_id: None,
+                            accessory: self.accessory.clone(),
                         })
                 };
                 if let Some(creds) = creds {
@@ -510,6 +553,7 @@ impl<S: Stream> CarplayInit<S> {
                         bssid,
                         airplay: None,
                         pairing_id: None,
+                        accessory: self.accessory.clone(),
                     };
                     let _ = self.wifi_tx.send(creds).await;
                 }

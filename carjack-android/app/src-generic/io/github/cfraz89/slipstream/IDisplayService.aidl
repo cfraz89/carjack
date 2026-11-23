@@ -87,6 +87,9 @@ interface IDisplayService {
      */
     void bringOver(String component) = 28;
 
+    /** [launch], asking the app to leave on back: Slipstream's launcher, previewed, does. */
+    void launchExitingOnBack(String component) = 29;
+
     /** Shizuku's teardown call. */
     void destroy() = 16777114;
 }

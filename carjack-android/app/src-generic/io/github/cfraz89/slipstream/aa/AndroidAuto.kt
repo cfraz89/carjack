@@ -3,9 +3,23 @@ package io.github.cfraz89.slipstream.aa
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextPaint
 import android.net.wifi.WifiManager
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.PowerManager
+import android.view.KeyEvent
 import android.view.Surface
+import io.github.cfraz89.slipstream.Action
+import io.github.cfraz89.slipstream.Input
+import io.github.cfraz89.slipstream.Mappings
+import io.github.cfraz89.slipstream.Presses
+import io.github.cfraz89.slipstream.Profiles
 import io.github.cfraz89.slipstream.ScreenStream
 import io.github.cfraz89.slipstream.Variant
 import io.github.cfraz89.slipstream.aa.proto.Control.Service.MediaSinkService.VideoConfiguration
@@ -15,7 +29,7 @@ import java.net.Socket
 import kotlin.math.roundToInt
 
 /**
- * Android Auto on the head unit, outside Open mode: Slipstream connects to the head unit server
+ * Android Auto on the head unit, outside Slipstream mode: Slipstream connects to the head unit server
  * Android Auto runs on the phone and plays the car, its video decoded into the stream and the head
  * unit's touches and keys sent back. Works with the phone locked and its screen off. Android Auto's
  * developer settings have to have started the server since the phone last booted.
@@ -56,14 +70,14 @@ object AndroidAuto {
      * for: a connection hung up unused leaves the server taking no more until it's restarted.
      */
     fun serverFound(context: Context): Boolean? {
-        val prefs = Variant.prefs(context)
+        val prefs = Profiles.global(context)
         return if (prefs.contains(SERVER_FOUND)) prefs.getBoolean(SERVER_FOUND, false) else null
     }
 
     private const val SERVER_FOUND = "aa_server_found"
 
     private fun found(context: Context, found: Boolean) {
-        Variant.prefs(context).edit().putBoolean(SERVER_FOUND, found).apply()
+        Profiles.global(context).edit().putBoolean(SERVER_FOUND, found).apply()
     }
 
     /**
@@ -99,7 +113,10 @@ object AndroidAuto {
         wifiLock = null
     }
 
-    private fun dial(context: Context, g: AaGeometry, target: Surface) {
+    private fun dial(context: Context, g: AaGeometry, initial: Surface) {
+        var target = initial
+        /** The notice drawn into [target], which leaves it taken: a decoder needs a fresh one. */
+        var noticeShown = false
         var tries = 0
         try {
             while (running) {
@@ -110,9 +127,14 @@ object AndroidAuto {
                         AaLog.i("Connected to Android Auto's head unit server")
                         tries = 0
                         found(context, true)
+                        if (noticeShown) {
+                            ScreenStream.current?.newInputSurface()?.let { target = it }
+                            noticeShown = false
+                        }
                     } catch (e: IOException) {
                         socket.close()
                         found(context, false)
+                        if (!noticeShown) noticeShown = showNotice(target)
                         if (tries++ % LOG_EVERY == 0) {
                             AaLog.w(
                                 "No head unit server on :$PORT; in Android Auto's settings tap Version " +
@@ -133,6 +155,58 @@ object AndroidAuto {
             }
         } catch (ignored: InterruptedException) {
         }
+    }
+
+    /**
+     * What's wrong and how to fix it, on the head unit, while there's no head unit server: else
+     * it shows black. False where the surface can't be drawn on.
+     */
+    private fun showNotice(target: Surface): Boolean {
+        val canvas = try {
+            target.lockCanvas(null)
+        } catch (e: Exception) {
+            AaLog.w("Couldn't show the notice: $e")
+            return false
+        }
+        val width = canvas.width.toFloat()
+        val height = canvas.height.toFloat()
+        canvas.drawColor(Color.rgb(0x11, 0x13, 0x18))
+        val title = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(0xe2, 0xe2, 0xe9)
+            textSize = minOf(width, height) * 0.065f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val body = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(0xc3, 0xc6, 0xcf)
+            textSize = minOf(width, height) * 0.042f
+        }
+        val margin = width * 0.1f
+        val textWidth = (width - margin * 2).toInt()
+        fun layout(text: String, paint: TextPaint) =
+            StaticLayout.Builder.obtain(text, 0, text.length, paint, textWidth)
+                .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                .setLineSpacing(0f, 1.2f)
+                .build()
+        val heading = layout("Android Auto isn't ready", title)
+        val steps = layout(
+            "Start Android Auto's head unit server on the phone: in Android Auto's settings, tap " +
+                "Version 10 times, then ⋮ → Start head unit server.\n\nOr switch Slipstream to " +
+                "Slipstream mode.",
+            body,
+        )
+        val gap = title.textSize
+        var y = (height - heading.height - gap - steps.height) / 2
+        canvas.save()
+        canvas.translate(margin, y)
+        heading.draw(canvas)
+        canvas.restore()
+        y += heading.height + gap
+        canvas.save()
+        canvas.translate(margin, y)
+        steps.draw(canvas)
+        canvas.restore()
+        target.unlockCanvasAndPost(canvas)
+        return true
     }
 
     @Synchronized
@@ -176,16 +250,54 @@ object AndroidAuto {
         )
     }
 
-    /** A touch in the view's pixels, [viewX] and [viewY] its corner on the panel, into the frame. */
+    /**
+     * A touch in the view's pixels, [viewX] and [viewY] its corner on the panel, into Android Auto's
+     * content: it takes touches from the content's corner, not the frame's, margins left out.
+     */
     fun touch(action: Int, pointer: Int, panelX: Float, panelY: Float, viewX: Int, viewY: Int, viewWidth: Int, viewHeight: Int) {
-        val g = geometry ?: return
         val s = session ?: return
-        val x = g.marginWidth / 2 + ((panelX - viewX) * contentWidth / viewWidth).roundToInt()
-        val y = g.marginHeight / 2 + ((panelY - viewY) * contentHeight / viewHeight).roundToInt()
-        s.touch(action, pointer, x.coerceIn(0, g.frameWidth - 1), y.coerceIn(0, g.frameHeight - 1))
+        val x = ((panelX - viewX) * contentWidth / viewWidth).roundToInt()
+        val y = ((panelY - viewY) * contentHeight / viewHeight).roundToInt()
+        s.touch(action, pointer, x.coerceIn(0, contentWidth - 1), y.coerceIn(0, contentHeight - 1))
     }
 
-    fun key(code: Int, down: Boolean) {
-        session?.key(code, down)
+    /** Keys in order, off the caller's thread, for [presses] to time. */
+    private val keys = Handler(HandlerThread("slipstream-aa-keys").apply { start() }.looper)
+    private val presses = Presses(keys) { action, down -> perform(action, down) }
+
+    /** A switchgear key, as the profile's mapping maps it; media keys as they are. */
+    fun key(context: Context, code: Int, down: Boolean) {
+        keys.post {
+            val input = Input.of(code)
+            if (input == null) {
+                session?.key(code, down)
+            } else {
+                presses.press(Mappings.active(context), input, down)
+            }
+        }
+    }
+
+    /** Back or home from the phone remote's own buttons, not the switchgear's: as they are, unmapped. */
+    fun navigate(code: Int, down: Boolean) {
+        keys.post { session?.key(code, down) }
+    }
+
+    private fun perform(action: Action, down: Boolean) {
+        val s = session ?: return
+        val mapped = when (action) {
+            // Without a rotary controller, which moves Android Auto's rail to the bottom.
+            Action.NEXT -> KeyEvent.KEYCODE_DPAD_DOWN
+            Action.PREVIOUS -> KeyEvent.KEYCODE_DPAD_UP
+            Action.UP -> KeyEvent.KEYCODE_DPAD_UP
+            Action.DOWN -> KeyEvent.KEYCODE_DPAD_DOWN
+            Action.LEFT -> KeyEvent.KEYCODE_DPAD_LEFT
+            Action.RIGHT -> KeyEvent.KEYCODE_DPAD_RIGHT
+            Action.SELECT -> KeyEvent.KEYCODE_DPAD_CENTER
+            Action.BACK -> KeyEvent.KEYCODE_BACK
+            Action.HOME -> KeyEvent.KEYCODE_HOME
+            Action.VOICE -> KeyEvent.KEYCODE_SEARCH
+            Action.NONE -> return
+        }
+        s.key(mapped, down)
     }
 }

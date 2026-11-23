@@ -45,7 +45,7 @@ object Variant {
      * 40 MB in all. -T: from now, not the whole ring buffer again after each restart.
      */
     fun prepare(context: Context) {
-        prefs(context).edit().putBoolean("linked", false).apply()
+        Profiles.global(context).edit().putBoolean("linked", false).apply()
         val dir = context.getExternalFilesDir(null)
         if (dir == null || logcat != null) return
         try {
@@ -60,27 +60,27 @@ object Variant {
 
     fun foregroundServiceTypes() = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
 
-    /** Restarted: it listens until turned off ([OpenMode]). */
+    /** Restarted: it listens until turned off ([SlipstreamMode]). */
     fun onStartCommand(service: Service, intent: Intent?) = Service.START_STICKY
 
-    /** For the tile and the dashboard, with Retry where it applies. */
+    /** For the tile and the phone remote, with Retry where it applies. */
     fun onStatus(context: Context, text: String, retryable: Boolean) {
-        prefs(context).edit().putString("status", text).putBoolean("retryable", retryable).apply()
-        DashboardActivity.status = text
-        DashboardActivity.retryable = retryable
+        Profiles.global(context).edit().putString("status", text).putBoolean("retryable", retryable).apply()
+        PhoneRemoteActivity.status = text
+        PhoneRemoteActivity.retryable = retryable
     }
 
     /** Whether a unit's link is up, for [SettingsActivity]'s Bluetooth shortcut. */
     fun onLinked(context: Context, linked: Boolean) {
-        prefs(context).edit().putBoolean("linked", linked).apply()
+        Profiles.global(context).edit().putBoolean("linked", linked).apply()
     }
 
-    /** The phone's screen in Open mode. */
-    private const val DASHBOARD = "$APP_ID/$APP_ID.DashboardActivity"
+    /** The phone's screen during a session. */
+    private const val PHONE_REMOTE = "$APP_ID/$APP_ID.PhoneRemoteActivity"
 
     /** The notification's Turn off stops the listening. */
     fun onStopRequested(context: Context) {
-        OpenMode.setListening(context, false)
+        SlipstreamMode.setListening(context, false)
     }
 
     fun openApp(context: Context): PendingIntent? = PendingIntent.getActivity(
@@ -91,13 +91,13 @@ object Variant {
     private const val STOP_GRACE_MS = 1500L
 
     /**
-     * Stop means stopped: the dashboard closes, and once the teardown has had its
+     * Stop means stopped: the phone remote closes, and once the teardown has had its
      * moment the process ends, taking the native session, the listeners and any network request
      * with it - unless one of its screens is up, which would look like a crash. Shizuku goes only
      * once the WiFi is handed back.
      */
     fun onServiceDestroyed(service: Service) {
-        DashboardActivity.close()
+        PhoneRemoteActivity.close()
         AccessoryWifi.afterShell {
             ShizukuDisplay.unbind()
             Handler(Looper.getMainLooper()).postDelayed({
@@ -115,8 +115,8 @@ object Variant {
     fun setting(context: Context, key: String, fallback: String): String =
         prefs(context).getString(key, fallback) ?: fallback
 
-    fun prefs(context: Context): SharedPreferences =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    /** The selected profile's settings. */
+    fun prefs(context: Context): SharedPreferences = Profiles.prefs(context)
 
     /** Asked for from [SettingsActivity], for as long as Android allows. */
     fun makeDiscoverable(adapter: BluetoothAdapter) {}
@@ -158,22 +158,22 @@ object Variant {
     fun rememberBluetoothAddress(context: Context): String? {
         val read = ShizukuDisplay.bluetoothAddress()
         if (read != null) {
-            prefs(context).edit().putString("bluetooth_address", read).apply()
+            Profiles.global(context).edit().putString("bluetooth_address", read).apply()
             return read
         }
-        return prefs(context).getString("bluetooth_address", null)
+        return Profiles.global(context).getString("bluetooth_address", null)
     }
 
-    fun knowsBluetoothAddress(context: Context) = prefs(context).contains("bluetooth_address")
+    fun knowsBluetoothAddress(context: Context) = Profiles.global(context).contains("bluetooth_address")
 
     /**
-     * What keeps a session from starting, or null: without Shizuku Open mode has no display, and
+     * What keeps a session from starting, or null: without Shizuku Slipstream mode has no display, and
      * units that check the Bluetooth address (the CFMOTO) never answer until it's been read once.
      */
     fun blocker(context: Context): String? {
         val problem = ShizukuDisplay.problem() ?: return null
         return when {
-            OpenMode.isOn(context) -> problem
+            SlipstreamMode.isOn(context) -> problem
             knowsBluetoothAddress(context) -> null
             else -> "$problem, and Slipstream hasn't read the phone's Bluetooth address yet"
         }
@@ -201,15 +201,18 @@ object Variant {
     private const val LAUNCHER = "$APP_ID/$APP_ID.launcher.HomeActivity"
 
     /** What the head unit can open on connect besides an app, the first by default. */
-    val ON_CONNECT = listOf(Choices.LAUNCHER, Previews.HOME)
+    /**
+     * Not the phone's home screen: Pixel Launcher's home crashes on the head unit's display and its
+     * second-screen home draws nothing there.
+     */
+    val ON_CONNECT = listOf(Choices.LAUNCHER)
 
     fun launcherIcon(context: Context): Drawable? = context.getDrawable(R.drawable.ic_launcher)
 
     /** The chosen app while it's still installed, else the launcher. */
     private fun appFor(context: Context): String {
-        val app = setting(context, "app", "")
+        val app = Choices.current(context)
         if (app.isEmpty()) return LAUNCHER
-        if (app == Previews.HOME) return Choices.homeApp(context)?.flattenToString() ?: LAUNCHER
         return try {
             context.packageManager.getPackageInfo(app.substringBefore('/'), 0)
             app
@@ -220,29 +223,60 @@ object Variant {
     }
 
     /**
-     * In Open mode a display of the head unit's own size with the chosen app on it, or null
+     * In Slipstream mode a display of the head unit's own size with the chosen app on it, or null
      * without Shizuku; otherwise Android Auto.
      */
     fun openDisplay(context: Context, width: Int, height: Int, density: Int, target: Surface): Runnable? {
-        if (!OpenMode.isOn(context)) return AndroidAuto.open(context, width, height, target)
+        if (!SlipstreamMode.isOn(context)) {
+            val close = AndroidAuto.open(context, width, height, target)
+            showRemote(context, "Android Auto")
+            return Runnable {
+                close.run()
+                hideRemote()
+            }
+        }
         val close = ShizukuDisplay.open(target, width, height, density, appFor(context))
         if (close == null) {
             Log.e(TAG, "No display: Shizuku isn't running or hasn't let Slipstream in")
             return null
         }
-        Switchgear.watch(context)
-        DashboardActivity.connected = true
-        ShizukuDisplay.launchOnPhone(DASHBOARD)
+        showRemote(context, "Slipstream mode")
         return Runnable {
-            Switchgear.stop()
-            DashboardActivity.connected = false
+            hideRemote()
             close.run()
         }
     }
 
-    /** Open mode's display as a session would have it, for [PreviewActivity]; null without Shizuku. */
+    /** How long the phone remote waits, once the display's gone, for a mode change to bring one back. */
+    private const val REMOTE_LINGER_MS = 500L
+
+    private fun showRemote(context: Context, mode: String) {
+        PhoneRemoteActivity.mode = mode
+        PhoneRemoteActivity.connected = true
+        if (ShizukuDisplay.available()) {
+            ShizukuDisplay.launchOnPhone(PHONE_REMOTE)
+        } else {
+            // Without Shizuku Android may refuse a start from the background; the notification opens it.
+            try {
+                context.startActivity(
+                    Intent(context, PhoneRemoteActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            } catch (e: RuntimeException) {
+                Log.w(TAG, "Couldn't open the phone remote", e)
+            }
+        }
+    }
+
+    private fun hideRemote() {
+        PhoneRemoteActivity.connected = false
+        Handler(Looper.getMainLooper()).postDelayed(
+            { if (!PhoneRemoteActivity.connected) PhoneRemoteActivity.close() }, REMOTE_LINGER_MS,
+        )
+    }
+
+    /** Slipstream mode's display with the chosen app, for [PreviewActivity]; null without Shizuku. */
     fun openPreview(context: Context, width: Int, height: Int, density: Int, target: Surface): Runnable? =
-        ShizukuDisplay.open(target, width, height, density, appFor(context))
+        ShizukuDisplay.openPreview(target, width, height, density, appFor(context))
 
     /** Onto the display, 1:1, or to Android Auto, whichever is showing. */
     fun touch(context: Context, viewX: Int, viewY: Int, viewWidth: Int, viewHeight: Int) =
@@ -266,7 +300,19 @@ object Variant {
 
     /** A key from the head unit's switchgear, through its mode ([Switchgear]), or to Android Auto. */
     fun switchgear(context: Context, code: Int, down: Boolean) {
-        if (AndroidAuto.active) AndroidAuto.key(code, down) else Switchgear.key(context, code, down)
+        if (AndroidAuto.active) AndroidAuto.key(context, code, down) else Switchgear.key(context, code, down)
+    }
+
+    /** Whether the head unit gets Android's own display, which the system bar is for: Slipstream mode. */
+    fun showsAndroid(context: Context) = SlipstreamMode.isOn(context)
+
+    /** The temperature outside, for the system bar, as the launcher's weather has it. Blocks. */
+    fun temperature(context: Context): String? =
+        io.github.cfraz89.slipstream.launcher.Weather.now(context)?.let { "${it.temperature}${it.unit}" }
+
+    /** Back or home from the phone remote's own buttons, where the switchgear's mapping doesn't apply. */
+    fun navigate(context: Context, code: Int, down: Boolean) {
+        if (AndroidAuto.active) AndroidAuto.navigate(code, down) else Switchgear.navigate(context, code, down)
     }
 
     /**

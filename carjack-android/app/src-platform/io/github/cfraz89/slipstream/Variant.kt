@@ -45,6 +45,7 @@ object Variant {
         Manifest.permission.ACCESS_COARSE_LOCATION,
         Manifest.permission.NEARBY_WIFI_DEVICES,
         Manifest.permission.POST_NOTIFICATIONS,
+        Manifest.permission.READ_PHONE_STATE,
     )
 
     fun prepare(context: Context) {
@@ -102,8 +103,8 @@ object Variant {
     fun setting(context: Context, key: String, fallback: String): String =
         prefs(context).getString(key, null) ?: SystemProperties.get("persist.carjack.$key", fallback)
 
-    fun prefs(context: Context): SharedPreferences =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    /** The selected profile's settings. */
+    fun prefs(context: Context): SharedPreferences = Profiles.prefs(context)
 
     /** What the head unit can open on connect besides an app, the first by default. */
     val ON_CONNECT = listOf(Previews.HOME)
@@ -179,10 +180,8 @@ object Variant {
             "carjack", width, height, density, target,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR or DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE,
         )
-        Switchgear.watch(context)
         if (closedAt == 0L || SystemClock.elapsedRealtime() - closedAt > KEEP_MS) openOnConnect(context)
         return Runnable {
-            Switchgear.stop()
             display.release()
             closedAt = SystemClock.elapsedRealtime()
         }
@@ -216,6 +215,17 @@ object Variant {
     /** A key from the head unit's switchgear, through its mode; see [Switchgear]. */
     fun switchgear(context: Context, code: Int, down: Boolean) {
         Switchgear.key(context, code, down)
+    }
+
+    /** Whether the head unit gets Android's own display, which the system bar is for: always, here. */
+    fun showsAndroid(context: Context) = true
+
+    /** No weather here: the system bar shows no temperature. */
+    fun temperature(context: Context): String? = null
+
+    /** Back or home from a button of its own, where the switchgear's mapping doesn't apply. */
+    fun navigate(context: Context, code: Int, down: Boolean) {
+        Switchgear.navigate(context, code, down)
     }
 
     /** The app in front on the board's display, for [Switchgear]. */

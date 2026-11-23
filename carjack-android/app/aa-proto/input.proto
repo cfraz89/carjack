@@ -52,12 +52,24 @@ message TouchEvent
     required PointerAction action = 3;
 }
 
+message RelativeEvent_Rel
+{
+    required uint32 keycode = 1;
+    required int32 delta = 2;
+}
+
+message RelativeEvent
+{
+    repeated RelativeEvent_Rel data = 1;
+}
+
 message InputReport
 {
     required uint64 timestamp = 1;
     optional int32 disp_channel_id = 2;
     optional TouchEvent touch_event = 3;
     optional KeyEvent key_event = 4;
+    optional RelativeEvent relative_event = 6;
 }
 
 message KeyBindingRequest

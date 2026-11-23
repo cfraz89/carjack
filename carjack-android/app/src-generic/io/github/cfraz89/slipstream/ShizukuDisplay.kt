@@ -32,7 +32,7 @@ object ShizukuDisplay {
         .daemon(false)
         .processNameSuffix("display")
         .debuggable(false)
-        .version(44)
+        .version(46)
 
     @Volatile private var service: IDisplayService? = null
     private var bound = CountDownLatch(1)
@@ -110,6 +110,29 @@ object ShizukuDisplay {
         }
     }
 
+    /**
+     * A display of its own for a preview, not one kept for the next session, with [app] asked to
+     * leave on back; the returned Runnable releases it. Null without Shizuku.
+     */
+    fun openPreview(target: Surface, width: Int, height: Int, density: Int, app: String): Runnable? {
+        val s = bind() ?: return null
+        return try {
+            if (s.create(target, width, height, density) < 0) return null
+            s.launchExitingOnBack(app)
+            active = s
+            Runnable {
+                active = null
+                try {
+                    s.release()
+                } catch (ignored: RemoteException) {
+                }
+            }
+        } catch (e: RemoteException) {
+            Log.w(TAG, "Shizuku display service failed", e)
+            null
+        }
+    }
+
     /** The app showing on the head unit's display, while there is one. */
     fun topPackage(): String? = try {
         active?.topPackage()
@@ -138,12 +161,9 @@ object ShizukuDisplay {
         return true
     }
 
-    /** [IDisplayService.launchOnPhone], while there's a display. */
+    /** [IDisplayService.launchOnPhone]. Blocks while Shizuku starts the service. */
     fun launchOnPhone(component: String) {
-        try {
-            active?.launchOnPhone(component)
-        } catch (ignored: RemoteException) {
-        }
+        withService(Unit) { it.launchOnPhone(component) }
     }
 
     /** Bluetooth off and on through Shizuku; false where Shizuku can't. */

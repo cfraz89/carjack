@@ -18,6 +18,8 @@
     <color name="sl_on_surface_variant">#43474E</color>
     <color name="sl_outline">#74777F</color>
     <color name="sl_outline_variant">#C3C6CF</color>
+    <color name="sl_ready_container">#C6F1CB</color>
+    <color name="sl_on_ready_container">#00391A</color>
     <!-- The launcher icon's race blue, the same by day and night. -->
     <color name="sl_icon_background">#005FAF</color>
 </resources>

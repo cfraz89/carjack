@@ -14,7 +14,11 @@ import io.github.cfraz89.slipstream.ui.R
 object Choices {
     const val LAUNCHER = ""
 
-    fun current(context: Context) = Variant.setting(context, "app", Variant.ON_CONNECT.first())
+    /** A stored choice this build doesn't offer gets its first. */
+    fun current(context: Context): String {
+        val app = Variant.setting(context, "app", Variant.ON_CONNECT.first())
+        return if (!isApp(app) && app !in Variant.ON_CONNECT) Variant.ON_CONNECT.first() else app
+    }
 
     fun choose(context: Context, app: String) {
         Variant.prefs(context).edit().putString("app", app).apply()

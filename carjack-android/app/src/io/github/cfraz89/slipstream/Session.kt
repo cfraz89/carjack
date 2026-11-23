@@ -21,11 +21,24 @@ class Session(
     private val status: (String) -> Unit,
     private val listener: (Session) -> Unit,
 ) : Native.Callbacks {
-    private companion object {
-        const val TAG = "carjack"
+    companion object {
+        private const val TAG = "carjack"
+
+        /** The session with video up, for settings that change its layout; null between them. */
+        @Volatile var current: Session? = null
+            private set
     }
 
+    /** What [startVideo] was given, to build the stream again from. */
+    private class Video(
+        val width: Int, val height: Int, val fps: Int, val viewX: Int, val viewY: Int,
+        val viewWidth: Int, val viewHeight: Int, val hevc: Boolean,
+    )
+
     @Volatile private var handle = 0L
+    private var video: Video? = null
+    /** The [SystemBar]'s height in the stream as built; 0 for none. */
+    private var bar = 0
     private var stream: ScreenStream? = null
     @Volatile private var touch: Touch? = null
     /** Video got as far as starting. */
@@ -66,6 +79,16 @@ class Session(
         Native.stopSession(handle)
     }
 
+    override fun identified(name: String?, model: String?, manufacturer: String?, vehicle: String?) {
+        val bluetoothName = try {
+            socket.remoteDevice.name
+        } catch (e: SecurityException) {
+            null
+        }
+        Profiles.connected(context, socket.remoteDevice.address, bluetoothName)
+        Mappings.identified(context, HeadUnit(bluetoothName, name, model, manufacturer, vehicle))
+    }
+
     override fun joinWifi(ssid: String, passphrase: String?, bssid: String?) {
         status("Joining $ssid")
         handler.post {
@@ -89,31 +112,75 @@ class Session(
     ) {
         streamed = true
         status("Streaming at ${width}x$height")
+        val v = Video(width, height, fps, viewX, viewY, viewWidth, viewHeight, hevc)
         handler.post {
-            // The back and home bar, where wanted, takes the bottom of the view from the display.
-            val bar = NavBar.height(context, viewHeight)
-            val displayHeight = viewHeight - bar
-            val display = Variant.touch(context, viewX, viewY, viewWidth, displayHeight)
-            touch = if (bar == 0) {
-                display
-            } else {
-                NavBar.touch(
-                    display, viewX, viewY + displayHeight, viewWidth, bar,
-                    { Variant.key(context, NavBar.KEYCODE_BACK) },
-                    { Variant.goHome(context) },
-                )
+            video = v
+            current = this
+            open(v)
+        }
+    }
+
+    private fun open(v: Video) {
+        // The system bar, where wanted, takes the bottom of the view from the display.
+        bar = SystemBar.height(context, v.viewHeight)
+        val displayHeight = v.viewHeight - bar
+        touch = touchFor(v, displayHeight)
+        val s = ScreenStream(context, handle) { stop() }
+        stream = s
+        try {
+            s.start(v.width, v.height, v.fps, v.viewX, v.viewY, v.viewWidth, displayHeight, bar, v.hevc)
+        } catch (e: IOException) {
+            Log.e(TAG, "Could not start the screen stream", e)
+            stop()
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "Could not start the screen stream", e)
+            stop()
+        }
+    }
+
+    private fun touchFor(v: Video, displayHeight: Int): Touch {
+        val display = Variant.touch(context, v.viewX, v.viewY, v.viewWidth, displayHeight)
+        if (bar == 0) return display
+        return SystemBar.touch(
+            display, v.viewX, v.viewY + displayHeight, v.viewWidth, bar,
+            SystemBar.Part.BUTTONS in SystemBar.parts(context),
+            { Variant.key(context, SystemBar.KEYCODE_BACK) },
+            { Variant.goHome(context) },
+            { stream?.showBar(it) },
+        )
+    }
+
+    /**
+     * After a change to the mode or the system bar: the stream built again where the bar comes or
+     * goes, since it takes its height from the display; else just what's shown swapped or redrawn.
+     */
+    fun layoutChanged() {
+        handler.post {
+            val v = video ?: return@post
+            if (SystemBar.height(context, v.viewHeight) == bar) {
+                touch = touchFor(v, v.viewHeight - bar)
+                stream?.redrawBar()
+                stream?.reopen()
+                return@post
             }
-            val s = ScreenStream(context, handle) { stop() }
-            stream = s
-            try {
-                s.start(width, height, fps, viewX, viewY, viewWidth, displayHeight, bar, hevc)
-            } catch (e: IOException) {
-                Log.e(TAG, "Could not start the screen stream", e)
-                stop()
-            } catch (e: RuntimeException) {
-                Log.e(TAG, "Could not start the screen stream", e)
-                stop()
+            stream?.stop()
+            stream = null
+            open(v)
+        }
+    }
+
+    /** After a change to what the system bar shows, or whether it shows at all. */
+    fun systemBarChanged() {
+        handler.post {
+            val v = video ?: return@post
+            if (SystemBar.height(context, v.viewHeight) == bar) {
+                touch = touchFor(v, v.viewHeight - bar)
+                stream?.redrawBar()
+                return@post
             }
+            stream?.stop()
+            stream = null
+            open(v)
         }
     }
 
@@ -133,6 +200,8 @@ class Session(
         Log.i(TAG, "Session ended" + if (error == null) "" else ": $error")
         status("Session ended" + (if (error == null) "" else " ($error)") + "; waiting for the head unit")
         handler.post {
+            if (current === this) current = null
+            video = null
             stream?.stop()
             stream = null
             touch = null

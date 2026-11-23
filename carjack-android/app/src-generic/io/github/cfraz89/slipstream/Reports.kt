@@ -31,7 +31,7 @@ object Reports {
     /** Starts or stops reporting, to match the switch. */
     fun apply(context: Context) {
         val app = context.applicationContext
-        if (!configured(app) || !Variant.prefs(app).getBoolean(PREF, true)) {
+        if (!configured(app) || !Profiles.global(app).getBoolean(PREF, true)) {
             Sentry.close()
             return
         }

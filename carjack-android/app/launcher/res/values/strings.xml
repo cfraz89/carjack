@@ -14,7 +14,6 @@
     <string name="setting_recents">Recent apps in taskbar</string>
     <string name="setting_wallpaper">Wallpaper</string>
     <string name="status_temperature">%1$d°</string>
-    <string name="status_battery">%1$d%%</string>
     <string name="playing_previous">Previous</string>
     <string name="playing_toggle">Play or pause</string>
     <string name="playing_next">Next</string>

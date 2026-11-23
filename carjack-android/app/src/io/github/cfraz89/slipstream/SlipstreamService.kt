@@ -94,6 +94,7 @@ class SlipstreamService : Service() {
     override fun onCreate() {
         super.onCreate()
         Variant.prepare(this)
+        Profiles.settle(this)
         createChannel(this)
         stopAction = action("Turn off", ACTION_STOP, 0)
         retryAction = action("Retry", ACTION_RETRY, 1)

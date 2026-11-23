@@ -13,6 +13,12 @@ object Native {
 
     /** Called from the core's threads; none may block for long. */
     interface Callbacks {
+        /**
+         * What the accessory identified itself as, and the vehicle it's in, just ahead of
+         * [joinWifi]; any may be null.
+         */
+        fun identified(name: String?, model: String?, manufacturer: String?, vehicle: String?)
+
         fun joinWifi(ssid: String, passphrase: String?, bssid: String?)
 
         fun startVideo(

@@ -133,6 +133,9 @@ class VideoDecoder(private val surface: Surface, private val width: Int, private
             }
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
             format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024)
+            // Otherwise a stream that doesn't bound its reordering is held back a dozen frames or so.
+            format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            format.setInteger(MediaFormat.KEY_PRIORITY, 0)
             c.configure(format, surface, null, 0)
             c.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT)
             c.start()

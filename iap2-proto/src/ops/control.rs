@@ -331,6 +331,12 @@ impl ParameterId {
     pub const AUTH_CHALLENGE: Self = Self(0x0001);
     pub const AUTH_DATA: Self = Self(0x0000);
     pub const ACCESSORY_NAME: Self = Self(0x0000);
+    /// `IdentificationInformation` parameters 1 and 2.
+    pub const MODEL_IDENTIFIER: Self = Self(0x0001);
+    pub const MANUFACTURER: Self = Self(0x0002);
+    /// A group: the vehicle the accessory is in, its display name among it.
+    pub const VEHICLE_INFORMATION: Self = Self(0x0014);
+    pub const VEHICLE_DISPLAY_NAME: Self = Self(0x0006);
     /// `IdentificationInformation` parameter 6: the message IDs the accessory will send us.
     pub const MESSAGES_SENT_BY_ACCESSORY: Self = Self(0x0006);
     /// `IdentificationInformation` parameter 7: the message IDs the accessory will accept from us,

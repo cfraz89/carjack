@@ -4,31 +4,37 @@ import android.content.SharedPreferences
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 
-/** The mode switched from Quick Settings - on is Open mode - with where the listening is up to beneath. */
+/** The mode switched from Quick Settings - on is Slipstream mode - with where the listening is up to beneath. */
 class SlipstreamTile : TileService() {
     private val changed = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "mode" || key == "status" || key == "listening") show()
     }
 
     override fun onStartListening() {
-        Variant.prefs(this).registerOnSharedPreferenceChangeListener(changed)
+        Profiles.global(this).registerOnSharedPreferenceChangeListener(changed)
+        Variant.prefs(this).also { profile = it }.registerOnSharedPreferenceChangeListener(changed)
         show()
     }
 
     override fun onStopListening() {
-        Variant.prefs(this).unregisterOnSharedPreferenceChangeListener(changed)
+        Profiles.global(this).unregisterOnSharedPreferenceChangeListener(changed)
+        profile?.unregisterOnSharedPreferenceChangeListener(changed)
+        profile = null
     }
 
+    /** The selected profile's settings, as listened to: the mode's in them. */
+    private var profile: android.content.SharedPreferences? = null
+
     override fun onClick() {
-        OpenMode.setOn(this, !OpenMode.isOn(this))
+        SlipstreamMode.setOn(this, !SlipstreamMode.isOn(this))
     }
 
     private fun show() {
         val tile = qsTile ?: return
-        tile.state = if (OpenMode.isOn(this)) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-        tile.label = if (OpenMode.isOn(this)) "Open mode" else "Android Auto"
-        tile.subtitle = if (OpenMode.isListening(this)) {
-            Variant.setting(this, "status", SlipstreamService.WAITING)
+        tile.state = if (SlipstreamMode.isOn(this)) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+        tile.label = if (SlipstreamMode.isOn(this)) "Slipstream mode" else "Android Auto"
+        tile.subtitle = if (SlipstreamMode.isListening(this)) {
+            Profiles.global(this).getString("status", null) ?: SlipstreamService.WAITING
         } else {
             "Off"
         }

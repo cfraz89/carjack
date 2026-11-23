@@ -140,6 +140,12 @@ pub async fn connect_airplay(
             bluetooth_ids = ?info.bluetooth_ids,
             "Accessory AirPlay features"
         );
+        tracing::info!(
+            manufacturer = %info.manufacturer,
+            model = %info.model,
+            oem_icon_label = ?info.oem_icon_label,
+            "Accessory AirPlay identity"
+        );
     }
 
     let info = tx.info_cached();
@@ -482,6 +488,7 @@ async fn handle_accessory_commands(
     handover: CancellationToken,
 ) {
     let mut touching = [false; 2];
+    let mut voice_down = false;
     // The switchgear, by the uuid its reports carry; the touchscreen isn't among them.
     let mut switchgear = crate::hid::devices(
         tx.info_cached()
@@ -575,15 +582,15 @@ async fn handle_accessory_commands(
                 continue;
             }
             Command::RequestSiri(siri) => {
-                // Prewarm comes first on some units and needs nothing: the assistant opens on down.
-                let down = match siri.siri_action {
-                    SiriAction::ButtonDown => Some(true),
-                    SiriAction::ButtonUp => Some(false),
-                    SiriAction::Prewarm => None,
-                };
-                tracing::info!(?down, "Accessory voice button");
-                if let (Some(down), Some(key_tx)) = (down, &key_tx) {
-                    let _ = key_tx.try_send(crate::hid::voice_assist(down));
+                // The CFMOTO sends only prewarm at the press and up at the release: prewarm is the
+                // press, and a down after it isn't another.
+                let down = !matches!(siri.siri_action, SiriAction::ButtonUp);
+                tracing::info!(action = ?siri.siri_action, "Accessory voice button");
+                if down != voice_down {
+                    voice_down = down;
+                    if let Some(key_tx) = &key_tx {
+                        let _ = key_tx.try_send(crate::hid::voice_assist(down));
+                    }
                 }
                 cmd.respond_ok();
             }

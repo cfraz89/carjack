@@ -78,6 +78,17 @@ impl JavaPlatform {
 
 impl Platform for JavaPlatform {
     fn join_wifi(&self, creds: &WifiCredentials) {
+        let accessory = &creds.accessory;
+        self.call_strings(
+            "identified",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            &[
+                accessory.name.as_deref(),
+                accessory.model.as_deref(),
+                accessory.manufacturer.as_deref(),
+                accessory.vehicle.as_deref(),
+            ],
+        );
         self.call_strings(
             "joinWifi",
             "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",

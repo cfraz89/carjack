@@ -6,7 +6,7 @@ works belong in `CLAUDE.md`, not here.
 
 ## A VirtualDevice's display stays awake and unlocked with the phone locked (2026-11-17)
 
-Open mode now works with the phone locked and its screen off. Every earlier head unit display -
+Unlimited mode (then called Open mode) now works with the phone locked and its screen off. Every earlier head unit display -
 public, private, with `OWN_DISPLAY_GROUP` and `ALWAYS_UNLOCKED` - ended up in the phone's display
 group (`displayGroupId 0`): asleep with the phone's screen (touches dropped, activities stopped)
 and, without `ALWAYS_UNLOCKED`, blanked by its lock screen. The reason, from MoonClicker's

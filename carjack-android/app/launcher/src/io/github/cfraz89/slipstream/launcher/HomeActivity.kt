@@ -1,14 +1,11 @@
 package io.github.cfraz89.slipstream.launcher
 
 import android.app.WallpaperManager
-import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.res.Configuration
 import android.graphics.drawable.Drawable
-import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -80,18 +77,23 @@ import java.util.Locale
 class HomeActivity : ComponentActivity() {
 
     private companion object {
+        /** Started with this, it leaves on back, as Slipstream's preview of the head unit wants. */
+        const val EXTRA_EXIT_ON_BACK = "io.github.cfraz89.slipstream.EXIT_ON_BACK"
         const val STATE_PENDING_SLOT = "pending_slot"
         const val WEATHER_REFRESH_MS = 15 * 60 * 1000L
     }
-
-    /** The phone's charge, shown under the weather: the phone is in a pocket, out of sight. */
-    private data class Charge(val percent: Int, val charging: Boolean)
 
     /** Slot awaiting a result from the picker; -1 when the picker is not open. */
     private var pendingSlot = -1
 
     /** Home is the root of the stack, so back has nowhere to go. */
     private val swallowBack = OnBackInvokedCallback { }
+
+    /** Previewed, back leaves, and tells the preview straight away. */
+    private val leavePreview = OnBackInvokedCallback {
+        LauncherPreview.onExit?.invoke()
+        finish()
+    }
 
     private lateinit var nowPlaying: NowPlaying
     private val handler = Handler(Looper.getMainLooper())
@@ -102,7 +104,6 @@ class HomeActivity : ComponentActivity() {
     private var loadedWallpaper: String? = null
     private var wallpaperGeneration = 0
     private var weather by mutableStateOf<Weather.Now?>(null)
-    private var charge by mutableStateOf<Charge?>(null)
     private var columns by mutableIntStateOf(Prefs.DEFAULT_COLUMNS)
     private var slots by mutableStateOf<List<AppEntry?>>(emptyList())
     private var recents by mutableStateOf<List<AppEntry>>(emptyList())
@@ -129,7 +130,7 @@ class HomeActivity : ComponentActivity() {
         if (!SystemBars.onPhone(this)) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(
                 OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-                swallowBack,
+                if (intent.getBooleanExtra(EXTRA_EXIT_ON_BACK, false)) leavePreview else swallowBack,
             )
         }
         WallpaperManager.getInstance(this)
@@ -142,6 +143,7 @@ class HomeActivity : ComponentActivity() {
     override fun onDestroy() {
         WallpaperManager.getInstance(this).removeOnColorsChangedListener(wallpaperChanged)
         onBackInvokedDispatcher.unregisterOnBackInvokedCallback(swallowBack)
+        onBackInvokedDispatcher.unregisterOnBackInvokedCallback(leavePreview)
         super.onDestroy()
     }
 
@@ -150,14 +152,12 @@ class HomeActivity : ComponentActivity() {
         SystemBars.hide(this)
         loadWallpaper()
         refreshGrid()
-        registerReceiver(battery, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         refreshWeather.run()
         nowPlaying.start()
     }
 
     override fun onPause() {
         nowPlaying.stop()
-        unregisterReceiver(battery)
         handler.removeCallbacks(refreshWeather)
         super.onPause()
     }
@@ -171,15 +171,6 @@ class HomeActivity : ComponentActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         refreshGrid()
-    }
-
-    private val battery = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
-            val charging = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
-            charge = if (level < 0) null else Charge(level * 100 / scale, charging)
-        }
     }
 
     /** Off the main thread, and again every quarter hour while home is showing. */
@@ -289,7 +280,7 @@ class HomeActivity : ComponentActivity() {
         }
     }
 
-    /** Time and date; the weather where the phone is (the head unit shows none) and its battery. */
+    /** Time and date; the weather where the phone is (the head unit shows none). */
     @Composable
     private fun Status() {
         val now = rememberMinute()
@@ -358,20 +349,6 @@ class HomeActivity : ComponentActivity() {
                     val sky = weather?.sky.orEmpty()
                     if (sky.isNotEmpty()) {
                         Text(sky.uppercase(locale), style = hudCaption(), maxLines = 1)
-                    }
-                    charge?.let { battery ->
-                        Spacer(Modifier.width(dimensionResource(R.dimen.status_battery_gap)))
-                        BatteryIcon(
-                            battery.percent,
-                            battery.charging,
-                            Modifier.size(dimensionResource(R.dimen.status_battery_size)),
-                        )
-                        Spacer(Modifier.width(dimensionResource(R.dimen.status_battery_text_gap)))
-                        Text(
-                            stringResource(R.string.status_battery, battery.percent),
-                            style = hudCaption(),
-                            maxLines = 1,
-                        )
                     }
                 }
             }

@@ -20,33 +20,48 @@ import io.github.cfraz89.slipstream.ui.R
 private val SIZES = listOf("Default", "Smaller", "Larger", "Largest")
 private val DENSITIES = intArrayOf(0, 160, 240, 280)
 
-/** "Any", then each paired head unit, as name and address. */
-fun pairedUnits(context: Context): List<Pair<String, String>> {
-    val units = mutableListOf("Any" to "")
+/** Each paired device that hosts CarPlay, as name and address. */
+fun pairedDevices(context: Context): List<Pair<String, String>> {
+    val devices = mutableListOf<Pair<String, String>>()
     val adapter = context.getSystemService(BluetoothManager::class.java).adapter
     if (adapter?.isEnabled == true &&
         context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
     ) {
         for (device in adapter.bondedDevices) {
-            if (Bluetooth.hostsIap(device.uuids)) units += (device.name ?: device.address) to device.address
+            if (Bluetooth.hostsIap(device.uuids)) devices += (device.name ?: device.address) to device.address
         }
     }
-    return units
+    return devices
 }
 
+/** A device setting as it's shown: the device's name where it's paired. */
+fun deviceName(target: String, devices: List<Pair<String, String>>) = when (target) {
+    Profiles.AUTO_SET -> "Auto-set"
+    Profiles.ANY -> "Any"
+    else -> devices.firstOrNull { it.second.equals(target, ignoreCase = true) }?.first ?: target
+}
+
+/** Which device the profile connects to: Auto-set, Any, or a paired one. */
 @Composable
-fun HeadUnitRow(onChange: () -> Unit) {
+fun DeviceRow(onChange: () -> Unit) {
     val context = LocalContext.current
-    val units = remember { pairedUnits(context) }
-    val target = Variant.setting(context, "target", "")
-    val index = units.indexOfFirst { it.second.equals(target, ignoreCase = true) }.coerceAtLeast(0)
+    val devices = remember { pairedDevices(context) }
+    val target = Profiles.targetSetting(context, Profiles.selected(context).id)
+    val options = buildList {
+        add(Profiles.AUTO_SET)
+        add(Profiles.ANY)
+        devices.mapTo(this) { it.second }
+        // One set that's since been unpaired, so it still shows.
+        if (none { it.equals(target, ignoreCase = true) }) add(target)
+    }
+    val index = options.indexOfFirst { it.equals(target, ignoreCase = true) }
     var choosing by remember { mutableStateOf(false) }
-    ListRow(Leading.Glyph(R.drawable.ic_sl_unit), "Head unit", units[index].first, trailing = { Chevron() }) {
+    ListRow(Leading.Glyph(R.drawable.ic_sl_bluetooth), deviceName(target, devices), trailing = { Chevron() }) {
         choosing = true
     }
     if (choosing) {
-        ChoiceDialog("Head unit", units.map { it.first }, index, { choosing = false }) {
-            Variant.prefs(context).edit().putString("target", units[it].second).apply()
+        ChoiceDialog("Device", options.map { deviceName(it, devices) }, index, { choosing = false }) {
+            Variant.prefs(context).edit().putString(Profiles.TARGET, options[it]).apply()
             choosing = false
             onChange()
         }
@@ -82,15 +97,4 @@ fun ScaleRow(onChange: () -> Unit) {
             onChange()
         }
     }
-}
-
-@Composable
-fun RemoteAppsRow() {
-    val context = LocalContext.current
-    val count = Switchgear.apps(context).size
-    ListRow(
-        Leading.Glyph(R.drawable.ic_sl_remote), "Remote mode apps",
-        if (count == 1) "1 app" else "$count apps",
-        trailing = { Chevron() },
-    ) { context.startActivity(Intent(context, RemoteAppsActivity::class.java)) }
 }

@@ -107,6 +107,10 @@ object LogBundle {
             .append(" (").append(Build.DISPLAY).append(")\n")
             .append("Shizuku: ").append(if (ShizukuDisplay.available()) "yes" else "no").append("\n\n")
             .append("Settings:\n")
+        for ((key, value) in Profiles.global(context).all) {
+            append("  ").append(key).append(" = ").append(value).append('\n')
+        }
+        append("Profile ").append(Profiles.selected(context).name).append(":\n")
         for ((key, value) in Variant.prefs(context).all) {
             append("  ").append(key).append(" = ").append(value).append('\n')
         }

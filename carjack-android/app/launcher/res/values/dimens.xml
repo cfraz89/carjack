@@ -21,7 +21,7 @@
 
     <dimen name="grid_padding">16dp</dimen>
     <dimen name="shortcut_margin">8dp</dimen>
-    <dimen name="shortcut_icon_size">72dp</dimen>
+    <dimen name="shortcut_icon_size">96dp</dimen>
     <dimen name="shortcut_icon_min">32dp</dimen>
     <dimen name="shortcut_label_top">10dp</dimen>
     <dimen name="shortcut_padding">10dp</dimen>
@@ -50,7 +50,7 @@
     <dimen name="app_icon_size">64dp</dimen>
 
     <dimen name="screen_title_size">28sp</dimen>
-    <dimen name="shortcut_label_size">15sp</dimen>
+    <dimen name="shortcut_label_size">19sp</dimen>
     <dimen name="taskbar_button_label_size">21sp</dimen>
     <dimen name="app_label_size">14sp</dimen>
     <dimen name="setting_label_size">20sp</dimen>
@@ -79,9 +79,6 @@
     <dimen name="playing_padding_top">28dp</dimen>
     <dimen name="playing_padding_bottom">8dp</dimen>
     <dimen name="playing_padding_end">12dp</dimen>
-    <dimen name="status_battery_size">22dp</dimen>
-    <dimen name="status_battery_gap">14dp</dimen>
-    <dimen name="status_battery_text_gap">4dp</dimen>
     <!-- An empty slot's plus, which keeps to the middle of its cell. -->
     <dimen name="add_slot_size">48dp</dimen>
     <dimen name="focus_ring_width">3dp</dimen>

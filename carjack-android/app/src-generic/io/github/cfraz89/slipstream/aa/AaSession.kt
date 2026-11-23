@@ -349,9 +349,9 @@ class AaSession(
         send(input(Input.InputReport.newBuilder().setTouchEvent(event)))
     }
 
-    /** Stamped with a monotonic microsecond clock, as Android Auto wants. */
+    /** Stamped in nanoseconds since boot; in microseconds every event looks long stale. */
     private fun input(report: Input.InputReport.Builder) = AapMessage(
         Channel.INPUT, Input.MsgType.EVENT_VALUE,
-        report.setTimestamp(SystemClock.elapsedRealtimeNanos() / 1000).build(),
+        report.setTimestamp(SystemClock.elapsedRealtimeNanos()).build(),
     )
 }

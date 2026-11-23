@@ -180,24 +180,18 @@ class Bluetooth(
         return adapter.bondedDevices.firstOrNull { isTarget(it) }
     }
 
+    /** The selected profile's device, or blank where it takes whichever connects. */
     private fun target(): String {
-        val target = Variant.setting(context, "target", "").trim()
-        return if (target.equals("auto", ignoreCase = true)) "" else target
+        val target = Variant.setting(context, Profiles.TARGET, "").trim()
+        return if (target.equals("auto", ignoreCase = true) || target == Profiles.ANY) "" else target
     }
 
-    private fun isNamedTarget(device: BluetoothDevice): Boolean {
-        val target = target()
-        return target.isNotEmpty() &&
-            (target.equals(device.address, ignoreCase = true) || target == device.name)
-    }
+    /** Any profile's head unit, which selects that profile once it connects. */
+    private fun isNamedTarget(device: BluetoothDevice): Boolean =
+        Profiles.targets(context).any { it.equals(device.address, ignoreCase = true) || it == device.name }
 
-    private fun isTarget(device: BluetoothDevice): Boolean {
-        val target = target()
-        if (target.isNotEmpty()) {
-            return target.equals(device.address, ignoreCase = true) || target == device.name
-        }
-        return hostsIap(device.uuids)
-    }
+    private fun isTarget(device: BluetoothDevice): Boolean =
+        isNamedTarget(device) || (target().isEmpty() && hostsIap(device.uuids))
 
     /** Look for an unbonded unit to pair with. */
     fun discover() {

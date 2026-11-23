@@ -2,8 +2,10 @@ package io.github.cfraz89.slipstream
 
 import android.graphics.drawable.Drawable
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,7 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.rememberScrollState
@@ -41,6 +43,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
@@ -103,7 +106,7 @@ fun SlipstreamTheme(content: @Composable () -> Unit) {
     )
 }
 
-/** A scrolling page drawn edge to edge, kept clear of the system bars. */
+/** A scrolling page drawn edge to edge, kept clear of the system bars, the camera and the keyboard. */
 @Composable
 fun Page(content: @Composable ColumnScope.() -> Unit) {
     // A Surface, not just a background: it also sets the text and icon colour beneath it.
@@ -111,7 +114,7 @@ fun Page(content: @Composable ColumnScope.() -> Unit) {
         Column(
             Modifier
                 .fillMaxSize()
-                .systemBarsPadding()
+                .safeDrawingPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
             content = content,
@@ -196,6 +199,17 @@ fun Heading(text: String) {
     )
 }
 
+/** A line under a [Heading] saying what its section is for. */
+@Composable
+fun HeadingNote(text: String) {
+    Text(
+        text,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 14.sp,
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 8.dp),
+    )
+}
+
 /** A filled card, extra-large rounded. */
 @Composable
 fun SectionCard(
@@ -220,7 +234,11 @@ sealed interface Leading {
     data class Picture(val drawable: Drawable?, val tinted: Boolean = false) : Leading
 }
 
-/** A list row: a leading icon, a title over a supporting line, and an optional trailing part. */
+/**
+ * A list row: a leading icon, a title over a supporting line ([supportingIcon] before it), and an
+ * optional trailing part. [selected] shades it, as a long press picks rows to act on.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ListRow(
     leading: Leading,
@@ -228,17 +246,29 @@ fun ListRow(
     supporting: String? = null,
     titleSize: Int = 16,
     trailing: (@Composable () -> Unit)? = null,
+    supportingIcon: Int? = null,
+    selected: Boolean = false,
+    onLongClick: (() -> Unit)? = null,
+    enabled: Boolean = true,
     onClick: (() -> Unit)? = null,
 ) {
+    val colors = MaterialTheme.colorScheme
     Row(
         Modifier
             .fillMaxWidth()
             .heightIn(min = 72.dp)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(if (selected) Modifier.background(colors.secondaryContainer) else Modifier)
+            .then(
+                when {
+                    !enabled -> Modifier.alpha(0.38f)
+                    onLongClick != null -> Modifier.combinedClickable(onLongClick = onLongClick, onClick = onClick ?: {})
+                    onClick != null -> Modifier.clickable(onClick = onClick)
+                    else -> Modifier
+                },
+            )
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        val colors = MaterialTheme.colorScheme
         when (leading) {
             is Leading.Glyph -> Badge { Icon(painterResource(leading.res), null, Modifier.size(24.dp)) }
             is Leading.Picture -> if (leading.tinted) {
@@ -252,7 +282,13 @@ fun ListRow(
         Column(Modifier.weight(1f).padding(start = 16.dp, end = 8.dp)) {
             Text(title, color = colors.onSurface, fontSize = titleSize.sp)
             if (supporting != null) {
-                Text(supporting, color = colors.onSurfaceVariant, fontSize = 14.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (supportingIcon != null) {
+                        Icon(painterResource(supportingIcon), null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    Text(supporting, color = colors.onSurfaceVariant, fontSize = 14.sp)
+                }
             }
         }
         trailing?.invoke()

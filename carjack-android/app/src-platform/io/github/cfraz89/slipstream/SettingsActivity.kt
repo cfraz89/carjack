@@ -27,10 +27,9 @@ class SettingsActivity : ComponentActivity() {
                         TopBar("Motopod") { finish() }
                         Heading("Connection")
                         SectionCard(MaterialTheme.colorScheme.surfaceContainer) {
-                            HeadUnitRow { revision++ }
+                            DeviceRow { revision++ }
                             OnConnectRow()
                             ScaleRow { revision++ }
-                            RemoteAppsRow()
                         }
                     }
                 }

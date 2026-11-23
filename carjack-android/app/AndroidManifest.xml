@@ -15,6 +15,7 @@
     <uses-permission android:name="android.permission.BLUETOOTH_PRIVILEGED" />
     <!-- BluetoothDevice.connect() and disconnect(), which page the head unit. -->
     <uses-permission android:name="android.permission.MODIFY_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.LOCAL_MAC_ADDRESS" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -59,9 +60,6 @@
             android:exported="false" />
         <activity
             android:name="io.github.cfraz89.slipstream.AppPickerActivity"
-            android:exported="false" />
-        <activity
-            android:name="io.github.cfraz89.slipstream.RemoteAppsActivity"
             android:exported="false" />
 
         <receiver
