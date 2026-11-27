@@ -1,0 +1,8 @@
+<!-- The head unit system bar's home: SystemBar.render's ring. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:strokeColor="#FF000000"
+        android:strokeWidth="2.3"
+        android:pathData="M12,4.8a7.2,7.2 0,1 1,0 14.4a7.2,7.2 0,1 1,0 -14.4z" />
+</vector>

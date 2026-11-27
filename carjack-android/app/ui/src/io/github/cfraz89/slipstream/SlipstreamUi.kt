@@ -2,6 +2,7 @@ package io.github.cfraz89.slipstream
 
 import android.graphics.drawable.Drawable
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -108,14 +109,14 @@ fun SlipstreamTheme(content: @Composable () -> Unit) {
 
 /** A scrolling page drawn edge to edge, kept clear of the system bars, the camera and the keyboard. */
 @Composable
-fun Page(content: @Composable ColumnScope.() -> Unit) {
+fun Page(scroll: ScrollState = rememberScrollState(), content: @Composable ColumnScope.() -> Unit) {
     // A Surface, not just a background: it also sets the text and icon colour beneath it.
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
         Column(
             Modifier
                 .fillMaxSize()
                 .safeDrawingPadding()
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scroll)
                 .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
             content = content,
         )

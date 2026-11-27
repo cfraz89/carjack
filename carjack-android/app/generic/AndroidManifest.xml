@@ -55,12 +55,7 @@
 
         <activity
             android:name=".SettingsActivity"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:exported="true" />
         <activity
             android:name=".OnConnectActivity"
             android:exported="false" />
@@ -71,9 +66,9 @@
             android:name=".PreviewActivity"
             android:exported="false"
             android:theme="@style/SlipstreamTheme" />
-        <!-- The phone's screen during a head unit session, brought forward when one starts. A
-             task of its own, gone from recents once closed: closing it at the session's end goes
-             back to whatever was showing before, settings only if that's what it was. -->
+        <!-- The app's own screen: waiting for the head unit, then the remote once a session is up,
+             brought forward when one starts. A task of its own, gone from recents once closed:
+             closing it at the session's end goes back to whatever was showing before. -->
         <activity
             android:name=".PhoneRemoteActivity"
             android:exported="true"
@@ -83,7 +78,12 @@
             android:autoRemoveFromRecents="true"
             android:screenOrientation="sensor"
             android:supportsPictureInPicture="true"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
         <!-- The launcher (launcher/), which Slipstream opens on the head unit's display by
              component: not a home app on the phone. Shown when locked: the head unit's display sits

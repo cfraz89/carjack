@@ -29,9 +29,26 @@ import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
@@ -80,6 +97,8 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -96,17 +115,16 @@ import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
 
 /**
- * The phone's screen during a head unit session, in either mode: a remote for the head unit -
- * the controls chosen in settings ([RemoteControl]), sending what its switchgear would - and the
- * swipe that disconnects. It keeps the phone awake while it's showing; the head unit carries on
- * with the phone locked and its screen off all the same.
+ * The app's own screen. Waiting, where the connection's up to, and what's left to set up; once a
+ * session's up, in either mode, a remote for the head unit - the controls chosen in settings
+ * ([RemoteControl]), sending what its switchgear would - and the swipe that disconnects. It keeps
+ * the phone awake while it's showing, so it can be opened ahead of the head unit; the head unit
+ * carries on with the phone locked and its screen off all the same.
  */
 class PhoneRemoteActivity : ComponentActivity() {
     companion object {
         /** A session is up, its display on the head unit. */
         var connected by mutableStateOf(false)
-        /** What the head unit gets, for the title. */
-        var mode by mutableStateOf("")
         /** Where things are up to, as the service says, and whether it's given up until a retry. */
         var status by mutableStateOf(SlipstreamService.WAITING)
         var retryable by mutableStateOf(false)
@@ -127,10 +145,16 @@ class PhoneRemoteActivity : ComponentActivity() {
             context.startActivity(Intent(context, PhoneRemoteActivity::class.java).putExtra(EXTRA_PREVIEW, true))
         }
 
+        /** At a session's end; waiting for one, it stays. */
         fun close() {
-            current.get()?.let { it.runOnUiThread { it.finish() } }
+            current.get()?.let { it.runOnUiThread { if (it.shownRemote) it.finish() } }
         }
     }
+
+    /** The remote's been up: it stays, through a mode change's moment without a display, until it closes. */
+    private var shownRemote by mutableStateOf(false)
+    private var listening by mutableStateOf(true)
+    private var issues by mutableStateOf(emptyList<SetupIssue>())
 
     private val main = Handler(Looper.getMainLooper())
     private val background = Executors.newSingleThreadExecutor()
@@ -165,6 +189,7 @@ class PhoneRemoteActivity : ComponentActivity() {
     private val primaryContainer by lazy { tone(R.color.sl_primary_container) }
     private val onPrimaryContainer by lazy { tone(R.color.sl_on_primary_container) }
     private val tertiary by lazy { tone(R.color.sl_tertiary) }
+    private val primary by lazy { tone(R.color.sl_primary) }
     private val sheet by lazy { tone(R.color.sl_surface_container_high) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -193,6 +218,7 @@ class PhoneRemoteActivity : ComponentActivity() {
     /** The controls afresh: they may have been changed in settings, opened from here. */
     override fun onResume() {
         super.onResume()
+        SlipstreamMode.listen(this)
         controls = RemoteControl.shown(this)
         background.execute { refreshLauncher() }
         background.execute {
@@ -246,11 +272,11 @@ class PhoneRemoteActivity : ComponentActivity() {
      */
     private fun pipParams(): PictureInPictureParams = PictureInPictureParams.Builder()
         .setAspectRatio(Rational(1, 1))
-        .setAutoEnterEnabled(!preview)
+        .setAutoEnterEnabled(connected && !preview)
         .setActions(
             listOf(
-                pipAction(ACTION_BACK, R.drawable.ic_sl_arrow_back, "Back"),
-                pipAction(ACTION_HOME, R.drawable.ic_sl_home, "Home"),
+                pipAction(ACTION_BACK, R.drawable.ic_sl_nav_back, "Back"),
+                pipAction(ACTION_HOME, R.drawable.ic_sl_nav_home, "Home"),
             ),
         )
         .build()
@@ -312,12 +338,21 @@ class PhoneRemoteActivity : ComponentActivity() {
         finish()
     }
 
-    /** What's on the head unit in Slipstream mode, for the picture-in-picture window. */
+    /**
+     * What's on the head unit in Slipstream mode, for the picture-in-picture window; and, waiting,
+     * whether Slipstream's on and what's left to set up.
+     */
     private val pollHeadUnit = object : Runnable {
         override fun run() {
             background.execute {
                 val top = ShizukuDisplay.topPackage()
-                main.post { headUnitPackage = top }
+                val on = SlipstreamMode.isListening(this@PhoneRemoteActivity)
+                val found = SetupIssue.of(this@PhoneRemoteActivity)
+                main.post {
+                    headUnitPackage = top
+                    listening = on
+                    issues = found
+                }
             }
             main.postDelayed(this, HEAD_UNIT_MS)
         }
@@ -332,6 +367,7 @@ class PhoneRemoteActivity : ComponentActivity() {
         }
     }
 
+    @OptIn(ExperimentalSharedTransitionApi::class)
     @Composable
     private fun PhoneRemote() = LauncherTheme {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -341,7 +377,20 @@ class PhoneRemoteActivity : ComponentActivity() {
                     DrawableImage(remember(pkg) { appIcon(pkg) }, Modifier.fillMaxSize(0.7f))
                 }
             } else {
-                Controls()
+                LaunchedEffect(connected) {
+                    if (connected) shownRemote = true
+                    setPictureInPictureParams(pipParams())
+                }
+                SharedTransitionLayout {
+                    AnimatedContent(
+                        connected || preview || shownRemote,
+                        transitionSpec = { fadeIn(tween(SCREEN_MS)) togetherWith fadeOut(tween(SCREEN_MS)) },
+                        label = "screen",
+                    ) { remote ->
+                        val shared = Shared(this@SharedTransitionLayout, this)
+                        if (remote) Controls(shared) else Connect(shared)
+                    }
+                }
                 AnimatedVisibility(
                     drawerOpen,
                     enter = slideInVertically { it },
@@ -359,7 +408,7 @@ class PhoneRemoteActivity : ComponentActivity() {
      */
     @Composable
     private fun Launcher(modifier: Modifier) {
-        BoxWithConstraints(modifier) {
+        BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
             val width = columns.coerceAtLeast(1)
             val rows = slots.chunked(width)
             val gridHeight = maxHeight - TASKBAR - 12.dp
@@ -487,32 +536,31 @@ class PhoneRemoteActivity : ComponentActivity() {
     }
 
     /**
-     * The title and settings; the launcher, large, over a smaller remote where apps are shown, else
-     * the remote, large; then disconnecting.
+     * The title and settings; the launcher, large, beside or over a smaller remote where apps are
+     * shown, else the remote, large; then disconnecting, below, or at the side in landscape.
      */
     @Composable
-    private fun Controls() {
-        val launcher = showsApps && (connected || preview)
+    private fun Controls(shared: Shared) {
+        val launcher = showsApps
         BoxWithConstraints(
             Modifier.fillMaxSize().background(surface).safeDrawingPadding().padding(24.dp),
         ) {
             if (maxWidth > maxHeight) {
-                Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(
-                        Modifier.weight(1f).fillMaxHeight(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Column(Modifier.weight(1f, fill = false)) {
-                            Header(Modifier.fillMaxWidth())
-                            if (launcher) {
-                                Launcher(Modifier.weight(1f, fill = false).fillMaxWidth().padding(vertical = 16.dp))
-                            }
+                Column(Modifier.fillMaxSize()) {
+                    Header(shared, Modifier.fillMaxWidth().padding(bottom = 16.dp))
+                    Row(Modifier.weight(1f).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        if (launcher) {
+                            Launcher(Modifier.weight(2f).fillMaxHeight())
+                            Spacer(Modifier.width(24.dp))
+                            Remote(Modifier.weight(1f).fillMaxHeight(), RemoteLayout.SIDE)
+                        } else {
+                            Remote(Modifier.weight(1f).fillMaxHeight(), RemoteLayout.WIDE)
                         }
-                        EndSwipe()
+                        Spacer(Modifier.width(24.dp))
+                        BoxWithConstraints(Modifier.fillMaxHeight(), contentAlignment = Alignment.Center) {
+                            EndSwipe(minOf(maxHeight, END_TRACK), vertical = true)
+                        }
                     }
-                    Spacer(Modifier.width(24.dp))
-                    Remote(Modifier.weight(1f).fillMaxHeight(), compact = false)
                 }
             } else {
                 Column(
@@ -521,13 +569,13 @@ class PhoneRemoteActivity : ComponentActivity() {
                     verticalArrangement = Arrangement.SpaceBetween,
                 ) {
                     if (launcher) {
-                        Header(Modifier.fillMaxWidth().padding(bottom = 16.dp))
+                        Header(shared, Modifier.fillMaxWidth().padding(bottom = 16.dp))
                         Launcher(Modifier.weight(1f, fill = false).fillMaxWidth().padding(bottom = 16.dp))
-                        Remote(Modifier.fillMaxWidth().padding(bottom = 16.dp), compact = true)
+                        Remote(Modifier.fillMaxWidth().padding(bottom = 16.dp), RemoteLayout.ROW)
                         EndSwipe()
                     } else {
-                        Header(Modifier.fillMaxWidth())
-                        Remote(Modifier.weight(1f).fillMaxWidth().padding(vertical = 24.dp), compact = false)
+                        Header(shared, Modifier.fillMaxWidth())
+                        Remote(Modifier.weight(1f).fillMaxWidth().padding(vertical = 24.dp), RemoteLayout.COLUMN)
                         EndSwipe()
                     }
                 }
@@ -536,62 +584,288 @@ class PhoneRemoteActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun Header(modifier: Modifier) {
+    private fun Header(shared: Shared, modifier: Modifier) {
         val logo = remember { getDrawable(R.mipmap.ic_sl_launcher) }
         Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-            DrawableImage(logo, Modifier.size(44.dp).clip(CircleShape))
+            DrawableImage(logo, Modifier.shared(shared, LOGO).size(44.dp).clip(CircleShape))
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
+                Title(shared)
                 Text(
-                    if (connected || preview) "Connected" else "Not connected",
-                    style = hudText(24.sp, FontWeight.SemiBold, onSurface),
-                    maxLines = 1,
-                )
-                Text(
-                    if (preview) SlipstreamMode.name(this@PhoneRemoteActivity) else mode,
+                    "Connected",
                     style = hudCaption().copy(color = onSurfaceVariant),
                     maxLines = 1,
+                    modifier = Modifier.shared(shared, STATUS),
                 )
             }
             if (!preview) SettingsButton()
         }
     }
 
+    @Composable
+    private fun Title(shared: Shared) {
+        Text(
+            "Slipstream",
+            style = hudText(24.sp, FontWeight.SemiBold, onSurface),
+            maxLines = 1,
+            modifier = Modifier.shared(shared, TITLE),
+        )
+    }
+
     /**
-     * The chosen controls: media keys above, the d-pad, back and home below; [compact], under the
-     * launcher, back and home, the d-pad and the media keys side by side.
-     * Between sessions, where things are up to.
+     * Waiting for the head unit: the title and settings, and in the middle a calm pulse round the
+     * logo while Slipstream listens, quickening while it connects, with where things are up to;
+     * what's left to set up, and Slipstream turned off, with what sees to them.
      */
     @Composable
-    private fun Remote(modifier: Modifier, compact: Boolean) {
-        if (compact) {
-            Row(
-                modifier,
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (RemoteControl.NAV in controls) {
-                    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                        KeyButton(KeyEvent.KEYCODE_BACK, R.drawable.ic_sl_arrow_back, "Back", 52.dp)
-                        KeyButton(KEYCODE_HOME, R.drawable.ic_sl_home, "Home", 52.dp)
+    private fun Connect(shared: Shared) {
+        val wait = when {
+            !listening -> Wait.OFF
+            retryable -> Wait.FAILED
+            status == SlipstreamService.WAITING || status.startsWith("Session ended") -> Wait.WAITING
+            else -> Wait.CONNECTING
+        }
+        Column(Modifier.fillMaxSize().background(surface).safeDrawingPadding().padding(24.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) { Title(shared) }
+                SettingsButton()
+            }
+            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                if (maxWidth > maxHeight) {
+                    Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+                        Pulse(wait, shared, Modifier.weight(1f).fillMaxHeight())
+                        Spacer(Modifier.width(24.dp))
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            Waiting(wait, shared)
+                        }
+                    }
+                } else {
+                    Column(
+                        Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        Pulse(wait, shared, Modifier.fillMaxWidth().height(PULSE))
+                        Spacer(Modifier.height(24.dp))
+                        Waiting(wait, shared)
                     }
                 }
-                if (RemoteControl.DPAD in controls) {
-                    Box(Modifier.size(COMPACT_DPAD)) { DPad() }
+            }
+        }
+    }
+
+    /** Where things are up to, and what to do about it. */
+    @Composable
+    private fun Waiting(wait: Wait, shared: Shared) {
+        val headline = when {
+            wait == Wait.OFF -> "Slipstream is off"
+            status != SlipstreamService.WAITING -> status
+            issues.isNotEmpty() -> "Setup needed"
+            else -> "Ready to connect"
+        }
+        Text(
+            headline,
+            style = hudText(if (headline.length > 40) 18.sp else 24.sp, FontWeight.SemiBold, onSurface),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.shared(shared, STATUS),
+        )
+        val hint = when {
+            wait == Wait.OFF -> "It won't connect to the head unit until it's turned on"
+            wait == Wait.WAITING && issues.isEmpty() -> "Turn on the head unit and accept CarPlay"
+            else -> null
+        }
+        if (hint != null) {
+            Spacer(Modifier.height(8.dp))
+            Text(hint, style = hudCaption().copy(color = onSurfaceVariant), textAlign = TextAlign.Center)
+        }
+        when (wait) {
+            Wait.OFF -> Pill("Turn on") {
+                SlipstreamMode.setListening(this@PhoneRemoteActivity, true)
+                SlipstreamMode.listen(this@PhoneRemoteActivity)
+                listening = true
+            }
+            Wait.FAILED -> Pill("Retry") {
+                startService(
+                    Intent(this@PhoneRemoteActivity, SlipstreamService::class.java)
+                        .setAction(SlipstreamService.ACTION_RETRY),
+                )
+            }
+            else -> {}
+        }
+        if (issues.isNotEmpty()) {
+            Spacer(Modifier.height(24.dp))
+            Column(
+                Modifier.widthIn(max = 420.dp).fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(sheet)
+                    .padding(16.dp),
+            ) {
+                for (issue in issues) {
+                    Row(Modifier.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(painterResource(R.drawable.ic_sl_info), null, tint = tertiary, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Text(issue.text, style = hudText(15.sp, FontWeight.Normal, onSurface))
+                    }
                 }
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                    Pill("Settings", ::openSettings)
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun Pill(label: String, onTap: () -> Unit) {
+        Box(
+            Modifier
+                .padding(top = 16.dp)
+                .height(52.dp)
+                .widthIn(min = 140.dp)
+                .tappable(CircleShape, onClick = onTap)
+                .background(primaryContainer)
+                .padding(horizontal = 24.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(label.uppercase(), style = hudText(17.sp, FontWeight.SemiBold, onPrimaryContainer))
+        }
+    }
+
+    /** Rings spreading from the logo: slow while listening, quick while connecting, gone otherwise. */
+    @Composable
+    private fun Pulse(wait: Wait, shared: Shared, modifier: Modifier) {
+        val logo = remember { getDrawable(R.mipmap.ic_sl_launcher) }
+        val speed by animateFloatAsState(
+            when (wait) {
+                Wait.WAITING -> 1f
+                Wait.CONNECTING -> 3f
+                else -> 0f
+            },
+            tween(PULSE_EASE_MS),
+            label = "speed",
+        )
+        val strength by animateFloatAsState(
+            when (wait) {
+                Wait.WAITING -> 0.5f
+                Wait.CONNECTING -> 1f
+                else -> 0f
+            },
+            tween(PULSE_EASE_MS),
+            label = "strength",
+        )
+        var phase by remember { mutableFloatStateOf(0f) }
+        LaunchedEffect(Unit) {
+            var last = 0L
+            while (true) {
+                withFrameNanos { now ->
+                    if (last != 0L) phase = (phase + (now - last) / 1e9f * speed / RING_PERIOD_S) % 1f
+                    last = now
+                }
+            }
+        }
+        Box(modifier, contentAlignment = Alignment.Center) {
+            Canvas(Modifier.fillMaxSize()) {
+                val inner = PULSE_LOGO.toPx() / 2
+                val outer = size.minDimension / 2
+                for (i in 0 until RINGS) {
+                    val t = (phase + i.toFloat() / RINGS) % 1f
+                    drawCircle(
+                        primary,
+                        radius = inner + (outer - inner) * t,
+                        alpha = (1f - t) * strength * 0.6f,
+                        style = Stroke(2.dp.toPx()),
+                    )
+                }
+            }
+            DrawableImage(
+                logo,
+                Modifier.shared(shared, LOGO).size(PULSE_LOGO).clip(CircleShape)
+                    .alpha(if (wait == Wait.OFF) 0.5f else 1f),
+            )
+        }
+    }
+
+    private fun openSettings() {
+        if (connected) shrink()
+        startActivity(Intent(this, SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    /**
+     * The chosen controls. [RemoteLayout.COLUMN]: media keys above, the d-pad, back and home
+     * below; [RemoteLayout.SIDE] the same, smaller, beside the launcher; [RemoteLayout.ROW], under
+     * the launcher, the d-pad and the media keys side by side, back and home below;
+     * [RemoteLayout.WIDE], landscape, back and home, the d-pad and the media keys side by side.
+     */
+    @Composable
+    private fun Remote(modifier: Modifier, layout: RemoteLayout) {
+        if (layout == RemoteLayout.SIDE) {
+            Column(
+                modifier,
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+            ) {
                 if (RemoteControl.MEDIA in controls) {
-                    Column(
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         KeyButton(KeyEvent.KEYCODE_MEDIA_PREVIOUS, R.drawable.ic_sl_skip_previous, "Previous track", 44.dp)
                         KeyButton(
-                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, R.drawable.ic_sl_play_pause, "Play or pause", 52.dp,
+                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, R.drawable.ic_sl_play_pause, "Play or pause", 56.dp,
                             primaryContainer, onPrimaryContainer,
                         )
                         KeyButton(KeyEvent.KEYCODE_MEDIA_NEXT, R.drawable.ic_sl_skip_next, "Next track", 44.dp)
                     }
                 }
+                if (RemoteControl.DPAD in controls) {
+                    Box(Modifier.weight(1f, fill = false).widthIn(max = 220.dp).aspectRatio(1f)) { DPad() }
+                }
+                if (RemoteControl.NAV in controls) NavButtons(60.dp, 20.dp)
+            }
+            return
+        }
+        if (layout == RemoteLayout.ROW || layout == RemoteLayout.WIDE) {
+            val media: @Composable () -> Unit = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    KeyButton(KeyEvent.KEYCODE_MEDIA_PREVIOUS, R.drawable.ic_sl_skip_previous, "Previous track", 44.dp)
+                    KeyButton(
+                        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, R.drawable.ic_sl_play_pause, "Play or pause", 52.dp,
+                        primaryContainer, onPrimaryContainer,
+                    )
+                    KeyButton(KeyEvent.KEYCODE_MEDIA_NEXT, R.drawable.ic_sl_skip_next, "Next track", 44.dp)
+                }
+            }
+            if (layout == RemoteLayout.WIDE) {
+                Row(
+                    modifier,
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (RemoteControl.NAV in controls) NavButtons(72.dp, 24.dp)
+                    if (RemoteControl.DPAD in controls) {
+                        Box(Modifier.weight(1f, fill = false).widthIn(max = 220.dp).aspectRatio(1f)) { DPad() }
+                    }
+                    if (RemoteControl.MEDIA in controls) media()
+                }
+                return
+            }
+            Column(
+                modifier,
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                if (RemoteControl.DPAD in controls || RemoteControl.MEDIA in controls) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (RemoteControl.DPAD in controls) Box(Modifier.size(COMPACT_DPAD)) { DPad() }
+                        if (RemoteControl.MEDIA in controls) media()
+                    }
+                }
+                if (RemoteControl.NAV in controls) NavButtons(64.dp, 32.dp)
             }
             return
         }
@@ -600,10 +874,6 @@ class PhoneRemoteActivity : ComponentActivity() {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(28.dp, Alignment.CenterVertically),
         ) {
-            if (!connected && !preview) {
-                Status()
-                return@Column
-            }
             if (RemoteControl.MEDIA in controls) {
                 Row(horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
                     KeyButton(KeyEvent.KEYCODE_MEDIA_PREVIOUS, R.drawable.ic_sl_skip_previous, "Previous track", 64.dp)
@@ -619,34 +889,16 @@ class PhoneRemoteActivity : ComponentActivity() {
                     DPad()
                 }
             }
-            if (RemoteControl.NAV in controls) {
-                Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                    KeyButton(KeyEvent.KEYCODE_BACK, R.drawable.ic_sl_arrow_back, "Back", 64.dp)
-                    KeyButton(KEYCODE_HOME, R.drawable.ic_sl_home, "Home", 64.dp)
-                }
-            }
+            if (RemoteControl.NAV in controls) NavButtons(72.dp, 32.dp)
         }
     }
 
+    /** Back and home, side by side, as the head unit's system bar draws them. */
     @Composable
-    private fun Status() {
-        Text(status, style = hudText(26.sp, FontWeight.SemiBold, onSurfaceVariant), textAlign = TextAlign.Center)
-        if (retryable) {
-            Box(
-                Modifier
-                    .width(160.dp)
-                    .height(64.dp)
-                    .tappable(CircleShape) {
-                        startService(
-                            Intent(this@PhoneRemoteActivity, SlipstreamService::class.java)
-                                .setAction(SlipstreamService.ACTION_RETRY),
-                        )
-                    }
-                    .background(primaryContainer),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("RETRY", style = hudText(20.sp, FontWeight.SemiBold, onPrimaryContainer))
-            }
+    private fun NavButtons(size: Dp, gap: Dp) {
+        Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+            KeyButton(KeyEvent.KEYCODE_BACK, R.drawable.ic_sl_nav_back, "Back", size)
+            KeyButton(KEYCODE_HOME, R.drawable.ic_sl_nav_home, "Home", size)
         }
     }
 
@@ -711,41 +963,40 @@ class PhoneRemoteActivity : ComponentActivity() {
             }
     }
 
-    /** Slipstream's settings, over this as picture-in-picture. */
+    /** Slipstream's settings; over this as picture-in-picture during a session. */
     @Composable
     private fun SettingsButton() {
         Box(
-            Modifier.size(48.dp).tappable(CircleShape) {
-                shrink()
-                startActivity(
-                    Intent(this@PhoneRemoteActivity, SettingsActivity::class.java)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        .putExtra(SettingsActivity.EXTRA_STAY, true),
-                )
-            }.background(neutral),
+            Modifier.size(48.dp).tappable(CircleShape, onClick = ::openSettings).background(neutral),
             contentAlignment = Alignment.Center,
         ) {
             Icon(painterResource(R.drawable.settings_24), "Slipstream settings", tint = onSurface, modifier = Modifier.size(24.dp))
         }
     }
 
-    /** Disconnects: a dot dragged the length of its track, from its start, which a pocket won't. */
+    /**
+     * Disconnects: a dot dragged the length of its track, from its start, which a pocket won't.
+     * Left to right, or [vertical], bottom to top.
+     */
     @Composable
-    private fun EndSwipe() {
+    private fun EndSwipe(track: Dp = END_TRACK, vertical: Boolean = false) {
         var progress by remember { mutableStateOf(0f) }
+        val travel = track - DOT - DOT_INSET * 2
+        val thickness = DOT + DOT_INSET * 2
         Box(
             Modifier
-                .width(END_TRACK)
-                .height(DOT + DOT_INSET * 2)
+                .size(if (vertical) thickness else track, if (vertical) track else thickness)
                 .border(2.dp, tertiary.copy(alpha = 0.6f), CircleShape)
-                .pointerInput(Unit) {
+                .pointerInput(travel, vertical) {
                     awaitEachGesture {
                         val start = awaitFirstDown().position
-                        if (start.x > (DOT + DOT_INSET * 2 + TRACK_SLOP).toPx()) return@awaitEachGesture
+                        val reach = (thickness + TRACK_SLOP).toPx()
+                        if (if (vertical) start.y < size.height - reach else start.x > reach) return@awaitEachGesture
                         while (true) {
                             val change = awaitPointerEvent().changes.firstOrNull() ?: break
                             change.consume()
-                            progress = ((change.position.x - start.x) / END_TRAVEL.toPx()).coerceIn(0f, 1f)
+                            val moved = if (vertical) start.y - change.position.y else change.position.x - start.x
+                            progress = (moved / travel.toPx()).coerceIn(0f, 1f)
                             if (progress == 1f) {
                                 end()
                                 break
@@ -755,21 +1006,39 @@ class PhoneRemoteActivity : ComponentActivity() {
                         progress = 0f
                     }
                 },
-            contentAlignment = Alignment.CenterStart,
+            contentAlignment = if (vertical) Alignment.BottomCenter else Alignment.CenterStart,
         ) {
             Box(
-                Modifier.fillMaxSize().padding(start = DOT + DOT_INSET * 2).alpha(1f - progress),
+                Modifier.fillMaxSize()
+                    .padding(start = if (vertical) 0.dp else thickness, bottom = if (vertical) thickness else 0.dp)
+                    .alpha(1f - progress),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("SWIPE TO DISCONNECT", style = hudCaption().copy(color = onSurfaceVariant))
+                Text(
+                    "SWIPE TO DISCONNECT",
+                    style = hudCaption().copy(color = onSurfaceVariant),
+                    maxLines = 1,
+                    modifier = if (vertical) Modifier.readingUp() else Modifier,
+                )
             }
             Box(
                 Modifier
-                    .padding(start = DOT_INSET)
-                    .offset(x = END_TRAVEL * progress)
+                    .padding(start = if (vertical) 0.dp else DOT_INSET, bottom = if (vertical) DOT_INSET else 0.dp)
+                    .offset(x = if (vertical) 0.dp else travel * progress, y = if (vertical) -travel * progress else 0.dp)
                     .size(DOT)
                     .background(tertiary, CircleShape),
             )
+        }
+    }
+
+    /** Turned a quarter anticlockwise, laid out at its turned size: read bottom to top. */
+    private fun Modifier.readingUp(): Modifier = layout { measurable, constraints ->
+        val placeable = measurable.measure(
+            Constraints(maxWidth = constraints.maxHeight, maxHeight = constraints.maxWidth),
+        )
+        layout(placeable.height, placeable.width) {
+            val shift = (placeable.width - placeable.height) / 2
+            placeable.placeWithLayer(-shift, shift) { rotationZ = -90f }
         }
     }
 }
@@ -786,6 +1055,33 @@ private val DOT = 40.dp
 private val DOT_INSET = 8.dp
 /** How far outside the track a swipe may start. */
 private val TRACK_SLOP = 24.dp
-/** The end swipe's track length, and how far along it the dot travels. */
+/** The end swipe's track length, at most. */
 private val END_TRACK = 280.dp
-private val END_TRAVEL = END_TRACK - DOT - DOT_INSET * 2
+
+/** The waiting screen's pulse, the logo in its middle, and how long a ring takes to spread at the slow pace. */
+private val PULSE = 280.dp
+private val PULSE_LOGO = 96.dp
+private const val RINGS = 3
+private const val RING_PERIOD_S = 3.6f
+private const val PULSE_EASE_MS = 800
+/** The waiting screen giving way to the remote. */
+private const val SCREEN_MS = 500
+
+/** The shared elements' keys, between the waiting screen and the remote. */
+private const val LOGO = "logo"
+private const val TITLE = "title"
+private const val STATUS = "status"
+
+private enum class Wait { OFF, WAITING, CONNECTING, FAILED }
+
+private enum class RemoteLayout { COLUMN, ROW, SIDE, WIDE }
+
+/** What an element shared between the waiting screen and the remote moves within. */
+@OptIn(ExperimentalSharedTransitionApi::class)
+private class Shared(val scope: SharedTransitionScope, val visibility: AnimatedVisibilityScope)
+
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+private fun Modifier.shared(shared: Shared, key: String): Modifier = with(shared.scope) {
+    this@shared.sharedBounds(rememberSharedContentState(key), shared.visibility)
+}

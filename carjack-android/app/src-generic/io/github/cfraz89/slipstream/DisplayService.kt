@@ -62,6 +62,7 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
 
         const val PRIMARY_JOIN_MS = 20_000L
         const val PRIMARY_POLL_MS = 500L
+        const val WIFI_ON_MS = 5_000L
         val MAC = Regex("MAC: ([0-9a-fA-F:]{17})")
 
         /**
@@ -465,6 +466,15 @@ class DisplayService(private val context: Context?) : IDisplayService.Stub() {
      * it, so it's never joined outside a session.
      */
     override fun joinPrimary(ssid: String, passphrase: String?): Boolean {
+        // The app can't turn WiFi on itself, targeting Android 10 or later.
+        if ("Wifi is disabled" in run("cmd", "wifi", "status")) {
+            Log.i(TAG, "Turning WiFi on")
+            run("cmd", "wifi", "set-wifi-enabled", "enabled")
+            val on = SystemClock.uptimeMillis() + WIFI_ON_MS
+            while ("Wifi is disabled" in run("cmd", "wifi", "status") && SystemClock.uptimeMillis() < on) {
+                SystemClock.sleep(PRIMARY_POLL_MS)
+            }
+        }
         run("cmd", "wifi", "set-network-selection-config", "enabled", "enabled", "-a", "2")
         if (passphrase.isNullOrEmpty()) {
             run("cmd", "wifi", "connect-network", ssid, "open", "-d")

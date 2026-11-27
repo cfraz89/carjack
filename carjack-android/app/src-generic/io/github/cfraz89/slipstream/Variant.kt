@@ -84,7 +84,7 @@ object Variant {
     }
 
     fun openApp(context: Context): PendingIntent? = PendingIntent.getActivity(
-        context, 0, Intent(context, SettingsActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
+        context, 0, Intent(context, PhoneRemoteActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
     )
 
     /** How long the service's own teardown gets before the process goes. */
@@ -229,7 +229,7 @@ object Variant {
     fun openDisplay(context: Context, width: Int, height: Int, density: Int, target: Surface): Runnable? {
         if (!SlipstreamMode.isOn(context)) {
             val close = AndroidAuto.open(context, width, height, target)
-            showRemote(context, "Android Auto")
+            showRemote(context)
             return Runnable {
                 close.run()
                 hideRemote()
@@ -240,7 +240,7 @@ object Variant {
             Log.e(TAG, "No display: Shizuku isn't running or hasn't let Slipstream in")
             return null
         }
-        showRemote(context, "Slipstream mode")
+        showRemote(context)
         return Runnable {
             hideRemote()
             close.run()
@@ -250,8 +250,7 @@ object Variant {
     /** How long the phone remote waits, once the display's gone, for a mode change to bring one back. */
     private const val REMOTE_LINGER_MS = 500L
 
-    private fun showRemote(context: Context, mode: String) {
-        PhoneRemoteActivity.mode = mode
+    private fun showRemote(context: Context) {
         PhoneRemoteActivity.connected = true
         if (ShizukuDisplay.available()) {
             ShizukuDisplay.launchOnPhone(PHONE_REMOTE)

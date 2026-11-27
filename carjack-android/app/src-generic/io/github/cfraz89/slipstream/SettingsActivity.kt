@@ -3,14 +3,11 @@ package io.github.cfraz89.slipstream
 import android.Manifest
 import android.app.NotificationManager
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothManager
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
@@ -18,6 +15,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -40,6 +38,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.Image
@@ -74,10 +73,7 @@ class SettingsActivity : ComponentActivity() {
         private const val REQUEST_PERMISSIONS = 1
         private const val REQUEST_SHIZUKU = 4
         private const val DISCOVERABLE_SECONDS = 300
-        const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
-        /** Opened from the phone remote: stays, rather than going back to it mid-session. */
-        const val EXTRA_STAY = "stay"
-        private const val TAILSCALE_PACKAGE = "com.tailscale.ipn"
+        const val SHIZUKU_PACKAGE = SetupIssue.SHIZUKU_PACKAGE
 
         val PERMISSIONS = arrayOf(
             Manifest.permission.BLUETOOTH_CONNECT,
@@ -135,10 +131,6 @@ class SettingsActivity : ComponentActivity() {
                 }
             }
         }
-        if (savedInstanceState == null && PhoneRemoteActivity.connected && !intent.getBooleanExtra(EXTRA_STAY, false)) {
-            startActivity(Intent(this, PhoneRemoteActivity::class.java))
-            finish()
-        }
     }
 
     private val shizukuResult =
@@ -147,7 +139,7 @@ class SettingsActivity : ComponentActivity() {
     /** Whether a unit's link is up, for the Bluetooth shortcut. */
     private val prefsChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         // And the selected profile, which a connecting head unit can change.
-        if (key == "linked" || key == "vehicle" || key == "vehicles") {
+        if (key == "linked" || key == "vehicle" || key == "vehicles" || key == "listening") {
             runOnUiThread { revision++ }
         }
     }
@@ -161,7 +153,6 @@ class SettingsActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refresh()
-        SlipstreamMode.setListening(this, true)
         SlipstreamMode.listen(this)
         Thread { Variant.rememberBluetoothAddress(this) }.start()
     }
@@ -183,13 +174,15 @@ class SettingsActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun Screen() = key(revision) {
-        Page {
+    private fun Screen() {
+        // Outside the key, so a refresh keeps the scroll position.
+        val scroll = rememberScrollState()
+        key(revision) { Page(scroll) {
             Header()
             val steps = setupSteps()
             // Pairing has a card of its own, once there's Bluetooth to pair with.
             val unpaired = permissionsGranted() && bluetoothOn() && pairedDevices(this@SettingsActivity).isEmpty()
-            if (steps.isEmpty() && !unpaired) ReadyCard()
+            if (steps.isEmpty() && !unpaired && SlipstreamMode.isListening(this@SettingsActivity)) ReadyCard()
             ProfileBar(this@SettingsActivity, onEdit = { profilesOpen = true }) { revision++ }
             ModeCard()
             if (steps.isNotEmpty()) {
@@ -226,12 +219,12 @@ class SettingsActivity : ComponentActivity() {
             null -> {}
         }
         help?.let { HelpScreen(it) { help = null } }
-    }
+    } }
 
     @Composable
     private fun Header() {
         Row(
-            Modifier.padding(start = 24.dp, top = 24.dp, bottom = 16.dp),
+            Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 24.dp, bottom = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Image(painterResource(R.drawable.ic_sl_app), null, Modifier.size(56.dp))
@@ -245,6 +238,19 @@ class SettingsActivity : ComponentActivity() {
                     fontSize = 40.sp,
                     brush = Brush.horizontalGradient(listOf(colors.tertiary, colors.primary)),
                 ),
+            )
+            Spacer(Modifier.weight(1f))
+            Switch(
+                checked = SlipstreamMode.isListening(this@SettingsActivity),
+                onCheckedChange = { on ->
+                    SlipstreamMode.setListening(this@SettingsActivity, on)
+                    if (on) {
+                        SlipstreamMode.listen(this@SettingsActivity)
+                    } else {
+                        stopService(Intent(this@SettingsActivity, SlipstreamService::class.java))
+                    }
+                    revision++
+                },
             )
         }
     }
@@ -273,7 +279,7 @@ class SettingsActivity : ComponentActivity() {
                 SegmentedButton(
                     selected = slipstream == (index == 0),
                     onClick = {
-                        SlipstreamMode.setOn(this@SettingsActivity, index == 0)
+                        SlipstreamMode.setOn(this@SettingsActivity, index == 0, "settings")
                         revision++
                     },
                     shape = SegmentedButtonDefaults.itemShape(index, 2),
@@ -334,56 +340,36 @@ class SettingsActivity : ComponentActivity() {
         }
     }
 
-    private fun setupSteps(): List<Step> {
-        val steps = mutableListOf<Step>()
-        val shizuku = packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
-        if (shizuku == null) {
-            steps += Step("Shizuku not installed", "Install", SetupHelp.installShizuku, ::installShizuku)
-        } else if (!pingShizuku()) {
-            steps += Step("Shizuku not running", "Open", SetupHelp.shizukuStopped) { startActivity(shizuku) }
-        } else if (!ShizukuDisplay.available()) {
-            steps += Step("Shizuku not allowed", "Allow", SetupHelp.allowShizuku) {
+    private fun setupSteps(): List<Step> = SetupIssue.of(this).map { issue ->
+        val text = issue.text
+        when (issue) {
+            SetupIssue.SHIZUKU_MISSING -> Step(text, "Install", SetupHelp.installShizuku, ::installShizuku)
+            SetupIssue.SHIZUKU_STOPPED -> Step(text, "Open", SetupHelp.shizukuStopped) {
+                packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)?.let(::startActivity)
+            }
+            SetupIssue.SHIZUKU_DENIED -> Step(text, "Allow", SetupHelp.allowShizuku) {
                 Shizuku.requestPermission(REQUEST_SHIZUKU)
             }
-        }
-        if (!SlipstreamMode.isOn(this)) {
-            if (!AndroidAuto.installed(this)) {
-                steps += Step("Android Auto not installed", "Install", SetupHelp.installAndroidAuto) {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=${AndroidAuto.PACKAGE}")))
-                }
-            } else if (AndroidAuto.serverFound(this) == false) {
-                steps += Step("Android Auto server not running", "Open", SetupHelp.headUnitServer) {
-                    startActivity(AndroidAuto.settings())
-                }
+            SetupIssue.ANDROID_AUTO_MISSING -> Step(text, "Install", SetupHelp.installAndroidAuto) {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=${AndroidAuto.PACKAGE}")))
             }
-        }
-        // With Shizuku, autoSetUp sees to these.
-        if (!ShizukuDisplay.available()) {
-            if (!permissionsGranted()) {
-                steps += Step("Slipstream needs permissions", "Allow", SetupHelp.permissions) {
-                    requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS)
-                }
+            SetupIssue.ANDROID_AUTO_SERVER -> Step(text, "Open", SetupHelp.headUnitServer) {
+                startActivity(AndroidAuto.settings())
             }
-            if (!bluetoothOn()) {
-                steps += Step("Bluetooth is off", "Turn on", SetupHelp.bluetooth) {
-                    startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
-                }
+            SetupIssue.PERMISSIONS -> Step(text, "Allow", SetupHelp.permissions) {
+                requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS)
             }
-        }
-        // An app inside a VPN can't reach the head unit's Wi-Fi: the stream times out.
-        if (inVpn()) {
+            SetupIssue.BLUETOOTH_OFF -> Step(text, "Turn on", SetupHelp.bluetooth) {
+                startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+            }
             // Excluding an app is the VPN app's own setting; Android's VPN page only has on/off.
-            val tailscale = packageManager.getLaunchIntentForPackage(TAILSCALE_PACKAGE)
-            steps += if (tailscale != null) {
-                Step("Tailscale blocks the head unit: exclude Slipstream in split tunneling",
-                    "Tailscale", SetupHelp.tailscale) { startActivity(tailscale) }
-            } else {
-                Step("A VPN blocks the head unit: exclude Slipstream, or turn it off", "VPN", SetupHelp.vpn) {
-                    startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
-                }
+            SetupIssue.TAILSCALE -> Step(text, "Tailscale", SetupHelp.tailscale) {
+                packageManager.getLaunchIntentForPackage(SetupIssue.TAILSCALE_PACKAGE)?.let(::startActivity)
+            }
+            SetupIssue.VPN -> Step(text, "VPN", SetupHelp.vpn) {
+                startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
             }
         }
-        return steps
     }
 
     /** First-time pairing, step by step: the head unit searches, the phone is found, codes match. */
@@ -645,24 +631,10 @@ class SettingsActivity : ComponentActivity() {
         }, "slipstream-setup").start()
     }
 
-    private fun permissionsGranted() = granted(PERMISSIONS)
+    private fun permissionsGranted() = SetupIssue.permissionsGranted(this)
 
     private fun granted(permissions: Array<String>) =
         permissions.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
 
-    private fun bluetoothOn(): Boolean =
-        getSystemService(BluetoothManager::class.java).adapter?.isEnabled == true
-
-    /** This app's traffic goes through a VPN. */
-    private fun inVpn(): Boolean {
-        val cm = getSystemService(ConnectivityManager::class.java)
-        val caps = cm.getNetworkCapabilities(cm.activeNetwork)
-        return caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
-    }
-
-    private fun pingShizuku() = try {
-        Shizuku.pingBinder()
-    } catch (e: RuntimeException) {
-        false
-    }
+    private fun bluetoothOn(): Boolean = SetupIssue.bluetoothOn(this)
 }

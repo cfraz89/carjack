@@ -3,6 +3,7 @@ package io.github.cfraz89.slipstream
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.util.Log
 
 /**
  * What the head unit gets, a setting: Slipstream mode, any of the phone's own apps, or Android Auto.
@@ -18,7 +19,8 @@ object SlipstreamMode {
     /** Anything but Android Auto chosen outright, so unset or unknown values are Slipstream mode. */
     fun isOn(context: Context) = Variant.prefs(context).getString(PREF, SLIPSTREAM) != ANDROID_AUTO
 
-    fun setOn(context: Context, on: Boolean) {
+    fun setOn(context: Context, on: Boolean, from: String) {
+        Log.i("carjack", "Mode: ${if (on) "Slipstream" else "Android Auto"}, from $from")
         Variant.prefs(context).edit().putString(PREF, if (on) SLIPSTREAM else ANDROID_AUTO).commit()
         Session.current?.layoutChanged()
     }
@@ -30,7 +32,7 @@ object SlipstreamMode {
     fun ready(context: Context) =
         SettingsActivity.PERMISSIONS.all { context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
 
-    /** Whether to listen; off from the notification's Turn off until the app is next used. */
+    /** Whether to listen: the switch at the top of the app, which the notification's Turn off turns off. */
     fun isListening(context: Context) = Profiles.global(context).getBoolean("listening", true)
 
     fun setListening(context: Context, on: Boolean) {

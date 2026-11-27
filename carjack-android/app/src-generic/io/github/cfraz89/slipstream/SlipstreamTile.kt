@@ -26,7 +26,7 @@ class SlipstreamTile : TileService() {
     private var profile: android.content.SharedPreferences? = null
 
     override fun onClick() {
-        SlipstreamMode.setOn(this, !SlipstreamMode.isOn(this))
+        SlipstreamMode.setOn(this, !SlipstreamMode.isOn(this), "the Quick Settings tile")
     }
 
     private fun show() {
