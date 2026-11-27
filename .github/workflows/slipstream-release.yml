@@ -1,0 +1,133 @@
+# Slipstream built in carjack-android/Containerfile, signed with the release key and published as a
+# GitHub release, where Obtainium picks it up. Started by pushing a slipstream-v<versionName> tag:
+# `just slipstream-release`. A version with a hyphen (0.7.0-beta1) is a pre-release. Run by hand,
+# it only builds, the APK kept as the run's artifact.
+#
+# Secrets: SLIPSTREAM_KEYSTORE (release.jks, base64), SLIPSTREAM_KEYSTORE_PASS, SENTRY_DSN, and
+# SENTRY_AUTH_TOKEN for native symbols (optional).
+name: Slipstream release
+
+on:
+  push:
+    tags: ["slipstream-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the tag matches the version
+        id: version
+        run: |
+          version=$(sed -n 's/^ *versionName = "\(.*\)"/\1/p' carjack-android/gradle/slipstream/build.gradle.kts)
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "slipstream-v$version" ]; then
+            echo "$GITHUB_REF_NAME doesn't match versionName $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check the builds
+        run: python3 carjack-android/check-builds.py
+
+      # The runner's own SDKs, unused: the image brings its own, and needs the room.
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: carjack-android
+          file: carjack-android/Containerfile
+          tags: carjack-android-build
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: slipstream-${{ hashFiles('Cargo.lock', 'carjack-android/**/*.kts', 'carjack-android/gradle.properties') }}
+          restore-keys: slipstream-
+
+      - name: Release key
+        env:
+          KEYSTORE: ${{ secrets.SLIPSTREAM_KEYSTORE }}
+          KEYSTORE_PASS: ${{ secrets.SLIPSTREAM_KEYSTORE_PASS }}
+        run: |
+          [ -n "$KEYSTORE" ] && [ -n "$KEYSTORE_PASS" ] || { echo "No release key in the secrets" >&2; exit 1; }
+          keys=$RUNNER_TEMP/keys
+          mkdir -p $keys
+          echo "$KEYSTORE" | base64 -d > $keys/release.jks
+          printf '%s' "$KEYSTORE_PASS" > $keys/keystore.pass
+
+      - name: Build
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          mkdir -p ~/.gradle ~/.cargo
+          docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp \
+            -v $PWD:/src -w /src/carjack-android \
+            -v ~/.gradle:/gradle -e GRADLE_USER_HOME=/gradle -v ~/.cargo:/cargo -e CARGO_HOME=/cargo \
+            -v $RUNNER_TEMP/keys:/keys:ro -e SLIPSTREAM_KEYS=/keys -e SENTRY_DSN \
+            carjack-android-build gradle --no-daemon -q :slipstream:assembleRelease
+          cp target/gradle/slipstream/outputs/apk/release/slipstream-release.apk \
+            target/Slipstream-${{ steps.version.outputs.version }}.apk
+
+      - name: Check the signature
+        run: |
+          docker run --rm -v $PWD:/src -w /src carjack-android-build \
+            /opt/android-sdk/build-tools/36.0.0/apksigner verify --print-certs \
+            target/Slipstream-${{ steps.version.outputs.version }}.apk > certs.txt
+          grep "CN=Slipstream" certs.txt >/dev/null || { echo "Not signed with the release key" >&2; exit 1; }
+
+      - name: Symbols for Sentry
+        if: github.ref_type == 'tag'
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_URL: https://de.sentry.io/
+          SENTRY_ORG: cfraz89
+          SENTRY_PROJECT: carjack-android
+        run: |
+          if [ -z "$SENTRY_AUTH_TOKEN" ]; then echo "No SENTRY_AUTH_TOKEN: symbols not uploaded"; exit 0; fi
+          curl -sL https://sentry.io/get-cli/ | INSTALL_DIR=$RUNNER_TEMP sh
+          $RUNNER_TEMP/sentry-cli debug-files upload \
+            target/gradle-cargo/aarch64-linux-android/release/libcarjack_android.so
+
+      - name: Keep the APK
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Slipstream-${{ steps.version.outputs.version }}
+          path: target/Slipstream-${{ steps.version.outputs.version }}.apk
+
+      - name: Publish
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tag=$GITHUB_REF_NAME
+          # The app's changes since the last release, for the notes.
+          last=$(git tag -l 'slipstream-v*' --sort=-creatordate | grep -vx "$tag" | head -1)
+          notes=""
+          if [ -n "$last" ]; then
+            notes=$(git log --format='- %s' $last..$tag -- carjack-android libcarjack)
+          fi
+          notes="${notes:-First release}"$'\n\n'"$(cat carjack-android/known-to-work.md)"
+          prerelease=""
+          case "$VERSION" in *-*) prerelease=--prerelease ;; esac
+          gh release create "$tag" target/Slipstream-$VERSION.apk --verify-tag \
+            --title "Slipstream $VERSION" --notes "$notes" $prerelease

@@ -149,41 +149,25 @@ motopod: (_gradle ":motopod:motopodApk")
     cp target/gradle/motopod/outputs/Motopod.apk target/Motopod.apk
     ls -l target/Motopod.apk
 
-# Slipstream built, signed with the release key (~/.config/slipstream) and published as a GitHub
-# release, where Obtainium picks it up. Bump versionCode and versionName in
-# carjack-android/gradle/slipstream/build.gradle.kts first; commit and push.
-# prerelease=true marks it a pre-release (Obtainium installs those only when told to).
+# Slipstream released: tags HEAD slipstream-v<versionName> and pushes the tag, and GitHub Actions
+# (.github/workflows/slipstream-release.yml) builds, signs and publishes it, where Obtainium picks
+# it up. Bump versionCode and versionName in carjack-android/gradle/slipstream/build.gradle.kts
+# first; commit and push. A version with a hyphen (0.7.0-beta1) is a pre-release.
 [script('bash')]
-slipstream-release prerelease="false": slipstream
+slipstream-release:
     set -euo pipefail
-    repo=cfraz89/carjack
     [ -z "$(git status --porcelain)" ] || { echo "carjack has uncommitted changes" >&2; exit 1; }
     commit=$(git rev-parse HEAD)
     git branch -r --contains "$commit" | grep -q . || { echo "HEAD isn't pushed" >&2; exit 1; }
-    tools="podman run --rm --security-opt label=disable -v {{justfile_directory()}}:/src -w /src \
-        localhost/carjack-android-build /opt/android-sdk/build-tools/36.0.0"
-    version=$($tools/aapt2 dump badging target/Slipstream.apk \
-        | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+    version=$(sed -n 's/^ *versionName = "\(.*\)"/\1/p' carjack-android/gradle/slipstream/build.gradle.kts)
     tag=slipstream-v$version
-    if gh release view "$tag" -R $repo >/dev/null 2>&1; then
+    if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
         echo "$tag is already released: bump the version" >&2
         exit 1
     fi
-    signed=target/Slipstream-$version.apk
-    cp target/Slipstream.apk $signed
-    # Not grep -q: quitting early kills apksigner with SIGPIPE, which pipefail counts as failure.
-    $tools/apksigner verify --print-certs $signed | grep "CN=Slipstream" >/dev/null \
-        || { echo "Not signed with the release key (~/.config/slipstream)" >&2; exit 1; }
-    # The app's changes since the last release, for the notes.
-    last=$(git tag -l 'slipstream-v*' --sort=-creatordate | head -1)
-    notes=""
-    if [ -n "$last" ]; then
-        notes=$(git log --format='- %s' $last..$commit -- carjack-android libcarjack)
-    fi
-    notes="${notes:-First release}"$'\n\n'"$(cat carjack-android/known-to-work.md)"
-    gh release create "$tag" $signed -R $repo --target "$commit" --title "Slipstream $version" \
-        --notes "$notes" {{ if prerelease == "true" { "--prerelease" } else { "" } }}
-    git fetch --tags -q
+    git tag "$tag" "$commit"
+    git push -q origin "$tag"
+    echo "Pushed $tag: https://github.com/cfraz89/carjack/actions"
 
 install-cuda-dmabuf-deps:
     {{toolbox_build}}sudo dnf install -y libEGL-devel libgbm-devel gstreamer1-plugins-bad-free-devel
