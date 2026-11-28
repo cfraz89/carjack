@@ -266,7 +266,7 @@ pub extern "system" fn Java_io_github_cfraz89_slipstream_Native_wifiJoined(
     ctl.wifi_joined(result);
 }
 
-/// One encoder output buffer. Blocks while the accessory is behind.
+/// One encoder output buffer. The session drops frames when the outgoing queue is full.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_cfraz89_slipstream_Native_pushFrame(
     env: JNIEnv,

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use deku::prelude::*;
 
 use catplay_carplay::carplay_tx::{
@@ -362,7 +362,8 @@ pub async fn run_video_stream(
             pts: Pts(pts_instant),
             width,
             height,
-            data: BytesMut::from(&encoded.data[..]),
+            // The screen transmitter rewrites NAL prefixes in place. Reuse the owned buffer.
+            data: Bytes::from(encoded.data).into(),
             config: encoded.config.map(|avcc| AvccConfigExtended {
                 hevc: codec.is_hevc(),
                 avcc,
