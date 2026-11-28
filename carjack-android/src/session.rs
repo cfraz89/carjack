@@ -52,11 +52,14 @@ pub struct JoinedWifi {
 
 struct FrameSink {
     tx: mpsc::Sender<EncodedFrame>,
+    keyframe_tx: mpsc::Sender<()>,
     codec: VideoCodec,
     /// Set by a keyframe request: the next keyframe carries the parameter sets.
     answer_with_config: Arc<AtomicBool>,
     /// The encoder's last parameter sets, for a keyframe that arrives without its own.
     parameter_sets: Vec<u8>,
+    /// A dropped access unit breaks the chain of references until the next queued keyframe.
+    needs_keyframe: bool,
 }
 
 /// The app's handle on a running session.
@@ -74,42 +77,56 @@ impl SessionCtl {
         }
     }
 
-    /// One encoder output buffer, Annex-B. Blocks while the stream is backed up, which is the
-    /// encoder's cue to drop frames.
+    /// One encoder output buffer, Annex-B. Return promptly so MediaCodec can release the buffer.
     pub fn push_frame(&self, data: &[u8], keyframe: bool, codec_config: bool) {
-        let (tx, frame) = {
-            let mut video = self.video.lock().unwrap();
-            let Some(sink) = video.as_mut() else { return };
-            let au = split_access_unit(data, sink.codec);
-            if !au.parameter_sets.is_empty() {
-                if au.parameter_sets != sink.parameter_sets {
-                    // To set against a reference stream when a unit shows nothing.
-                    tracing::info!(sets = ?au.parameter_sets, "Encoder parameter sets");
-                }
-                sink.parameter_sets = au.parameter_sets;
+        let mut video = self.video.lock().unwrap();
+        let Some(sink) = video.as_mut() else { return };
+        let au = split_access_unit(data, sink.codec);
+        if !au.parameter_sets.is_empty() {
+            if au.parameter_sets != sink.parameter_sets {
+                // To set against a reference stream when a unit shows nothing.
+                tracing::info!(sets = ?au.parameter_sets, "Encoder parameter sets");
             }
-            if codec_config || au.data.is_empty() {
+            sink.parameter_sets = au.parameter_sets;
+        }
+        if codec_config || au.data.is_empty() || (sink.needs_keyframe && !keyframe) {
+            return;
+        }
+        let permit = match sink.tx.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                if !sink.needs_keyframe {
+                    tracing::warn!(
+                        "Encoder output queue is full; dropping frames until a keyframe"
+                    );
+                }
+                sink.needs_keyframe = true;
+                // If this was the requested keyframe, queue a retry through the same rate limiter.
+                let _ = sink.keyframe_tx.try_send(());
                 return;
             }
-            let config = (keyframe
-                && !sink.parameter_sets.is_empty()
-                && sink.answer_with_config.swap(false, Ordering::Relaxed))
+            Err(mpsc::error::TrySendError::Closed(())) => return,
+        };
+        let config = (keyframe
+            && !sink.parameter_sets.is_empty()
+            && (sink.answer_with_config.swap(false, Ordering::Relaxed) || sink.needs_keyframe))
             .then(|| AvccConfig {
                 nal_size_len: NAL_SIZE_LEN,
                 sps_pps: sink.parameter_sets.clone(),
             });
-            if config.is_some() {
-                tracing::debug!("Keyframe sent with the parameter sets");
-            }
-            let frame = EncodedFrame {
-                data: au.data,
-                nals: au.nals,
-                keyframe,
-                config,
-            };
-            (sink.tx.clone(), frame)
-        };
-        let _ = tx.blocking_send(frame);
+        if config.is_some() {
+            tracing::debug!("Keyframe sent with the parameter sets");
+        }
+        permit.send(EncodedFrame {
+            data: au.data,
+            nals: au.nals,
+            keyframe,
+            config,
+        });
+        if sink.needs_keyframe {
+            tracing::info!("Encoder output queue recovered on a keyframe");
+            sink.needs_keyframe = false;
+        }
     }
 }
 
@@ -303,9 +320,11 @@ pub async fn run(
     let answer_with_config = Arc::new(AtomicBool::new(true));
     *ctl.video.lock().unwrap() = Some(FrameSink {
         tx: video_tx,
+        keyframe_tx: keyframe_tx.clone(),
         codec,
         answer_with_config: answer_with_config.clone(),
         parameter_sets: Vec::new(),
+        needs_keyframe: false,
     });
     platform.start_video(&video);
 
@@ -382,25 +401,36 @@ mod tests {
         0, 0, 0, 1, 0x26, 0x01, 0xaf, // IDR
     ];
     const BARE_KEYFRAME: &[u8] = &[0, 0, 0, 1, 0x26, 0x01, 0xaf];
+    const DELTA: &[u8] = &[0, 0, 0, 1, 0x02, 0x01, 0xa0];
 
-    fn ctl_with_sink() -> (SessionCtl, mpsc::Receiver<EncodedFrame>, Arc<AtomicBool>) {
-        let (tx, rx) = mpsc::channel(8);
+    fn ctl_with_sink(
+        capacity: usize,
+    ) -> (
+        SessionCtl,
+        mpsc::Receiver<EncodedFrame>,
+        mpsc::Receiver<()>,
+        Arc<AtomicBool>,
+    ) {
+        let (tx, rx) = mpsc::channel(capacity);
+        let (keyframe_tx, keyframe_rx) = mpsc::channel(1);
         let answer = Arc::new(AtomicBool::new(true));
         let ctl = SessionCtl::default();
         *ctl.video.lock().unwrap() = Some(FrameSink {
             tx,
+            keyframe_tx,
             codec: VideoCodec::Hevc,
             answer_with_config: answer.clone(),
             parameter_sets: Vec::new(),
+            needs_keyframe: false,
         });
-        (ctl, rx, answer)
+        (ctl, rx, keyframe_rx, answer)
     }
 
     /// MediaCodec hands over the parameter sets once, in a buffer of their own; a keyframe that
     /// comes without them must still open the stream with them.
     #[test]
     fn a_bare_keyframe_takes_the_codec_config_buffers_parameter_sets() {
-        let (ctl, mut rx, _) = ctl_with_sink();
+        let (ctl, mut rx, _, _) = ctl_with_sink(1);
         ctl.push_frame(&KEYFRAME[..21], false, true);
         assert!(rx.try_recv().is_err(), "codec config is not a frame");
         ctl.push_frame(BARE_KEYFRAME, true, false);
@@ -409,10 +439,10 @@ mod tests {
         assert_eq!(frame.data, BARE_KEYFRAME);
     }
 
-    /// Only a keyframe request earns the next keyframe a config.
+    /// On an uncongested queue, only requested keyframes carry config.
     #[test]
     fn the_config_rides_only_on_requested_keyframes() {
-        let (ctl, mut rx, answer) = ctl_with_sink();
+        let (ctl, mut rx, _, answer) = ctl_with_sink(1);
         ctl.push_frame(KEYFRAME, true, false);
         assert!(rx.try_recv().unwrap().config.is_some());
         ctl.push_frame(KEYFRAME, true, false);
@@ -420,5 +450,42 @@ mod tests {
         answer.store(true, Ordering::Relaxed);
         ctl.push_frame(KEYFRAME, true, false);
         assert!(rx.try_recv().unwrap().config.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_full_queue_resumes_on_a_keyframe_with_config() {
+        let (ctl, mut rx, mut requests, answer) = ctl_with_sink(1);
+        ctl.push_frame(KEYFRAME, true, false);
+        // A full queue must still let the encoder callback return.
+        ctl.push_frame(DELTA, false, false);
+        requests.try_recv().unwrap();
+        ctl.push_frame(DELTA, false, false);
+        assert!(
+            requests.try_recv().is_err(),
+            "deltas must not flood requests"
+        );
+
+        // Even if the requested keyframe drops, keep its config and ask for another one.
+        answer.store(true, Ordering::Relaxed);
+        let mut new_keyframe = KEYFRAME.to_vec();
+        new_keyframe[20] = 0xc1;
+        ctl.push_frame(&new_keyframe, true, false);
+        requests.try_recv().unwrap();
+        assert!(answer.load(Ordering::Relaxed));
+        assert_eq!(rx.try_recv().unwrap().data, BARE_KEYFRAME);
+
+        ctl.push_frame(DELTA, false, false);
+        assert!(
+            rx.try_recv().is_err(),
+            "deltas cannot follow a dropped frame"
+        );
+        ctl.push_frame(BARE_KEYFRAME, true, false);
+        assert_eq!(
+            rx.try_recv().unwrap().config.unwrap().sps_pps,
+            new_keyframe[..21]
+        );
+        assert!(!answer.load(Ordering::Relaxed));
+        ctl.push_frame(DELTA, false, false);
+        assert_eq!(rx.try_recv().unwrap().data, DELTA);
     }
 }
